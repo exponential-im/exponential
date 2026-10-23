@@ -9,6 +9,7 @@ import { api } from '~/trpc/react';
 import { WeekPager, trpcErrorCode, useWeekPager } from './WeekPager';
 
 import './activity-home.css';
+import { Panel } from "~/app/_components/ui";
 
 /**
  * Weekly work digest — a personal, cross-workspace panel that sits atop the
@@ -83,7 +84,7 @@ function WeeklyWorkDigest() {
   const angles = data?.angles ?? [];
 
   return (
-    <section className="wsa-card wsa-digest" aria-label="Weekly work digest">
+    <Panel as="section" radius="xl" padding="none" className="wsa-card wsa-digest" aria-label="Weekly work digest">
       <div className="wsa-digest__head">
         <span className="wsa-digest__eyebrow">
           <IconUserStar size={14} stroke={1.8} />
@@ -183,7 +184,7 @@ function WeeklyWorkDigest() {
           ) : null}
         </>
       ) : null}
-    </section>
+    </Panel>
   );
 }
 

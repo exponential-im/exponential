@@ -22,6 +22,7 @@ import { STATUS_OPTIONS, type TicketStatus } from '~/lib/ticket-statuses';
 import { TicketStatusBadge } from '~/app/_components/product/TicketStatusBadge';
 import { InboxPeekDrawer, inboxPeekLinkProps } from './InboxPeek';
 import { useSetTicketStatus } from './useSetTicketStatus';
+import { Panel } from "~/app/_components/ui";
 
 type WaitingOnMe = RouterOutputs['inbox']['waitingOnMe'];
 
@@ -360,11 +361,11 @@ export function WaitingOnMeTab() {
 
   if (isLoading || !data) {
     return (
-      <section className="wsa-card">
+      <Panel as="section" radius="xl" padding="none" className="wsa-card">
         {[0, 1, 2, 3].map((i) => (
           <Skeleton key={i} height={40} mb={4} radius="sm" />
         ))}
-      </section>
+      </Panel>
     );
   }
 
@@ -372,17 +373,17 @@ export function WaitingOnMeTab() {
 
   if (counts.total === 0) {
     return (
-      <section className="wsa-card">
+      <Panel as="section" radius="xl" padding="none" className="wsa-card">
         <p className="wsa-feed__empty">
           Nothing is waiting on you — no open decisions, drafts to review, QA
           tickets, overdue actions or questions from an assistant.
         </p>
-      </section>
+      </Panel>
     );
   }
 
   return (
-    <section className="wsa-card">
+    <Panel as="section" radius="xl" padding="none" className="wsa-card">
       <Section
         label="Assistants asked you"
         shown={data.assistantQuestions.length}
@@ -501,6 +502,6 @@ export function WaitingOnMeTab() {
         hrefs={rowHrefs(data)}
         draftHrefs={data.agentDrafts.map(hrefs.agentDraft)}
       />
-    </section>
+    </Panel>
   );
 }

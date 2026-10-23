@@ -20,6 +20,7 @@ import { useAgentModal } from '~/providers/AgentModalProvider';
 import { useAiCapabilities } from '~/providers/AiCapabilitiesProvider';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { Panel } from "~/app/_components/ui";
 
 const FMT_DATE = (d: Date) =>
   d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -141,7 +142,7 @@ export function WeekInReview() {
   const delta = thisWeekTotal - (data?.lastWeekTotal ?? 0);
 
   return (
-    <section className="wsa-card wsa-week">
+    <Panel as="section" radius="xl" padding="none" className="wsa-card wsa-week">
       {/* ── Left column: textual summary ─────────────────────────────── */}
       <div className="wsa-week__left">
         <div className="wsa-week__eyebrow-row">
@@ -347,6 +348,6 @@ export function WeekInReview() {
           </>
         )}
       </div>
-    </section>
+    </Panel>
   );
 }
