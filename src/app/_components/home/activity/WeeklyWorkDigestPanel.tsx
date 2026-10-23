@@ -84,7 +84,7 @@ function WeeklyWorkDigest() {
   const angles = data?.angles ?? [];
 
   return (
-    <Panel as="section" radius="xl" padding="none" className="wsa-card wsa-digest" aria-label="Weekly work digest">
+    <Panel as="section" variant="plain" radius="xl" padding="none" className="wsa-card wsa-digest" aria-label="Weekly work digest">
       <div className="wsa-digest__head">
         <span className="wsa-digest__eyebrow">
           <IconUserStar size={14} stroke={1.8} />
