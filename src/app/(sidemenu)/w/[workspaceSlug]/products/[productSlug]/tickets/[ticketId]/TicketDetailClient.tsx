@@ -69,6 +69,7 @@ import {
 import { TagBadge } from "~/app/_components/TagBadge";
 import { TicketBodyEditor } from "~/app/_components/product/TicketBodyEditor";
 import { CollapsibleSection } from "~/app/_components/product/CollapsibleSection";
+import { invalidateTicketLists } from "~/app/_components/product/invalidateTicketLists";
 import { ActivityTimeline } from "~/app/_components/shared/ActivityTimeline";
 import { PersonPicker } from "~/app/_components/shared/PersonPicker";
 import {
@@ -373,7 +374,7 @@ export function TicketDetailClient() {
   const deleteTicket = api.product.ticket.delete.useMutation({
     onSuccess: async () => {
       if (ticket?.product.id) {
-        await utils.product.ticket.listSummaries.invalidate({ productId: ticket.product.id });
+        await invalidateTicketLists(utils, { productId: ticket.product.id });
       }
       if (workspace) {
         router.push(`/w/${workspace.slug}/products/${productSlug}/tickets`);
