@@ -22,25 +22,49 @@ export type BlockTypeLabel =
  * afterwards (a heading left inside a quote would still read "Quote").
  *
  * Idempotence is the menu's job, not the commands': `setBlockquote` over a
- * selection inside a quote wraps it in a second one, so choosing the current
- * row is short-circuited rather than trusted to be harmless.
+ * selection inside a quote wraps it in a second one, so a row whose structure
+ * the selection already has is skipped rather than trusted to be harmless.
+ * That test is `isCurrent`, the structure itself, not the trigger's label:
+ * "Text" is also the label's fallback (a list item, a mixed selection), and
+ * those still need Text's `clearNodes()`.
  */
+const WRAPPERS = ["bulletList", "orderedList", "taskList", "blockquote"] as const;
+const inWrapper = (e: Editor) => WRAPPERS.some((wrapper) => e.isActive(wrapper));
+
 export const BLOCK_TYPES: {
   label: BlockTypeLabel;
+  /** The selection already is exactly this, so applying it would change nothing (or nest). */
+  isCurrent: (editor: Editor) => boolean;
   apply: (editor: Editor) => void;
 }[] = [
   {
     label: "Text",
+    isCurrent: (e) =>
+      e.isActive("paragraph") && !inWrapper(e) && !e.isActive("heading") && !e.isActive("codeBlock"),
     apply: (e) => e.chain().focus().clearNodes().setParagraph().run(),
   },
   ...([1, 2, 3] as const).map((level) => ({
     label: `Heading ${level}` as BlockTypeLabel,
+    isCurrent: (e: Editor) => e.isActive("heading", { level }) && !inWrapper(e),
     apply: (e: Editor) =>
       e.chain().focus().clearNodes().setNode("heading", { level }).run(),
   })),
-  { label: "Quote", apply: (e) => e.chain().focus().setBlockquote().run() },
-  { label: "Code block", apply: (e) => e.chain().focus().setCodeBlock().run() },
+  {
+    label: "Quote",
+    isCurrent: (e) => e.isActive("blockquote"),
+    apply: (e) => e.chain().focus().setBlockquote().run(),
+  },
+  {
+    label: "Code block",
+    isCurrent: (e) => e.isActive("codeBlock"),
+    apply: (e) => e.chain().focus().setCodeBlock().run(),
+  },
 ];
+
+/** What choosing a row does: apply it unless the selection already is exactly that. */
+export function chooseBlockType(editor: Editor, block: (typeof BLOCK_TYPES)[number]): void {
+  if (!block.isCurrent(editor)) block.apply(editor);
+}
 
 /**
  * Which block type the selection *is*.
@@ -87,11 +111,10 @@ export function BlockTypeMenu({ editor }: { editor: Editor }) {
           return (
             <Menu.Item
               key={block.label}
-              // Radio semantics: picking what is already picked changes
-              // nothing. See BLOCK_TYPES on why this is the menu's job.
-              onClick={() => {
-                if (!active) block.apply(editor);
-              }}
+              // Radio semantics: picking what the selection already is
+              // changes nothing. See BLOCK_TYPES on why this is the menu's job
+              // and why it asks the structure, not the label.
+              onClick={() => chooseBlockType(editor, block)}
               // Mantine hardcodes role="menuitem", so "this one is current" is
               // carried by aria-current and a check, not radio semantics.
               aria-current={active ? "true" : undefined}

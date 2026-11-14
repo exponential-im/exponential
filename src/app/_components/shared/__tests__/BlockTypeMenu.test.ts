@@ -11,7 +11,7 @@
 import { describe, expect, it, afterEach } from "vitest";
 import { Editor, type JSONContent } from "@tiptap/core";
 import { PRD_EXTENSIONS } from "~/lib/prd/extensions";
-import { BLOCK_TYPES, resolveBlockType } from "../BlockTypeMenu";
+import { BLOCK_TYPES, chooseBlockType, resolveBlockType } from "../BlockTypeMenu";
 
 let editor: Editor | null = null;
 
@@ -34,6 +34,12 @@ const para = (text: string) => ({
   type: "paragraph",
   content: [{ type: "text", text }],
 });
+
+const choose = (e: Editor, label: string) => {
+  const block = BLOCK_TYPES.find((b) => b.label === label);
+  if (!block) throw new Error(`No block type ${label}`);
+  chooseBlockType(e, block);
+};
 
 const apply = (e: Editor, label: string) => {
   const block = BLOCK_TYPES.find((b) => b.label === label);
@@ -173,5 +179,47 @@ describe("changing the block type", () => {
     expect(top).toHaveLength(1);
     expect(top[0]?.type).toBe("blockquote");
     expect(top[0]?.content).toHaveLength(2);
+  });
+
+  it("Text turns a bullet list item into a paragraph, though the label already says Text", () => {
+    const e = openAt({
+      type: "bulletList",
+      content: [{ type: "listItem", content: [para("item")] }],
+    });
+    e.commands.selectAll();
+    // The label's fallback is Text; the menu must still run Text's clearNodes.
+    expect(resolveBlockType(e)).toBe("Text");
+    choose(e, "Text");
+    expect(e.getJSON().content?.[0]?.type).toBe("paragraph");
+  });
+
+  it("Text on a mixed paragraph-and-heading selection makes both paragraphs", () => {
+    editor = new Editor({
+      extensions: PRD_EXTENSIONS,
+      content: {
+        type: "doc",
+        content: [
+          { type: "heading", attrs: { level: 2 }, content: [{ type: "text", text: "h" }] },
+          para("p"),
+        ],
+      },
+    });
+    editor.commands.selectAll();
+    choose(editor, "Text");
+    expect((editor.getJSON().content ?? []).map((n) => n.type)).toEqual(["paragraph", "paragraph"]);
+  });
+
+  it("choosing the row a plain paragraph already is runs nothing", () => {
+    const e = openAt(para("hello"));
+    const before = JSON.stringify(e.getJSON());
+    choose(e, "Text");
+    expect(JSON.stringify(e.getJSON())).toBe(before);
+  });
+
+  it("choosing Quote inside a quote does not nest a second one", () => {
+    const e = openAt({ type: "blockquote", content: [para("quoted")] });
+    e.commands.selectAll();
+    choose(e, "Quote");
+    expect(e.getJSON().content?.[0]?.content?.[0]?.type).toBe("paragraph");
   });
 });
