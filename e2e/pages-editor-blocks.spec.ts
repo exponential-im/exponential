@@ -192,45 +192,57 @@ test("the block-type dropdown names the current block and changes it", async ({ 
   await selectLine(page);
 
   const trigger = page.getByRole("button", { name: "Block type" });
+  const dropdown = page.getByRole("menu");
+  const item = (label: string) => page.getByRole("menuitem", { name: label, exact: true });
+  // Each step waits for the last dropdown to finish closing and for the
+  // bubble menu to be back, so a click never lands on a fading menu.
+  const open = async () => {
+    await expect(dropdown).toHaveCount(0);
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await expect(dropdown).toBeVisible();
+  };
+  const choose = async (label: string) => {
+    await item(label).click();
+    await expect(dropdown).toHaveCount(0);
+  };
+
   await expect(trigger).toHaveText(/Text/);
   // The H1/H2/H3 icon buttons it replaced are gone.
   await expect(page.getByRole("button", { name: "Heading 1", exact: true })).toHaveCount(0);
 
-  await trigger.click();
-  await expect(page.getByRole("menuitem", { name: "Text" })).toHaveAttribute("aria-current", "true");
+  await open();
+  await expect(item("Text")).toHaveAttribute("aria-current", "true");
   await page.waitForTimeout(600); // Mantine's menu fade, for the screenshot
   await page.screenshot({ path: shotPath("bubble-menu-block-type.png") });
-  await page.getByRole("menuitem", { name: "Heading 2" }).click();
+  await choose("Heading 2");
   await expect(editor.locator("h2")).toHaveText("Some prose");
 
   // And back out of a heading, which the icon buttons could not do.
   await selectLine(page);
   await expect(trigger).toHaveText(/Heading 2/);
-  await trigger.click();
-  await expect(page.getByRole("menuitem", { name: "Heading 2" })).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
-  await page.getByRole("menuitem", { name: "Quote" }).click();
+  await open();
+  await expect(item("Heading 2")).toHaveAttribute("aria-current", "true");
+  await choose("Quote");
   await expect(editor.locator("blockquote")).toContainText("Some prose");
 
   // A paragraph inside a quote makes both active; the dropdown names the
   // quote, and choosing Quote again leaves it as one quote.
   await selectLine(page);
   await expect(trigger).toHaveText(/Quote/);
-  await trigger.click();
-  await page.getByRole("menuitem", { name: "Quote" }).click();
+  await open();
+  await choose("Quote");
   await expect(editor.locator("blockquote")).toHaveCount(1);
 
   await selectLine(page);
-  await trigger.click();
-  await page.getByRole("menuitem", { name: "Code block" }).click();
+  await open();
+  await choose("Code block");
   await expect(editor.locator("pre")).toContainText("Some prose");
 
   await selectLine(page);
   await expect(trigger).toHaveText(/Code block/);
-  await trigger.click();
-  await page.getByRole("menuitem", { name: "Text" }).click();
+  await open();
+  await choose("Text");
   await expect(editor.locator("pre")).toHaveCount(0);
   await expect(editor.locator("p").first()).toHaveText("Some prose");
 });
