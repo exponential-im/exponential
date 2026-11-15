@@ -8,7 +8,7 @@
  */
 export const GITHUB_INSTALL_PARAM = "github";
 
-const RESULTS = ["connected", "updated", "failed"] as const;
+const RESULTS = ["connected", "updated", "failed", "forbidden"] as const;
 
 export type GithubInstallResult = (typeof RESULTS)[number];
 
@@ -56,6 +56,12 @@ export function githubInstallNotice(
         title: "GitHub wasn't connected",
         message:
           "The GitHub App install didn't complete. Try again from this section.",
+        color: "red",
+      };
+    case "forbidden":
+      return {
+        title: "GitHub wasn't connected",
+        message: "Only workspace owners and admins can connect GitHub.",
         color: "red",
       };
   }

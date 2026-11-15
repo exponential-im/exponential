@@ -6,10 +6,11 @@ import {
 } from "../installResult";
 
 describe("parseGithubInstallResult", () => {
-  it("accepts the three known results", () => {
+  it("accepts the known results", () => {
     expect(parseGithubInstallResult("connected")).toBe("connected");
     expect(parseGithubInstallResult("updated")).toBe("updated");
     expect(parseGithubInstallResult("failed")).toBe("failed");
+    expect(parseGithubInstallResult("forbidden")).toBe("forbidden");
   });
 
   it("ignores anything else, so a crafted link cannot choose the message", () => {
@@ -49,5 +50,6 @@ describe("githubInstallNotice", () => {
     expect(githubInstallNotice("connected").color).toBe("green");
     expect(githubInstallNotice("updated").color).toBe("green");
     expect(githubInstallNotice("failed").color).toBe("red");
+    expect(githubInstallNotice("forbidden").color).toBe("red");
   });
 });

@@ -10,7 +10,10 @@ import {
   workspaceGithubSettingsPath,
   type GithubInstallResult,
 } from "~/lib/github/installResult";
-import { resolveInstallReturnPath } from "~/server/services/github/installReturn";
+import {
+  resolveInstallReturnPath,
+  resolveInstallTarget,
+} from "~/server/services/github/installReturn";
 
 const callbackSchema = z.object({
   installation_id: z.string(),
@@ -39,7 +42,11 @@ async function workspaceReturnUrl(
   return path ? `${BASE_URL}${path}` : null;
 }
 
-/** The account integrations page shows `?error=` as a notification. */
+/**
+ * The account integrations page shows `?error=` as a notification. Every
+ * message passed here is written in this file: text from GitHub's query string
+ * or from an exception never reaches it, since the page displays it as is.
+ */
 function accountErrorUrl(message: string): string {
   return `${BASE_URL}/settings/integrations?error=${encodeURIComponent(message)}`;
 }
@@ -107,7 +114,7 @@ export async function GET(request: NextRequest) {
     if (params.error) {
       return NextResponse.redirect(
         (await workspaceReturnUrl(params.state, session.user.id, "failed")) ??
-          accountErrorUrl(params.error_description ?? params.error),
+          accountErrorUrl("GitHub reported that the install did not complete"),
       );
     }
 
@@ -204,13 +211,24 @@ export async function GET(request: NextRequest) {
     // workspace so repos can be associated (slice #3). This replaces the
     // legacy one-Integration-per-repo shape for the workspace flow.
     if (workspaceId) {
-      const membership = await db.workspaceUser.findFirst({
-        where: { workspaceId, userId: session.user.id },
-        select: { id: true, workspace: { select: { slug: true } } },
-      });
-      if (!membership) {
+      // Connecting GitHub is an owner/admin action, as it is in the UI and in
+      // the repository mutations. Membership alone is not enough: a viewer
+      // could otherwise build the install link by hand.
+      const target = await resolveInstallTarget(
+        db,
+        workspaceId,
+        session.user.id,
+      );
+      if (target.status === "not_member") {
+        processedInstallations.delete(installation_id);
         return NextResponse.redirect(
           accountErrorUrl("Not a member of the target workspace"),
+        );
+      }
+      if (target.status === "forbidden") {
+        processedInstallations.delete(installation_id);
+        return NextResponse.redirect(
+          `${BASE_URL}${workspaceGithubSettingsPath(target.slug, "forbidden")}`,
         );
       }
 
@@ -233,7 +251,7 @@ export async function GET(request: NextRequest) {
       // instead of the one that was just connected.
       return NextResponse.redirect(
         `${BASE_URL}${workspaceGithubSettingsPath(
-          membership.workspace.slug,
+          target.slug,
           validatedParams.setup_action === "update" ? "updated" : "connected",
         )}`,
       );
@@ -333,8 +351,9 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const errorMessage =
-      error instanceof Error ? error.message : "OAuth callback failed";
-    return NextResponse.redirect(accountErrorUrl(errorMessage));
+    // The exception is logged above; its text is not shown to the user.
+    return NextResponse.redirect(
+      accountErrorUrl("GitHub couldn't be connected. Please try again."),
+    );
   }
 }

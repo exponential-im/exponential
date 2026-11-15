@@ -3,10 +3,20 @@ import { mockDeep, mockReset } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
 const getWorkspaceMembership = vi.hoisted(() => vi.fn());
-vi.mock("~/server/services/access", () => ({ getWorkspaceMembership }));
+vi.mock("~/server/services/access", async () => {
+  // The role comparison is the real one; only the database lookup is stubbed.
+  const types = await vi.importActual<
+    typeof import("~/server/services/access/types")
+  >("~/server/services/access/types");
+  return {
+    getWorkspaceMembership,
+    hasMinimumWorkspaceRole: types.hasMinimumWorkspaceRole,
+  };
+});
 
 import {
   resolveInstallReturnPath,
+  resolveInstallTarget,
   workspaceIdFromInstallState,
 } from "../installReturn";
 
@@ -80,5 +90,48 @@ describe("resolveInstallReturnPath", () => {
     await expect(
       resolveInstallReturnPath(db, stateFor({ workspaceId: "ws_1" }), "u_1", "failed"),
     ).resolves.toBeNull();
+  });
+});
+
+describe("resolveInstallTarget", () => {
+  it.each(["owner", "admin"] as const)("lets an %s connect GitHub", async (role) => {
+    getWorkspaceMembership.mockResolvedValue({ role, workspaceId: "ws_1" });
+    db.workspace.findUnique.mockResolvedValue({ slug: "acme" } as never);
+
+    await expect(resolveInstallTarget(db, "ws_1", "u_1")).resolves.toEqual({
+      status: "ok",
+      slug: "acme",
+    });
+  });
+
+  it.each(["member", "viewer", "guest"] as const)(
+    "refuses a %s, who can open the workspace but not connect GitHub",
+    async (role) => {
+      getWorkspaceMembership.mockResolvedValue({ role, workspaceId: "ws_1" });
+      db.workspace.findUnique.mockResolvedValue({ slug: "acme" } as never);
+
+      await expect(resolveInstallTarget(db, "ws_1", "u_1")).resolves.toEqual({
+        status: "forbidden",
+        slug: "acme",
+      });
+    },
+  );
+
+  it("gives a non-member no slug to be sent to", async () => {
+    getWorkspaceMembership.mockResolvedValue(null);
+
+    await expect(resolveInstallTarget(db, "ws_other", "u_1")).resolves.toEqual({
+      status: "not_member",
+    });
+    expect(db.workspace.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("treats a deleted workspace as not a member", async () => {
+    getWorkspaceMembership.mockResolvedValue({ role: "owner", workspaceId: "ws_1" });
+    db.workspace.findUnique.mockResolvedValue(null);
+
+    await expect(resolveInstallTarget(db, "ws_1", "u_1")).resolves.toEqual({
+      status: "not_member",
+    });
   });
 });
