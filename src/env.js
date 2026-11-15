@@ -116,6 +116,10 @@ export const env = createEnv({
     // applicationServerKey for pushManager.subscribe(). Optional: push
     // notifications degrade gracefully when unset.
     NEXT_PUBLIC_VAPID_PUBLIC_KEY: z.string().optional(),
+    // PostHog session replay (SessionReplay.tsx). Optional: replay is off
+    // when the key is unset. Host defaults to PostHog EU cloud.
+    NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
+    NEXT_PUBLIC_POSTHOG_HOST: z.string().url().optional(),
   },
 
   /**
@@ -148,6 +152,8 @@ export const env = createEnv({
     NODE_ENV: process.env.NODE_ENV,
     NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
     NEXT_PUBLIC_VAPID_PUBLIC_KEY: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    NEXT_PUBLIC_POSTHOG_KEY: process.env.NEXT_PUBLIC_POSTHOG_KEY,
+    NEXT_PUBLIC_POSTHOG_HOST: process.env.NEXT_PUBLIC_POSTHOG_HOST,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
