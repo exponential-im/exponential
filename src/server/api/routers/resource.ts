@@ -254,7 +254,8 @@ export async function resolveResourceScope(ctx: PrincipalContext): Promise<Resou
  * The rows that are the scope's own: the only rows it may CHANGE, and the
  * whole of its Knowledge page and Reading list. Every write is scoped by
  * this, so a Resource shared through a Project stays its owner's to describe,
- * move, archive, delete, pin, re-index and mark read (ADR-0082).
+ * move, archive, delete, pin, re-index and mark read (ADR-0082). The one
+ * write that is not is `unfile`.
  */
 function scopedRows(scope: ResourceScope): Prisma.ResourceWhereInput {
   return {
@@ -908,6 +909,54 @@ export const resourceRouter = createTRPCRouter({
       }
 
       return { resource };
+    }),
+
+  // Unfile: take a Resource out of its Project. It goes back to its owner
+  // unshared, visible to them alone, and keeps everything else: description,
+  // read state, text and index. Nothing is destroyed, which is why this is
+  // the one thing a non-owner may do to a Resource (ADR-0082): anyone who can
+  // edit the Project may unfile what is filed under it, so a misfiled page is
+  // never stuck there while its owner is away. Say *unfile*, never remove or
+  // delete: those mean something else here.
+  unfile: resourceProcedure
+    .input(z.object({ id: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const { scope } = ctx;
+
+      // Only a Resource the caller can see: their own, or one filed under a
+      // Project they are in. Anything else does not exist to them.
+      const existing = await ctx.db.resource.findFirst({
+        where: { id: input.id, ...(await visibleRows(ctx.db, scope)) },
+        select: { id: true, userId: true, projectId: true, workspaceId: true },
+      });
+      if (!existing) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Resource not found" });
+      }
+      // Not filed: nothing to do, and saying so twice is not an error.
+      if (!existing.projectId) return { id: existing.id, projectId: null, unfiled: false };
+
+      if (existing.userId !== scope.ownerId) {
+        await assertProjectAccess(
+          ctx.db,
+          scope,
+          existing.projectId,
+          canEditProject,
+          new TRPCError({
+            code: "FORBIDDEN",
+            message: "Unfiling a Resource takes edit access to its project",
+          }),
+        );
+      }
+
+      const resource = await ctx.db.resource.update({
+        where: { id: existing.id },
+        data: { projectId: null },
+        select: { id: true, projectId: true, workspaceId: true },
+      });
+      // Its index entries leave the Project with it.
+      await moveChunksWithResource(ctx.db, resource);
+
+      return { id: resource.id, projectId: null, unfiled: true };
     }),
 
   // Reading list: move a resource between to_read / reading / read.

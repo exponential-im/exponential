@@ -1277,6 +1277,65 @@ describe("resource router — reading list (mocked)", () => {
     });
   });
 
+  describe("unfile (woody.wolf)", () => {
+    const filed = { id: "theirs", userId: "teammate", projectId: "p1", workspaceId: "w1" };
+    const project = (overrides: Record<string, unknown> = {}) =>
+      ({ createdById: "teammate", teamId: null, workspaceId: "w1", isPublic: false, isRestricted: false, ...overrides }) as never;
+
+    beforeEach(() => {
+      dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+      dbMock.resource.findFirst.mockResolvedValue(filed as never);
+      dbMock.resource.update.mockResolvedValue({ id: "theirs", projectId: null, workspaceId: "w1" } as never);
+    });
+
+    it("a Project editor takes someone else's Resource out of the Project and changes nothing else", async () => {
+      dbMock.project.findUnique.mockResolvedValue(project());
+      dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "member" } as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.unfile({ id: "theirs" });
+
+      expect(out).toEqual({ id: "theirs", projectId: null, unfiled: true });
+      expect(dbMock.resource.update.mock.calls[0]![0]).toMatchObject({
+        where: { id: "theirs" },
+        data: { projectId: null },
+      });
+      // Its index entries leave the Project too, so its text is no longer found by the members.
+      expect(dbMock.knowledgeChunk.updateMany).toHaveBeenCalledWith({
+        where: { sourceType: "resource", sourceId: "theirs" },
+        data: { projectId: null, workspaceId: "w1" },
+      });
+    });
+
+    it("refuses a member who can see the Project but not edit it", async () => {
+      dbMock.project.findUnique.mockResolvedValue(project());
+      dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "viewer" } as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await expect(caller.resource.unfile({ id: "theirs" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(dbMock.resource.update).not.toHaveBeenCalled();
+    });
+
+    it("looks only among Resources the caller can see", async () => {
+      dbMock.resource.findFirst.mockResolvedValue(null);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await expect(caller.resource.unfile({ id: "theirs" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toMatchObject({
+        id: "theirs",
+        OR: [{ userId: callerId }, expect.anything()],
+      });
+    });
+
+    it("the owner unfiles their own without needing edit access to the Project", async () => {
+      dbMock.resource.findFirst.mockResolvedValue({ ...filed, userId: callerId } as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await expect(caller.resource.unfile({ id: "theirs" })).resolves.toMatchObject({ unfiled: true });
+      expect(dbMock.project.findUnique).not.toHaveBeenCalled();
+    });
+  });
+
   describe("setReadStatus", () => {
     it("marks read with a readAt stamp and touches nothing else", async () => {
       dbMock.resource.findFirst.mockResolvedValue(fakeResource());
@@ -1471,6 +1530,19 @@ describe("resource router — agent works on its owner's list (mocked)", () => {
     expect(dbMock.resource.findMany.mock.calls[0]![0]!.where).toEqual({ ...own, archivedAt: null, identity: { not: null } });
     expect(dbMock.resource.findMany.mock.calls[1]![0]!.where).toMatchObject(own);
     expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ id: "theirs", ...own });
+  });
+
+  it("unfiles only its owner's Resources, never one a teammate filed", async () => {
+    dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+    dbMock.resource.findFirst.mockResolvedValue(null);
+
+    await expect(agentCaller().resource.unfile({ id: "theirs" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({
+      id: "theirs",
+      userId: OWNER_ID,
+      workspaceId: { in: ["w1"] },
+    });
   });
 
   it("marks read only on the owner's rows it can reach", async () => {

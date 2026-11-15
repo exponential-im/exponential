@@ -106,6 +106,7 @@ For Railway/Supabase/Neon, pgvector is pre-installed. Just run the migration.
 | `resource.list` | query | List resources with filters (project, workspace, tags, search) |
 | `resource.identities` | query | Identity, title, project and owner of every Resource the caller can see, paged by cursor. Takes no URL: clients match "already saved?" locally |
 | `resource.update` | mutation | Update a resource |
+| `resource.unfile` | mutation | Take a resource out of its project, back to its owner unshared. The owner, or anyone who can edit the project |
 | `resource.archive` | mutation | Soft delete a resource |
 | `resource.unarchive` | mutation | Restore an archived resource |
 | `resource.delete` | mutation | Permanently delete a resource and its embeddings |

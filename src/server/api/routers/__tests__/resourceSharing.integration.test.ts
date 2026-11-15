@@ -374,6 +374,81 @@ describe("Resources filed under a Project are shared with it", () => {
     });
   });
 
+  describe("Project editors can unfile a Resource (woody.wolf)", () => {
+    it("an editor unfiles a Resource they do not own: it leaves the Project for everyone and returns to its owner untouched", async () => {
+      const { owner, member, ws, proj, resource } = await setup();
+      await indexChunk(resource);
+      await createTestCaller(owner.id).resource.update({ id: resource.id, description: "For January" });
+      const before = await db.resource.findUniqueOrThrow({ where: { id: resource.id } });
+
+      const out = await createTestCaller(member.id).resource.unfile({ id: resource.id });
+
+      expect(out).toEqual({ id: resource.id, projectId: null, unfiled: true });
+      const after = await db.resource.findUniqueOrThrow({ where: { id: resource.id } });
+      expect(after).toMatchObject({
+        userId: owner.id,
+        projectId: null,
+        workspaceId: ws.id,
+        description: "For January",
+        readStatus: before.readStatus,
+        readAt: before.readAt,
+        pageText: before.pageText,
+        archivedAt: null,
+      });
+
+      // Gone from the Project for everyone, the owner included.
+      expect((await createTestCaller(member.id).resource.list({ projectId: proj.id })).resources).toEqual([]);
+      expect((await createTestCaller(owner.id).resource.list({ projectId: proj.id })).resources).toEqual([]);
+      // Nobody else can see it, in the reader, the identities read or search.
+      await expect(createTestCaller(member.id).resource.get({ id: resource.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect((await createTestCaller(member.id).resource.identities()).items).toEqual([]);
+      expect(await searchHits(member.id, ws.id)).toEqual([]);
+      // The owner still has it, index and all.
+      expect((await createTestCaller(owner.id).resource.get({ id: resource.id })).resource.id).toBe(resource.id);
+      expect(await searchHits(owner.id, ws.id)).toEqual([resource.id]);
+    });
+
+    it("a member who can see but not edit the Project cannot unfile", async () => {
+      const { ws, proj, resource } = await setup();
+      const viewer = await createUser(db, { name: "Viewer" });
+      await addWorkspaceMember(db, ws.id, viewer.id, "viewer");
+      const caller = createTestCaller(viewer.id);
+      expect((await caller.resource.list({ projectId: proj.id })).resources).toHaveLength(1);
+
+      await expect(caller.resource.unfile({ id: resource.id })).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+      expect((await db.resource.findUniqueOrThrow({ where: { id: resource.id } })).projectId).toBe(proj.id);
+    });
+
+    it("someone who cannot see the Resource is told it does not exist", async () => {
+      const { resource } = await setup({ isRestricted: true });
+      const outsider = await createUser(db, { name: "Outsider" });
+
+      await expect(createTestCaller(outsider.id).resource.unfile({ id: resource.id })).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+    });
+
+    it("unfiling is all an editor can do: delete, archive, describe and move stay the owner's", async () => {
+      const { member, resource } = await setup();
+      const caller = createTestCaller(member.id);
+      const notFound = { code: "NOT_FOUND" };
+
+      await expect(caller.resource.delete({ id: resource.id })).rejects.toMatchObject(notFound);
+      await expect(caller.resource.archive({ id: resource.id })).rejects.toMatchObject(notFound);
+      await expect(caller.resource.update({ id: resource.id, description: "x" })).rejects.toMatchObject(notFound);
+      await expect(caller.resource.update({ id: resource.id, projectId: null })).rejects.toMatchObject(notFound);
+    });
+
+    it("the owner can unfile their own, and unfiling twice is not an error", async () => {
+      const { owner, resource } = await setup();
+      const caller = createTestCaller(owner.id);
+
+      expect(await caller.resource.unfile({ id: resource.id })).toMatchObject({ unfiled: true });
+      expect(await caller.resource.unfile({ id: resource.id })).toEqual({ id: resource.id, projectId: null, unfiled: false });
+    });
+  });
+
   it("moving a Resource into a Project in another workspace takes its index entries with it", async () => {
     const { owner, member, ws, proj } = await setup();
     const personal = await createWorkspace(db, { ownerId: owner.id });
