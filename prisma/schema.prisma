@@ -3547,6 +3547,11 @@ model Resource {
   identity    String?
   rawContent  String? // Original HTML/content
   content     String? // Cleaned/processed text
+  /// Page text: the visible text of a page that has no Article body (a
+  /// listing, a search, a dashboard), as it read on the day it was saved.
+  /// Indexed for search and never rendered by a reader, which is why it is
+  /// not in `content`. Null whenever the Resource has a body.
+  pageText    String?
   contentType String  @default("web_page") // "web_page" | "document" | "pdf" | "bookmark" | "note"
   mimeType    String? // e.g., "text/html", "application/pdf"
 

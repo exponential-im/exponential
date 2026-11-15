@@ -48,6 +48,7 @@ model Resource {
   identity    String?                          // What a save is matched by; see src/lib/resources/identity.ts
   rawContent  String?                          // Original HTML/content
   content     String?                          // Cleaned text
+  pageText    String?                          // Visible text of a page with no article body: indexed, never rendered
   contentType String    @default("web_page")   // web_page | document | pdf | bookmark | note
   mimeType    String?
   author      String?
@@ -247,6 +248,11 @@ another address (other dates, a tracking parameter) updates the one Resource, an
 the address of the latest save. A client that can see the page may pass `declaredUrl` (its
 `og:url` or canonical link); it is used for matching only, and ignored unless it names the same
 host and path as `url`.
+
+A page that is not an article (a listing, a search, a dashboard) can be saved with `pageText`
+in place of `rawContent`. It is stored apart from the body, cut at 100,000 characters, indexed
+when `generateEmbeddings` is on, and never returned by `resource.get`, so no reader renders it.
+A save that carries a body as well keeps the body and stores no Page text.
 
 ### Semantic Search
 

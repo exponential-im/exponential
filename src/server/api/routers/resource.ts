@@ -105,6 +105,23 @@ export function readTransition(
 export const MAX_RAW_CONTENT_CHARS = 1_000_000;
 
 /**
+ * The most Page text a Resource keeps. Unlike an Article body, Page text is
+ * never read, only searched, so a long page is cut here instead of refused:
+ * the top of a listing is what says what it is.
+ */
+export const MAX_PAGE_TEXT_CHARS = 100_000;
+
+/**
+ * The Page text a save stores: the visible text of a page that has no
+ * Article body. A save that carries a body keeps the body and no Page text,
+ * and blank text is no text.
+ */
+export function pageTextToStore(pageText: string | undefined, hasBody: boolean): string | null {
+  if (hasBody || !pageText?.trim()) return null;
+  return pageText.slice(0, MAX_PAGE_TEXT_CHARS);
+}
+
+/**
  * The text a Resource is read and indexed from: what the caller supplied as
  * `content`, else Markdown derived from the article HTML in `rawContent`.
  * Derivation lives here, on the server, so every client (extension, web Save
@@ -295,6 +312,9 @@ export const resourceRouter = createTRPCRouter({
             message: `Article body is too large (over ${MAX_RAW_CONTENT_CHARS} characters)`,
           })
           .optional(),
+        // Page text: the visible text of a page with no Article body. Cut at
+        // MAX_PAGE_TEXT_CHARS, and dropped when the save carries a body.
+        pageText: z.string().optional(),
         contentType: contentTypeEnum.default("web_page"),
         mimeType: z.string().optional(),
         author: z.string().optional(),
@@ -342,6 +362,7 @@ export const resourceRouter = createTRPCRouter({
       // A save "carries a body" when it brings text or article HTML; a bare
       // link does not, and must not blank out a body saved earlier.
       const hasBody = Boolean(content ?? input.rawContent);
+      const pageText = pageTextToStore(input.pageText, hasBody);
 
       // One Resource per page (D-0027, ADR-0082): a page the caller already
       // saved is refreshed, never duplicated, and brought back to the queue
@@ -364,6 +385,11 @@ export const resourceRouter = createTRPCRouter({
         // A video's article is the body. Saving its page again (the extension
         // captures one) must not replace it with a scrape of the watch page.
         const replacesBody = hasBody && !isVideoArticle(existing);
+        // Page text is a record of the day it was saved, so saving the page
+        // again replaces it. A Resource that has a body keeps it and takes no
+        // Page text, whichever of the two arrived first.
+        const replacesPageText =
+          pageText !== null && !existing.content?.trim() && !existing.rawContent?.trim();
         const read = saveReadState(input, existing);
         const resource = await ctx.db.resource.update({
           where: { id: existing.id },
@@ -379,7 +405,14 @@ export const resourceRouter = createTRPCRouter({
               rawContent: input.rawContent,
               contentType: input.contentType,
               mimeType: input.mimeType,
+              pageText: null,
               wordCount,
+              fetchedAt: new Date(),
+            }),
+            ...(replacesPageText && {
+              title: input.title,
+              pageText,
+              contentType: input.contentType,
               fetchedAt: new Date(),
             }),
             ...(input.description !== undefined && { description: input.description }),
@@ -394,7 +427,7 @@ export const resourceRouter = createTRPCRouter({
         });
 
         processSaveAfterResponse(ctx.db, resource, {
-          embedBody: input.generateEmbeddings && replacesBody,
+          embedBody: input.generateEmbeddings && (replacesBody || replacesPageText),
           context: "re-save",
         });
 
@@ -408,6 +441,7 @@ export const resourceRouter = createTRPCRouter({
           ...addresses,
           content,
           rawContent: input.rawContent,
+          pageText,
           contentType: input.contentType,
           mimeType: input.mimeType,
           author: input.author,
@@ -424,7 +458,7 @@ export const resourceRouter = createTRPCRouter({
       });
 
       processSaveAfterResponse(ctx.db, resource, {
-        embedBody: input.generateEmbeddings && hasBody,
+        embedBody: input.generateEmbeddings && (hasBody || pageText !== null),
         context: "create",
       });
 
@@ -437,6 +471,8 @@ export const resourceRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const resource = await ctx.db.resource.findFirst({
         where: { id: input.id, ...scopedRows(ctx.scope) },
+        // Page text is searched, never read: no reader is sent it.
+        omit: { pageText: true },
         include: {
           project: { select: { id: true, name: true } },
           workspace: { select: { id: true, name: true } },
@@ -717,7 +753,7 @@ export const resourceRouter = createTRPCRouter({
         });
       }
 
-      if (!resource.content && !resource.rawContent) {
+      if (!resource.content && !resource.rawContent && !resource.pageText) {
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "Resource has no content to embed",

@@ -120,7 +120,9 @@ import {
   countWords,
   resaveReadStatus,
   saveReadState,
+  pageTextToStore,
   MAX_RAW_CONTENT_CHARS,
+  MAX_PAGE_TEXT_CHARS,
 } from "../resource";
 
 function fakeResource(overrides: Partial<Record<string, unknown>> = {}) {
@@ -215,6 +217,22 @@ describe("saveReadState", () => {
       readStatus: "reading",
       readAt,
     });
+  });
+});
+
+describe("pageTextToStore", () => {
+  it("keeps the text of a page that has no body", () => {
+    expect(pageTextToStore("Villa\n€1,240 total", false)).toBe("Villa\n€1,240 total");
+  });
+
+  it("drops it when the save carries a body, and when it is blank or absent", () => {
+    expect(pageTextToStore("Villa", true)).toBeNull();
+    expect(pageTextToStore("  \n ", false)).toBeNull();
+    expect(pageTextToStore(undefined, false)).toBeNull();
+  });
+
+  it("cuts text over the cap instead of refusing it", () => {
+    expect(pageTextToStore("x".repeat(MAX_PAGE_TEXT_CHARS + 50), false)).toHaveLength(MAX_PAGE_TEXT_CHARS);
   });
 });
 
@@ -464,6 +482,114 @@ describe("resource router — reading list (mocked)", () => {
       ).rejects.toMatchObject({ code: "BAD_REQUEST" });
       expect(dbMock.resource.create).not.toHaveBeenCalled();
       expect(dbMock.resource.update).not.toHaveBeenCalled();
+    });
+
+    describe("Page text (damp.gem)", () => {
+      const url = "https://www.airbnb.com/rooms/53368445";
+      const pageText = "Villa in Lanzarote\n€1,240 total\nFree cancellation";
+
+      it("stores the text of a page with no Article body, and indexes it when asked", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "listing", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: true });
+
+        const data = dbMock.resource.create.mock.calls[0]![0].data;
+        expect(data).toMatchObject({ pageText, wordCount: null });
+        expect(data.content).toBeUndefined();
+        expect(data.rawContent).toBeUndefined();
+        await flushAfter();
+        expect(embedResourceMock).toHaveBeenCalledWith("listing");
+      });
+
+      it("is not indexed unless the save asks for the Knowledge index", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "listing", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: false });
+
+        await flushAfter();
+        expect(embedResourceMock).not.toHaveBeenCalled();
+      });
+
+      it("a save that carries both keeps the body and stores no Page text", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "article", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Post", url, rawContent: "<p>the article</p>", pageText });
+
+        expect(dbMock.resource.create.mock.calls[0]![0].data).toMatchObject({
+          content: "the article",
+          pageText: null,
+        });
+      });
+
+      it("cuts Page text over the cap and still saves", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "long", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        const out = await caller.resource.create({
+          title: "Long",
+          url,
+          pageText: "x".repeat(MAX_PAGE_TEXT_CHARS + 1),
+          generateEmbeddings: false,
+        });
+
+        expect(out.created).toBe(true);
+        expect(dbMock.resource.create.mock.calls[0]![0].data.pageText).toHaveLength(MAX_PAGE_TEXT_CHARS);
+      });
+
+      it("saving the page again replaces the text and re-indexes it when indexing is on", async () => {
+        dbMock.resource.findFirst.mockResolvedValue(
+          fakeResource({ id: "old", url, title: "airbnb.com", pageText: "€1,100 total" }),
+        );
+        dbMock.resource.update.mockResolvedValue(fakeResource({ id: "old", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: true, forReference: true });
+
+        expect(dbMock.resource.update.mock.calls[0]![0].data).toMatchObject({ title: "Villa", pageText });
+        await flushAfter();
+        expect(embedResourceMock).toHaveBeenCalledWith("old");
+      });
+
+      it("a Resource that has a body keeps it and takes no Page text", async () => {
+        dbMock.resource.findFirst.mockResolvedValue(
+          fakeResource({ id: "old", url, title: "Kept", content: "the article", rawContent: "<p>the article</p>" }),
+        );
+        dbMock.resource.update.mockResolvedValue(fakeResource({ id: "old", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: true });
+
+        const data = dbMock.resource.update.mock.calls[0]![0].data;
+        expect(data).not.toHaveProperty("pageText");
+        expect(data).not.toHaveProperty("title");
+        await flushAfter();
+        expect(embedResourceMock).not.toHaveBeenCalled();
+      });
+
+      it("a body saved later replaces the Page text", async () => {
+        dbMock.resource.findFirst.mockResolvedValue(fakeResource({ id: "old", url, pageText: "€1,100 total" }));
+        dbMock.resource.update.mockResolvedValue(fakeResource({ id: "old", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Post", url, rawContent: "<p>the article</p>", generateEmbeddings: false });
+
+        expect(dbMock.resource.update.mock.calls[0]![0].data).toMatchObject({
+          content: "the article",
+          pageText: null,
+        });
+      });
+
+      it("the reader's read never carries Page text", async () => {
+        dbMock.resource.findFirst.mockResolvedValue(fakeResource({ id: "listing", url }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.get({ id: "listing" });
+
+        expect(dbMock.resource.findFirst.mock.calls[0]![0]).toMatchObject({ omit: { pageText: true } });
+      });
     });
 
     describe("identity and last-saved address (witty.otter)", () => {
