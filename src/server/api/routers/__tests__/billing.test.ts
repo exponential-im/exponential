@@ -71,10 +71,12 @@ vi.mock("~/server/db", () => {
 // save a key and what the app says back.
 const validateAnthropicKey = vi.hoisted(() => vi.fn());
 const saveModelKey = vi.hoisted(() => vi.fn());
+const removeModelKey = vi.hoisted(() => vi.fn());
 vi.mock("~/server/services/billing/modelKey", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   validateAnthropicKey,
   saveModelKey,
+  removeModelKey,
 }));
 
 import { createMockCaller } from "~/test/trpc-helpers";
@@ -217,6 +219,7 @@ describe("the workspace's own Anthropic key", () => {
     process.env.BILLING_MODE = "meter";
     validateAnthropicKey.mockReset().mockResolvedValue({ ok: true });
     saveModelKey.mockReset().mockResolvedValue({ last4: "7Q4x", status: "valid", checkedAt: new Date() });
+    removeModelKey.mockReset().mockResolvedValue(true);
     // humanOnlyProcedure looks the caller up to rule out an agent account.
     db.user.findUnique.mockResolvedValue({ isAgent: false } as never);
     db.integration.findFirst.mockResolvedValue(null);
@@ -306,5 +309,49 @@ describe("the workspace's own Anthropic key", () => {
     expect(status).toMatchObject({ modelKey: { last4: "7Q4x", status: "failing" } });
     expect(JSON.stringify(status)).not.toContain("sk-ant");
   });
-});
 
+  describe("removing it", () => {
+    const remove = (opts: { tokenType?: string } = {}) =>
+      createMockCaller({
+        userId: USER_ID,
+        db: db as unknown as PrismaClient,
+        tokenType: opts.tokenType,
+      }).billing.removeModelKey({ workspaceId: WORKSPACE_ID });
+
+    it.each(["owner", "admin"] as const)("lets an %s remove the workspace's key", async (role) => {
+      asRole(db, role);
+
+      await expect(remove()).resolves.toEqual({ removed: true });
+      expect(removeModelKey).toHaveBeenCalledWith(expect.anything(), WORKSPACE_ID);
+    });
+
+    it("is not an error when there is no key", async () => {
+      asRole(db, "owner");
+      removeModelKey.mockResolvedValue(false);
+
+      await expect(remove()).resolves.toEqual({ removed: false });
+    });
+
+    it.each(["member", "viewer"] as const)("refuses a %s and removes nothing", async (role) => {
+      asRole(db, role);
+
+      await expect(remove()).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(removeModelKey).not.toHaveBeenCalled();
+    });
+
+    it("refuses an agent acting for an owner", async () => {
+      asRole(db, "owner");
+
+      await expect(remove({ tokenType: "agent-context" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(removeModelKey).not.toHaveBeenCalled();
+    });
+
+    it("refuses on an install that does not meter", async () => {
+      delete process.env.BILLING_MODE;
+      asRole(db, "owner");
+
+      await expect(remove()).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
+      expect(removeModelKey).not.toHaveBeenCalled();
+    });
+  });
+});

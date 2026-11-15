@@ -20,6 +20,7 @@ vi.hoisted(() => {
 import {
   getModelKeyStatus,
   getWorkingModelKey,
+  removeModelKey,
   saveModelKey,
   validateAnthropicKey,
 } from "../modelKey";
@@ -148,6 +149,17 @@ describe("a saved key", () => {
 
     await expect(getWorkingModelKey(db, WORKSPACE)).resolves.toBeNull();
     await expect(getModelKeyStatus(db, WORKSPACE)).resolves.toBeNull();
+  });
+
+  it("is deleted whole on removal, and removing nothing reports that", async () => {
+    db.integration.deleteMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 0 });
+
+    await expect(removeModelKey(db, WORKSPACE)).resolves.toBe(true);
+    await expect(removeModelKey(db, WORKSPACE)).resolves.toBe(false);
+    // Scoped to this workspace's model key: no other integration can be caught by it.
+    expect(db.integration.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: WORKSPACE, type: "model_key", provider: "anthropic" },
+    });
   });
 
   it("cannot be read when the stored value does not decrypt", async () => {

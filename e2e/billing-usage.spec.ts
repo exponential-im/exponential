@@ -269,5 +269,15 @@ test("the Billing tab offers the key form and shows a saved key by its last four
   await page.getByRole("button", { name: "Replace" }).click();
   await expect(page.getByLabel("Anthropic API key")).toBeVisible();
   await page.screenshot({ path: test.info().outputPath("billing-model-key.png") });
+  await page.getByRole("button", { name: "Cancel" }).click();
+
+  // Removing it asks first, then puts the workspace back on the allowance.
+  await page.getByRole("button", { name: "Remove", exact: true }).click();
+  const confirm = page.getByRole("dialog", { name: "Remove this key?" });
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole("button", { name: "Remove key" }).click();
+  await expect(page.getByText("Ends in 7Q4x")).toHaveCount(0, { timeout: 15_000 });
+  await expect(page.getByLabel("Anthropic API key")).toBeVisible();
+  expect(await db.integration.count({ where: { workspaceId, type: "model_key" } })).toBe(0);
 });
 

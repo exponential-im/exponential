@@ -5,7 +5,12 @@ import { createTRPCRouter, humanOnlyProcedure, protectedProcedure } from "~/serv
 import { assertWorkspaceRole } from "~/server/services/access";
 import { resolveBillingMode } from "~/server/services/billing/config";
 import { decideAssistantAccess, getEntitlements, usedPercent } from "~/server/services/billing/entitlements";
-import { getModelKeyStatus, saveModelKey, validateAnthropicKey } from "~/server/services/billing/modelKey";
+import {
+  getModelKeyStatus,
+  removeModelKey,
+  saveModelKey,
+  validateAnthropicKey,
+} from "~/server/services/billing/modelKey";
 import { usagePeriodEnd } from "~/server/services/billing/usage";
 
 /** Workspace keys exist only on an install that meters Assistant use. */
@@ -79,5 +84,18 @@ export const billingRouter = createTRPCRouter({
 
       const saved = await saveModelKey(ctx.db, { workspaceId: input.workspaceId, apiKey: input.apiKey });
       return { last4: saved.last4, status: saved.status };
+    }),
+
+  /**
+   * Remove the workspace's own Anthropic key: owners and admins, signed in as
+   * themselves. The Assistant goes back to the hosted key and the monthly
+   * allowance. Removing a key that is not there is not an error.
+   */
+  removeModelKey: humanOnlyProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      assertBillingOn();
+      await assertWorkspaceRole(ctx.db, ctx.session.user.id, input.workspaceId, ["owner", "admin"]);
+      return { removed: await removeModelKey(ctx.db, input.workspaceId) };
     }),
 });

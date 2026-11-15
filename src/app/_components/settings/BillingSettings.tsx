@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Button, PasswordInput, Progress } from '@mantine/core';
+import { modals } from '@mantine/modals';
 import { notifications } from '@mantine/notifications';
 import { IconGauge, IconKey } from '@tabler/icons-react';
 import { api } from '~/trpc/react';
@@ -87,6 +88,20 @@ function ModelKeySection({
       notifications.show({ title: 'Key not saved', message: error.message, color: 'red' }),
   });
 
+  const removeKey = api.billing.removeModelKey.useMutation({
+    onSuccess: () => {
+      setIsReplacing(false);
+      void utils.billing.getStatus.invalidate({ workspaceId });
+      notifications.show({
+        title: 'Key removed',
+        message: 'The Assistant in this workspace is back on the monthly allowance.',
+        color: 'green',
+      });
+    },
+    onError: (error) =>
+      notifications.show({ title: 'Key not removed', message: error.message, color: 'red' }),
+  });
+
   const showForm = !modelKey || isReplacing;
 
   return (
@@ -100,9 +115,29 @@ function ModelKeySection({
           label="Saved key"
           action={
             !isReplacing && (
-              <Button size="xs" variant="default" onClick={() => setIsReplacing(true)}>
-                Replace
-              </Button>
+              <div className="flex gap-2">
+                <Button size="xs" variant="default" onClick={() => setIsReplacing(true)}>
+                  Replace
+                </Button>
+                <Button
+                  size="xs"
+                  variant="subtle"
+                  color="red"
+                  loading={removeKey.isPending}
+                  onClick={() =>
+                    modals.openConfirmModal({
+                      title: 'Remove this key?',
+                      children:
+                        'The Assistant in this workspace goes back to the monthly allowance. The key is deleted here; it stays valid at Anthropic until you revoke it there.',
+                      labels: { confirm: 'Remove key', cancel: 'Keep it' },
+                      confirmProps: { color: 'red' },
+                      onConfirm: () => removeKey.mutate({ workspaceId }),
+                    })
+                  }
+                >
+                  Remove
+                </Button>
+              </div>
             )
           }
         >

@@ -166,6 +166,16 @@ export async function saveModelKey(
 }
 
 /**
+ * Delete the workspace's key (the credential row goes with its integration).
+ * The Assistant goes back to the hosted key and the monthly allowance.
+ * Returns false when there was no key to remove.
+ */
+export async function removeModelKey(db: Pick<PrismaClient, "integration">, workspaceId: string): Promise<boolean> {
+  const removed = await db.integration.deleteMany({ where: modelKeyWhere(workspaceId) });
+  return removed.count > 0;
+}
+
+/**
  * The workspace's key, decrypted, when it has one that works. Null when
  * there is no key, when it has been marked as failing, or when it cannot be
  * decrypted: callers then fall back to the hosted key.
