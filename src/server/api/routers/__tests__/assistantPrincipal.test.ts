@@ -134,15 +134,17 @@ describe("assistant.create — the Assistant is a principal (ADR-0067)", () => {
     expect(dbMock.externalAgent.create.mock.calls[0]?.[0]).toMatchObject({
       data: { name: "Aria", ownerId: OWNER_ID, shadowUserId: SHADOW_USER_ID },
     });
-    // Agents only ever hold `member` (ADR-0049), in the Assistant's own workspace.
+    // Agents only ever hold `member` (ADR-0049), here in the Personal workspace.
     expect(dbMock.workspaceUser.upsert.mock.calls[0]?.[0]).toMatchObject({
       where: { userId_workspaceId: { userId: SHADOW_USER_ID, workspaceId: WORKSPACE_ID } },
       create: { userId: SHADOW_USER_ID, workspaceId: WORKSPACE_ID, role: "member" },
       update: { role: "member" },
     });
     expect(dbMock.assistant.create.mock.calls[0]?.[0]).toMatchObject({
-      data: { externalAgentId: AGENT_ID, createdById: OWNER_ID, workspaceId: WORKSPACE_ID },
+      data: { externalAgentId: AGENT_ID, createdById: OWNER_ID },
     });
+    // The Assistant belongs to no workspace (ADR-0072): no column to write.
+    expect(dbMock.assistant.create.mock.calls[0]?.[0]?.data).not.toHaveProperty("workspaceId");
     expect(created).toMatchObject({ externalAgentId: AGENT_ID });
   });
 
@@ -183,7 +185,6 @@ describe("assistant.update / delete — the principal follows the Assistant (ADR
   let writes: string[];
   const owned = {
     id: "assistant-1",
-    workspaceId: WORKSPACE_ID,
     createdById: OWNER_ID,
     externalAgentId: AGENT_ID,
     name: "Aria",
@@ -191,7 +192,6 @@ describe("assistant.update / delete — the principal follows the Assistant (ADR
     personality: "Warm.",
     instructions: null,
     userContext: null,
-    isDefault: true,
     createdAt: new Date("2026-01-01"),
     updatedAt: new Date("2026-01-01"),
     externalAgent: { id: AGENT_ID, executor: "MASTRA", shadowUserId: SHADOW_USER_ID, description: null },

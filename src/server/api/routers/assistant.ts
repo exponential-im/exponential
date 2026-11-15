@@ -4,11 +4,14 @@ import { requireWorkspaceMembership } from "~/server/services/access/middleware"
 import { TRPCError } from "@trpc/server";
 import { blankToNull } from "~/server/utils/blankToNull";
 import type { PrismaClient } from "@prisma/client";
-import { findGatewayAssistant } from "~/server/services/assistant/gatewayAssistant";
 import { ensureAssistantForUser } from "~/server/services/assistant/ensureAssistant";
 import { findPersonalWorkspaceId } from "~/server/services/assistant/personalWorkspace";
 import { canDelegateFromRole } from "~/lib/agentDelegation";
-import { activeAssistantQuery, resolveAssistantForUser } from "~/server/services/assistant/resolveAssistant";
+import {
+  activeAssistantQuery,
+  assistantWorksInWorkspaceWhere,
+  resolveAssistantForUser,
+} from "~/server/services/assistant/resolveAssistant";
 import { renameAssistantPrincipal } from "~/server/services/assistant/principal";
 import { retireAssistant } from "~/server/services/assistant/retire";
 import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
@@ -17,16 +20,15 @@ import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
 const MAX_RUNNER_KEYS = 10;
 
 /**
- * Assistants are **per user, per workspace** — each member of a workspace gets
- * their own agent with their own name and persona. Two consequences:
+ * An Assistant is **one per person**, the same in every workspace it works in
+ * (ADR-0072). It belongs to no workspace: where it works is its principal's
+ * memberships. Two consequences:
  *
  *  - Every id-addressed procedure loads the row scoped by `createdById`, so a
  *    CUID belonging to someone else simply doesn't resolve. NOT_FOUND rather
  *    than FORBIDDEN, so the API doesn't confirm that an id exists.
- *  - Workspace-scoped queries (`list`, `getDefault`, `create`) additionally
- *    filter by `createdById`, so co-members never see or clobber each other's
- *    assistant. This matches how the Telegram and Matrix gateways resolve the
- *    default assistant (`{ createdById, isDefault }`).
+ *  - `getMine` resolves the caller's Assistant with no workspace, through the
+ *    same resolver as chat, the gateways and Agent runs.
  *
  * Mutations are `humanOnlyProcedure`: an Assistant owns an External agent
  * principal (ADR-0067), so creating, renaming or deleting one is agent
@@ -141,7 +143,6 @@ export const assistantRouter = createTRPCRouter({
         personality: z.string().min(1).max(10000).optional(),
         instructions: z.string().max(10000).optional().nullable(),
         userContext: z.string().max(5000).optional().nullable(),
-        isDefault: z.boolean().optional(),
         /** Which engine runs Agent runs assigned to this Assistant (ADR-0067 §4, Agent PRD V2). */
         executor: z.enum(["MASTRA", "LOCAL_CLI"]).optional(),
         /**
@@ -153,22 +154,10 @@ export const assistantRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ input, ctx }) => {
-      const { id, isDefault, executor, description, ...data } = input;
+      const { id, executor, description, ...data } = input;
       const userId = ctx.session.user.id;
 
       const existing = await getOwnedAssistantOrThrow(ctx.db, id, userId);
-
-      if (isDefault) {
-        await ctx.db.assistant.updateMany({
-          where: {
-            workspaceId: existing.workspaceId,
-            createdById: userId,
-            isDefault: true,
-            id: { not: id },
-          },
-          data: { isDefault: false },
-        });
-      }
 
       const renamed = data.name !== undefined && data.name !== existing.name;
       return ctx.db.$transaction(async (tx) => {
@@ -192,10 +181,7 @@ export const assistantRouter = createTRPCRouter({
         }
         return tx.assistant.update({
           where: { id },
-          data: {
-            ...data,
-            ...(isDefault !== undefined && { isDefault }),
-          },
+          data,
           include: ASSISTANT_PRINCIPAL_INCLUDE,
         });
       });
@@ -208,18 +194,20 @@ export const assistantRouter = createTRPCRouter({
       return getOwnedAssistantOrThrow(ctx.db, input.id, ctx.session.user.id);
     }),
 
-  /** List the calling user's assistants in a workspace */
+  /**
+   * The calling user's Assistant, as a list, when it works in this workspace
+   * (its principal is a member there) — empty otherwise. What a workspace
+   * setting may pick from (the Workspace Updates voice).
+   */
   list: protectedProcedure
     .input(z.object({ workspaceId: z.string() }))
     .use(requireWorkspaceMembership("view"))
     .query(async ({ input, ctx }) => {
       return ctx.db.assistant.findMany({
         where: {
-          workspaceId: input.workspaceId,
           createdById: ctx.session.user.id,
-          retiredAt: null,
+          ...assistantWorksInWorkspaceWhere(input.workspaceId),
         },
-        orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
       });
     }),
 
@@ -233,30 +221,6 @@ export const assistantRouter = createTRPCRouter({
       ...activeAssistantQuery(ctx.session.user.id),
       include: ASSISTANT_PRINCIPAL_INCLUDE,
     });
-  }),
-
-  /** Get the calling user's default assistant for a workspace (or null) */
-  getDefault: protectedProcedure
-    .input(z.object({ workspaceId: z.string() }))
-    .use(requireWorkspaceMembership("view"))
-    .query(async ({ input, ctx }) => {
-      return ctx.db.assistant.findFirst({
-        where: {
-          workspaceId: input.workspaceId,
-          createdById: ctx.session.user.id,
-          isDefault: true,
-          retiredAt: null,
-        },
-        include: ASSISTANT_PRINCIPAL_INCLUDE,
-      });
-    }),
-
-  /**
-   * The assistant the Telegram and Matrix gateways pair to (identity fields
-   * only), so /settings/assistant can open on it instead of guessing a workspace.
-   */
-  getGatewayDefault: protectedProcedure.query(async ({ ctx }) => {
-    return findGatewayAssistant(ctx.db, ctx.session.user.id);
   }),
 
   /**
@@ -320,27 +284,5 @@ export const assistantRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Key not found" });
       }
       return { revoked: true as const };
-    }),
-
-  /** Set one of the calling user's assistants as their workspace default */
-  setDefault: humanOnlyProcedure
-    .input(z.object({ id: z.string() }))
-    .mutation(async ({ input, ctx }) => {
-      const userId = ctx.session.user.id;
-      const assistant = await getOwnedAssistantOrThrow(ctx.db, input.id, userId);
-
-      await ctx.db.assistant.updateMany({
-        where: {
-          workspaceId: assistant.workspaceId,
-          createdById: userId,
-          isDefault: true,
-        },
-        data: { isDefault: false },
-      });
-
-      return ctx.db.assistant.update({
-        where: { id: input.id },
-        data: { isDefault: true },
-      });
     }),
 });
