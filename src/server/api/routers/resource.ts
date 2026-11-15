@@ -286,6 +286,12 @@ function assertAgentCanPlace(scope: ResourceScope, workspaceId: string | null | 
   }
 }
 
+/**
+ * Page text is searched, never read, and can be 100,000 characters: no
+ * response carries it back, not even the save that just sent it.
+ */
+const SAVED_ROW_OMIT = { pageText: true } as const;
+
 /** Entries per page of `resource.identities`. */
 export const IDENTITIES_PAGE_SIZE = 1000;
 
@@ -396,6 +402,7 @@ export const resourceRouter = createTRPCRouter({
         const read = saveReadState(input, existing);
         const resource = await ctx.db.resource.update({
           where: { id: existing.id },
+          omit: SAVED_ROW_OMIT,
           data: {
             archivedAt: null,
             // The latest save wins: the link reopens the page as it was
@@ -438,6 +445,7 @@ export const resourceRouter = createTRPCRouter({
       }
 
       const resource = await ctx.db.resource.create({
+        omit: SAVED_ROW_OMIT,
         data: {
           title: input.title,
           description: input.description,
@@ -474,8 +482,7 @@ export const resourceRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const resource = await ctx.db.resource.findFirst({
         where: { id: input.id, ...scopedRows(ctx.scope) },
-        // Page text is searched, never read: no reader is sent it.
-        omit: { pageText: true },
+        omit: SAVED_ROW_OMIT,
         include: {
           project: { select: { id: true, name: true } },
           workspace: { select: { id: true, name: true } },
@@ -698,6 +705,7 @@ export const resourceRouter = createTRPCRouter({
 
       const resource = await ctx.db.resource.update({
         where: { id },
+        omit: SAVED_ROW_OMIT,
         data: {
           ...updateData,
           ...(wordCount !== undefined && { wordCount }),

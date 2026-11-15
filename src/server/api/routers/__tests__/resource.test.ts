@@ -582,13 +582,24 @@ describe("resource router — reading list (mocked)", () => {
         });
       });
 
-      it("the reader's read never carries Page text", async () => {
+      it("no response carries Page text: not the reader's read, not the save's own reply", async () => {
         dbMock.resource.findFirst.mockResolvedValue(fakeResource({ id: "listing", url }));
+        dbMock.resource.update.mockResolvedValue(fakeResource({ id: "listing", url }));
         const caller = createMockCaller({ userId: callerId, db: dbMock });
 
         await caller.resource.get({ id: "listing" });
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: false });
+        await caller.resource.update({ id: "listing", description: "For January" });
 
         expect(dbMock.resource.findFirst.mock.calls[0]![0]).toMatchObject({ omit: { pageText: true } });
+        for (const call of dbMock.resource.update.mock.calls) {
+          expect(call[0]).toMatchObject({ omit: { pageText: true } });
+        }
+
+        dbMock.resource.findFirst.mockResolvedValue(null);
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "new", url }));
+        await caller.resource.create({ title: "Villa", url, pageText, generateEmbeddings: false });
+        expect(dbMock.resource.create.mock.calls[0]![0]).toMatchObject({ omit: { pageText: true } });
       });
     });
 
