@@ -3,7 +3,7 @@ title: Workspaces
 description: Keep separate companies, clients or areas of your life in their own containers, each with its own members, projects, goals and plugins
 icon: IconBuildingSkyscraper
 order: 1
-updated: 2026-10-23
+updated: 2026-11-15
 ---
 
 A workspace is a container for a set of projects, goals, actions, meetings and CRM data, with its own members and roles. Most people have one per company or client, plus a personal one; you can belong to as many as you need and switch between them from the top of the sidebar. Everything you see in the sidebar sections — Plan, Work, People and Tools — belongs to the workspace you are in.
@@ -13,6 +13,8 @@ A workspace is a container for a set of projects, goals, actions, meetings and C
 ## Where to find it
 
 The workspace switcher is at the top of the sidebar; click it to change workspace, open its settings, or create a new one. The full list is at [/workspaces](/workspaces), and [/workspaces/new](/workspaces/new) creates one. Workspace settings are reached from the switcher or from the **Settings** link on a workspace card.
+
+Choosing a workspace in the switcher opens that workspace's home. On your account settings (`/settings`), which belong to you rather than to one workspace, it changes the workspace in place instead, so the page you are on now shows that workspace. Pages with no workspace in their address open in the workspace you last used in that browser, and in your default workspace the first time.
 
 ## How to create a workspace
 
