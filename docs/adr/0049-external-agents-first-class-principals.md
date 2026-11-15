@@ -24,6 +24,13 @@ owner leaves the workspace, as the agent's own membership does; an Action in no 
 the agent's owner. Attribution is unchanged: `createdById` stays the shadow user. Whether such an
 Action should also land on the owner's plate (Today, Inbox) is a separate, open product decision.
 
+Amended 2026-11-15 (ADRs in the agent context, PR #1129): an agent may read **ADR metadata**
+(label, title, status, link; never the body) through `agentGuidance.context`, under the same
+role the `adr` router demands of a person: its shadow user needs a write role in the workspace
+(member or above; viewers and guests get none), and its owner must still belong to the
+workspace. The `adr` router itself stays human-only, so the ADR text is read only by people.
+Zoe and the gateways (`agent_for_human`) get the same metadata when the person has a write role.
+
 ## Context
 
 A user wants to point third-party autonomous agent software — the trigger was Nous
