@@ -46,7 +46,16 @@ const POSITION_WITH_HOLDERS_SELECT = {
     select: {
       workspaceUser: {
         select: {
-          user: { select: { id: true, name: true, image: true, isAgent: true } },
+          user: {
+            select: {
+              id: true,
+              name: true,
+              image: true,
+              isAgent: true,
+              // Who may withdraw an agent holder (`withdrawMyAgent`): its owner.
+              externalAgentShadow: { select: { ownerId: true } },
+            },
+          },
         },
       },
     },
@@ -64,6 +73,8 @@ function presentPosition(position: PositionWithHolders) {
       name: user.name,
       image: user.image,
       isAgent: user.isAgent,
+      /** The person accountable for an agent holder, who may withdraw it; null for a person. */
+      agentOwnerId: user.externalAgentShadow?.ownerId ?? null,
     })),
   };
 }

@@ -700,7 +700,8 @@ describe("position.list", () => {
         title: "Travel researcher",
         remit: "Research travel options",
         notAccountableFor: null,
-        holders: [{ userId: "aria", name: "Aria", image: null, isAgent: true }],
+        // The fixture's holder row carries no owner: agentOwnerId reads null.
+        holders: [{ userId: "aria", name: "Aria", image: null, isAgent: true, agentOwnerId: null }],
       },
     ]);
     expect(result.members).toEqual([

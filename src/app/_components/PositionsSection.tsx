@@ -49,7 +49,13 @@ interface PositionRow {
   title: string;
   remit: string;
   notAccountableFor: string | null;
-  holders: Array<{ userId: string; name: string | null; image: string | null; isAgent: boolean }>;
+  holders: Array<{
+    userId: string;
+    name: string | null;
+    image: string | null;
+    isAgent: boolean;
+    agentOwnerId: string | null;
+  }>;
 }
 
 const TITLE_MAX = 80;
@@ -72,7 +78,8 @@ function blankToNull(value: string): string | null {
  * route to, so the page skips it.
  *
  * Owners and admins get New / Edit / Delete and the holder picker. A member
- * who holds a Position gets an Edit that exposes only its Remit.
+ * who holds a Position gets an Edit that exposes only its Remit. Anyone whose
+ * agent holds a Position can withdraw it from that Position's row.
  */
 export function PositionsSection({ workspaceId, canManage, members }: PositionsSectionProps) {
   const utils = api.useUtils();
@@ -118,6 +125,22 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
   });
 
   const isSaving = createMutation.isPending || updateMutation.isPending;
+  // Your own agent in a Position (Agent PRD D9): you are accountable for it,
+  // so you can withdraw it whatever your role. The position_assigned
+  // notification links here.
+  const withdrawMutation = api.position.withdrawMyAgent.useMutation({
+    onSuccess: async () => {
+      await invalidate();
+      notifications.show({ title: "Withdrawn", message: "Your agent no longer holds that Position.", color: "green" });
+    },
+    onError: onError("Could not withdraw"),
+  });
+  const handleWithdraw = (position: PositionRow, holder: PositionRow["holders"][number]) => {
+    const name = holder.name ?? "your agent";
+    if (confirm(`Withdraw ${name} from "${position.title}"?`)) {
+      withdrawMutation.mutate({ workspaceId, positionId: position.id, userId: holder.userId });
+    }
+  };
 
   const openCreate = () => {
     setEditing(null);
@@ -206,6 +229,9 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
           ) : (
             positions.map((position) => {
               const canEdit = canManage || heldByViewer.has(position.id);
+              const myAgents = position.holders.filter(
+                (holder) => !!viewerId && holder.agentOwnerId === viewerId,
+              );
               return (
                 <div
                   key={position.id}
@@ -223,6 +249,32 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
                           <MarkdownRenderer content={position.notAccountableFor} variant="inline" />
                         </div>
                       )}
+                      {myAgents.map((holder) => (
+                        <div
+                          key={holder.userId}
+                          className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-text-muted"
+                          data-testid="position-my-agent"
+                        >
+                          <span>
+                            Your agent <span className="font-medium text-text-secondary">{holder.name ?? "agent"}</span>{" "}
+                            holds this Position.
+                          </span>
+                          <Button
+                            size="compact-xs"
+                            variant="subtle"
+                            color="red"
+                            onClick={() => handleWithdraw(position, holder)}
+                            loading={
+                              withdrawMutation.isPending &&
+                              withdrawMutation.variables?.positionId === position.id &&
+                              withdrawMutation.variables?.userId === holder.userId
+                            }
+                            data-testid="position-withdraw"
+                          >
+                            Withdraw
+                          </Button>
+                        </div>
+                      ))}
                     </div>
                     <Group gap={4} wrap="nowrap" className="shrink-0">
                       {position.holders.length === 0 ? (
