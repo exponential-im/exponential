@@ -15,7 +15,11 @@ import {
 import { renameAssistantPrincipal } from "~/server/services/assistant/principal";
 import { retireAssistant } from "~/server/services/assistant/retire";
 import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
-import { memberGrant, requireDelegableWorkspaces } from "~/server/services/externalAgentAccess";
+import {
+  memberGrant,
+  requireDelegableWorkspaces,
+  revokeAgentWorkspace,
+} from "~/server/services/externalAgentAccess";
 import type { AssistantDefaults } from "~/server/services/assistant/ensureAssistant";
 
 /** Same ceiling as `externalAgent.createKey`: an Assistant's principal is an External agent. */
@@ -173,6 +177,31 @@ export const assistantRouter = createTRPCRouter({
       });
       await memberGrant(ctx.db, principal.shadowUserId, input.workspaceId);
       return { assistantId: assistant.id, workspaceId: input.workspaceId };
+    }),
+
+  /**
+   * Take the calling user's Assistant out of a workspace: its membership and
+   * any project grants it held there. The person decides where their
+   * Assistant works; a workspace owner or admin can also remove it, from
+   * Members (`workspace.removeMember`). Removing it from a workspace it is
+   * not in is a no-op.
+   */
+  removeFromWorkspace: humanOnlyProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ input, ctx }) => {
+      const assistant = await ctx.db.assistant.findFirst({
+        ...activeAssistantQuery(ctx.session.user.id),
+        select: { id: true, externalAgent: { select: { shadowUserId: true } } },
+      });
+      if (!assistant) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "You don't have an Assistant yet" });
+      }
+      const removed = await revokeAgentWorkspace(
+        ctx.db,
+        assistant.externalAgent.shadowUserId,
+        input.workspaceId,
+      );
+      return { removed };
     }),
 
   /** Update an assistant owned by the calling user */

@@ -11,6 +11,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   cascadeOwnerRemovedFromWorkspace,
   cascadeOwnerRoleChanged,
+  revokeAgentWorkspace,
 } from "../externalAgentAccess";
 
 const db = mockDeep<PrismaClient>();
@@ -100,4 +101,25 @@ describe("cascadeOwnerRoleChanged", () => {
       expect(db.workspaceUser.deleteMany).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("revokeAgentWorkspace", () => {
+  it("deletes the one membership and the agent's project grants in that workspace", async () => {
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 });
+
+    await expect(revokeAgentWorkspace(db, "shadow-1", "ws-1")).resolves.toBe(true);
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "shadow-1", workspaceId: "ws-1" },
+    });
+    expect(db.projectMember.deleteMany).toHaveBeenCalledWith({
+      where: { userId: { in: ["shadow-1"] }, project: { workspaceId: "ws-1" } },
+    });
+  });
+
+  it("reports false when the agent was not a member there", async () => {
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 0 });
+
+    await expect(revokeAgentWorkspace(db, "shadow-1", "ws-1")).resolves.toBe(false);
+  });
 });

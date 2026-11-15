@@ -92,6 +92,26 @@ export async function revokeAgentProjectMembershipsInWorkspace(
 }
 
 /**
+ * An agent leaves one workspace: its membership row and every direct project
+ * grant it held there, which were made under the delegation being withdrawn.
+ * The one removal path for an agent's own membership — its owner revoking it
+ * (`externalAgent.revokeWorkspace`, `assistant.removeFromWorkspace`) or a
+ * workspace owner or admin removing it from Members. Returns whether a
+ * membership was removed.
+ */
+export async function revokeAgentWorkspace(
+  db: Db,
+  shadowUserId: string,
+  workspaceId: string,
+): Promise<boolean> {
+  const result = await db.workspaceUser.deleteMany({
+    where: { userId: shadowUserId, workspaceId },
+  });
+  await revokeAgentProjectMembershipsInWorkspace(db, [shadowUserId], workspaceId);
+  return result.count > 0;
+}
+
+/**
  * Delegation invariant (ADR-0049): an External agent's workspace access never
  * exceeds or outlives its owner's. Enforced structurally — the workspace
  * membership mutation paths call these hooks, so the agent's `WorkspaceUser`

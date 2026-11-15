@@ -9,7 +9,7 @@ import { deleteExternalAgentPrincipal } from "~/server/services/assistant/princi
 import {
   memberGrant,
   requireDelegableWorkspaces,
-  revokeAgentProjectMembershipsInWorkspace,
+  revokeAgentWorkspace,
 } from "~/server/services/externalAgentAccess";
 
 /**
@@ -363,16 +363,9 @@ export const externalAgentRouter = createTRPCRouter({
     .input(z.object({ agentId: z.string(), workspaceId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const agent = await requireOwnedAgent(ctx.db, input.agentId, ctx.session.user.id);
-      await ctx.db.workspaceUser.deleteMany({
-        where: { userId: agent.shadowUserId, workspaceId: input.workspaceId },
-      });
       // Direct project grants in that workspace go with it — they were made
       // under the workspace delegation that is being withdrawn.
-      await revokeAgentProjectMembershipsInWorkspace(
-        ctx.db,
-        [agent.shadowUserId],
-        input.workspaceId,
-      );
+      await revokeAgentWorkspace(ctx.db, agent.shadowUserId, input.workspaceId);
       return { success: true };
     }),
 });

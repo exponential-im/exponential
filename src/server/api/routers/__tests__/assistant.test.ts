@@ -375,3 +375,49 @@ describe("assistant.addToWorkspace — the External-agent grant path (Agent PRD 
     expect(grantedWorkspaces).toEqual([PERSONAL_WS, TEAM_WS]);
   });
 });
+
+describe("assistant.removeFromWorkspace", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    dbMock.user.findUnique.mockResolvedValue({ isAgent: false } as never);
+    dbMock.workspaceUser.deleteMany.mockResolvedValue({ count: 1 } as never);
+    dbMock.projectMember.deleteMany.mockResolvedValue({ count: 0 } as never);
+  });
+
+  it("removes the caller's own Assistant from one workspace, with its project grants there", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue({
+      id: ASSISTANT_ID,
+      externalAgent: { shadowUserId: "shadow-1" },
+    } as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.removeFromWorkspace({ workspaceId: WORKSPACE_ID })).resolves.toEqual({
+      removed: true,
+    });
+
+    // Only ever the caller's own non-retired Assistant.
+    expect(dbMock.assistant.findFirst.mock.calls[0]?.[0]?.where).toEqual({
+      createdById: OWNER_ID,
+      retiredAt: null,
+    });
+    expect(dbMock.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "shadow-1", workspaceId: WORKSPACE_ID },
+    });
+    expect(dbMock.projectMember.deleteMany).toHaveBeenCalledWith({
+      where: { userId: { in: ["shadow-1"] }, project: { workspaceId: WORKSPACE_ID } },
+    });
+  });
+
+  it("is NOT_FOUND for a person with no Assistant, and deletes nothing", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(null);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(
+      caller.assistant.removeFromWorkspace({ workspaceId: WORKSPACE_ID }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(dbMock.workspaceUser.deleteMany).not.toHaveBeenCalled();
+  });
+});
