@@ -391,8 +391,7 @@ archive: protectedProcedure
 `viewer` is the read-only workspace role, and on the Team plan a viewer is a
 free seat, so "a viewer cannot write" is a billing rule as well as an access
 rule. Checked in November 2026 (ticket daring.haze). These are the writes a
-workspace viewer can still make, each by an existing rule rather than by a
-missing check:
+workspace viewer can still make by an existing rule:
 
 | Write | Why it is allowed | Rule |
 |---|---|---|
@@ -408,6 +407,23 @@ a product decision, not something to change in passing.
 Everything else that creates or changes workspace content must go through
 `assertWorkspaceWriteRole` (or a wrapper that delegates to it). A new mutation
 that only asserts membership lets a viewer write.
+
+### Known gaps
+
+Not every write is gated yet. These still let a viewer through (ticket
+sage.blade); remove a line when its path is fixed:
+
+- `project.create` and `mastra.createProject` check nothing about the
+  workspace they are given, so they also admit a non-member
+- `mastra.updateProject` (view access, not edit), `mastra.bulkCreateStructure`,
+  `mastra.unlinkProjectFromKeyResult`
+- `keyResult.updateLinkedFeatures`, `keyResult.unlinkFeature`,
+  `goal.updateGoalStatus`
+- `pipeline.create`, `transcription.createManualTranscription`
+- `workspaceScheduling.createMeeting`, `workspaceScheduling.cancelMeeting`
+- `knowledgeChunk.ingestTranscription`, `knowledgeChunk.deleteForSource`
+- mutations gated on ownership alone (goals, key results), which a viewer who
+  owns the row still passes; not yet read one by one
 
 ---
 
