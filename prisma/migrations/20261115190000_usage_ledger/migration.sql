@@ -20,7 +20,7 @@ CREATE TABLE "UsageEvent" (
 CREATE TABLE "WorkspaceUsagePeriod" (
     "workspaceId" TEXT NOT NULL,
     "periodStart" TIMESTAMP(3) NOT NULL,
-    "costMicros" INTEGER NOT NULL DEFAULT 0,
+    "costMicros" BIGINT NOT NULL DEFAULT 0,
 
     CONSTRAINT "WorkspaceUsagePeriod_pkey" PRIMARY KEY ("workspaceId","periodStart")
 );

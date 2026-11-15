@@ -19,13 +19,17 @@ function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/** This month and the five before it, newest first. */
+/**
+ * This month and the five before it, newest first. The locale is fixed: these
+ * labels are rendered on the server too, and the server's default locale is
+ * not the browser's, which would make the two renders disagree.
+ */
 function recentMonths(now: Date): Array<{ value: string; label: string }> {
   return Array.from({ length: MONTHS_LISTED }, (_, back) => {
     const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
     return {
       value: monthKey(month),
-      label: month.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: "UTC" }),
+      label: month.toLocaleDateString("en-US", { month: "long", year: "numeric", timeZone: "UTC" }),
     };
   });
 }

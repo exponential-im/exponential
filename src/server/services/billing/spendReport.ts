@@ -90,7 +90,7 @@ export async function getSpendReport(
   const workspaceById = new Map(workspaceRows.map((workspace) => [workspace.id, workspace]));
   const eventsByWorkspace = new Map(workspaceEventGroups.map((group) => [group.workspaceId, group._count._all]));
 
-  const spends = periods.map((period) => period.costMicros);
+  const spends = periods.map((period) => Number(period.costMicros));
   const hosted = sourceGroups.filter((group) => !group.onOwnKey);
   const ownKey = sourceGroups.filter((group) => group.onOwnKey);
 
@@ -119,7 +119,7 @@ export async function getSpendReport(
         name: workspace?.name ?? null,
         slug: workspace?.slug ?? null,
         type: workspace?.type ?? null,
-        costMicros: period.costMicros,
+        costMicros: Number(period.costMicros),
         events: eventsByWorkspace.get(period.workspaceId) ?? 0,
       };
     }),

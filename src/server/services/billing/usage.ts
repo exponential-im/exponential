@@ -206,5 +206,6 @@ export async function getPeriodUsage(
     where: { workspaceId_periodStart: { workspaceId, periodStart } },
     select: { costMicros: true },
   });
-  return { periodStart, periodEnd: usagePeriodEnd(now), usedMicros: period?.costMicros ?? 0 };
+  // The counter is a BigInt column; micro-USD stay far inside a double's exact range.
+  return { periodStart, periodEnd: usagePeriodEnd(now), usedMicros: Number(period?.costMicros ?? 0) };
 }

@@ -235,5 +235,5 @@ test("a fast-tier attempt that came back empty is metered as well as its retry",
   expect(events.filter((event) => event.refId !== null)).toHaveLength(1);
 
   const period = await db.workspaceUsagePeriod.findFirst({ where: { workspaceId }, select: { costMicros: true } });
-  expect(period?.costMicros).toBe(HAIKU_COST_MICROS + SONNET_COST_MICROS);
+  expect(Number(period?.costMicros)).toBe(HAIKU_COST_MICROS + SONNET_COST_MICROS);
 });

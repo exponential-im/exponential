@@ -6532,8 +6532,9 @@ model WorkspaceUsagePeriod {
   workspaceId String
   /// First instant of the calendar month, UTC.
   periodStart DateTime
-  /// USD × 1e6.
-  costMicros  Int      @default(0)
+  /// USD × 1e6. BigInt: a 32-bit Int tops out near USD 2,147, and while usage
+  /// is only metered nothing stops a workspace passing that in a month.
+  costMicros  BigInt   @default(0)
 
   @@id([workspaceId, periodStart])
 }
