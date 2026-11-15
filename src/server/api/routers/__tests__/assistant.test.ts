@@ -283,3 +283,95 @@ describe("assistant.getMine — one Assistant per person (ADR-0072)", () => {
     await expect(caller.assistant.getMine()).resolves.toBeNull();
   });
 });
+
+describe("assistant.addToWorkspace — the External-agent grant path (Agent PRD D6)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+  const TEAM_WS = "ws-team";
+  const PERSONAL_WS = "ws-personal";
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    dbMock.user.findUnique.mockResolvedValue({ isAgent: false } as never);
+    dbMock.assistant.findFirst.mockResolvedValue(ownedAssistant as never);
+    dbMock.externalAgent.findUniqueOrThrow.mockResolvedValue({ shadowUserId: "shadow-1" } as never);
+    dbMock.workspaceUser.upsert.mockResolvedValue({} as never);
+  });
+
+  it("grants `member`, and only `member`, where the person is at least a member", async () => {
+    dbMock.workspaceUser.findMany.mockResolvedValue([
+      { userId: OWNER_ID, workspaceId: TEAM_WS, role: "member" },
+    ] as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.addToWorkspace({ workspaceId: TEAM_WS })).resolves.toEqual({
+      assistantId: ASSISTANT_ID,
+      workspaceId: TEAM_WS,
+    });
+
+    expect(dbMock.externalAgent.findUniqueOrThrow).toHaveBeenCalledWith({
+      where: { id: ownedAssistant.externalAgentId },
+      select: { shadowUserId: true },
+    });
+    expect(dbMock.workspaceUser.upsert).toHaveBeenCalledWith({
+      where: { userId_workspaceId: { userId: "shadow-1", workspaceId: TEAM_WS } },
+      create: { userId: "shadow-1", workspaceId: TEAM_WS, role: "member" },
+      update: { role: "member" },
+    });
+  });
+
+  it("refuses a person who is only a viewer there, and writes nothing", async () => {
+    dbMock.workspaceUser.findMany.mockResolvedValue([
+      { userId: OWNER_ID, workspaceId: TEAM_WS, role: "viewer" },
+    ] as never);
+    dbMock.workspace.findMany.mockResolvedValue([{ name: "Acme" }] as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.addToWorkspace({ workspaceId: TEAM_WS })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      message: expect.stringContaining("Acme"),
+    });
+
+    expect(dbMock.workspaceUser.upsert).not.toHaveBeenCalled();
+    expect(dbMock.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses a workspace the person is not in at all, before creating an Assistant", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(null);
+    dbMock.workspaceUser.findMany.mockResolvedValue([] as never);
+    dbMock.workspace.findMany.mockResolvedValue([] as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.addToWorkspace({ workspaceId: TEAM_WS })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+
+    expect(dbMock.$transaction).not.toHaveBeenCalled();
+    expect(dbMock.workspaceUser.upsert).not.toHaveBeenCalled();
+  });
+
+  it("creates the person's Assistant on first need, then adds it (ADR-0072)", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(null);
+    dbMock.workspaceUser.findMany.mockResolvedValue([
+      { userId: OWNER_ID, workspaceId: TEAM_WS, role: "admin" },
+    ] as never);
+    dbMock.workspace.findFirst.mockResolvedValue({ id: PERSONAL_WS } as never);
+    dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "owner" } as never);
+    dbMock.$transaction.mockImplementation(((cb: (tx: unknown) => unknown) =>
+      cb(dbMock)) as never);
+    dbMock.user.create.mockResolvedValue({ id: "shadow-1" } as never);
+    dbMock.externalAgent.create.mockResolvedValue({ id: "agent-1" } as never);
+    dbMock.assistant.create.mockResolvedValue(ownedAssistant as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await caller.assistant.addToWorkspace({ workspaceId: TEAM_WS });
+
+    expect(dbMock.assistant.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ name: "Zoe", createdById: OWNER_ID }) }),
+    );
+    const grantedWorkspaces = dbMock.workspaceUser.upsert.mock.calls.map(
+      ([args]) => args.create.workspaceId,
+    );
+    expect(grantedWorkspaces).toEqual([PERSONAL_WS, TEAM_WS]);
+  });
+});
