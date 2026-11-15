@@ -136,16 +136,6 @@ export function GlobalAddTaskButton({ variant = "icon" }: { variant?: "icon" | "
         createdAt: new Date(),
         epicId: newAction.epicId ?? null,
         effortEstimate: newAction.effortEstimate ?? null,
-        // Bounty fields (defaults for non-bounty actions)
-        isBounty: false,
-        bountyAmount: null,
-        bountyToken: null,
-        bountyStatus: null,
-        bountyDifficulty: null,
-        bountySkills: [],
-        bountyDeadline: null,
-        bountyMaxClaimants: 1,
-        bountyExternalUrl: null,
         ticketId: null,
         epic: null,
         // A just-created action has no Agent run yet (ADR-0067).
