@@ -125,6 +125,7 @@ strategy note → posts an Objective **comment**, not a health-bearing **update*
 
 `okr-tools.ts` and `getAllProjectsTool` are converted. The same latent bug still
 exists in several lower-traffic tools (Slack, document, CRM, calendar
-`findAvailableTimeSlots`, `deleteProjectTool.confirmDeletion`). Tracked in beads
-**exponential-jz4r** follow-up — convert their numeric/boolean input args to
-`looseNumber()/looseBoolean()` and add the parse tests.
+`findAvailableTimeSlots`, `deleteProjectTool.confirmDeletion`). The follow-up
+(beads `exponential-jz4r` / `exponential-xyjn`) converted the Slack and document
+tools by mid-2026 and was closed when beads was retired; check any remaining
+tool's numeric/boolean args use `looseNumber()/looseBoolean()` before relying on it.
