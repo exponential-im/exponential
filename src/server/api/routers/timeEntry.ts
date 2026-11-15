@@ -2,8 +2,12 @@ import { z } from "zod";
 
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
-import { createTRPCRouter, isAgentActorToken } from "~/server/api/trpc";
-import { apiKeyMiddleware } from "~/server/api/middleware/apiKeyAuth";
+import { createTRPCRouter } from "~/server/api/trpc";
+import {
+  apiKeyMiddleware,
+  resolveApiKeyCallerPrincipal,
+  type ApiKeyCallerContext,
+} from "~/server/api/middleware/apiKeyAuth";
 import { TimeEntryService } from "~/server/services/timeEntry/TimeEntryService";
 import {
   canViewAction,
@@ -15,47 +19,32 @@ import {
 } from "~/server/services/access";
 
 /**
- * Who a written entry belongs to (ADR-0061). A human writes their own time,
- * `CONFIRMED` by default. An External agent (`tokenType === "agent-key"`)
- * writes time that belongs to its OWNER, records itself as author, and is
- * forced to `PROPOSED` whatever it asked for. This carve-out exists only for
- * the explicit-bounds procedures below; `start`/`stop` stay principal-owned.
- *
- * Zoe's tokens carry the person as session user, so the entry is theirs and
- * no External agent is the author — but Zoe acting for someone is not that
- * person acting (ADR-0070), so it is forced to `PROPOSED` too and waits for
- * them to confirm it.
+ * Who a written entry belongs to (ADR-0061), from the verified principal
+ * (`resolvePrincipal`; D-0016). A person writes their own time, `CONFIRMED`
+ * by default. An agent (an External agent key, or an Assistant run's shadow
+ * user) writes time that belongs to its OWNER, records itself as author, and
+ * is forced to `PROPOSED` whatever it asked for. An agent acting for a person
+ * (Zoe, the chat gateways, voice) writes the person's time, also `PROPOSED`:
+ * confirming is the person's act. This carve-out exists only for the
+ * explicit-bounds procedures below; `start`/`stop` stay principal-owned.
  */
 interface TimeEntryPrincipal {
   ownerUserId: string;
   createdByAgentId: string | null;
-  /** An agent is writing (an External agent, or Zoe for the person): never `CONFIRMED`. */
-  mustPropose: boolean;
+  /** An agent is acting (for itself or for the person), so what it writes is PROPOSED. */
+  writesProposed: boolean;
 }
 
-async function resolveTimeEntryPrincipal(
-  db: PrismaClient,
-  callerUserId: string,
-  tokenType: string | undefined,
-): Promise<TimeEntryPrincipal> {
-  if (tokenType !== "agent-key") {
-    return {
-      ownerUserId: callerUserId,
-      createdByAgentId: null,
-      mustPropose: isAgentActorToken(tokenType),
-    };
+async function resolveTimeEntryPrincipal(ctx: ApiKeyCallerContext): Promise<TimeEntryPrincipal> {
+  const principal = await resolveApiKeyCallerPrincipal(ctx);
+  switch (principal.kind) {
+    case "human":
+      return { ownerUserId: principal.userId, createdByAgentId: null, writesProposed: false };
+    case "agent":
+      return { ownerUserId: principal.ownerId, createdByAgentId: principal.agentId, writesProposed: true };
+    case "agent_for_human":
+      return { ownerUserId: principal.userId, createdByAgentId: null, writesProposed: true };
   }
-  const agent = await db.externalAgent.findUnique({
-    where: { shadowUserId: callerUserId },
-    select: { id: true, ownerId: true },
-  });
-  if (!agent) {
-    throw new TRPCError({
-      code: "FORBIDDEN",
-      message: "Agent key is not bound to an external agent",
-    });
-  }
-  return { ownerUserId: agent.ownerId, createdByAgentId: agent.id, mustPropose: true };
 }
 
 /**
@@ -74,26 +63,18 @@ async function assertOwnerCanViewAction(
 }
 
 /**
- * Confirmation is a human act (ADR-0061). The same two checks as
- * `humanOnlyProcedure` (ADR-0070): any agent-acting token is refused —
- * including Zoe's, which carry the person as session user — and the
- * `isAgent` read catches a shadow user reaching here through any other token.
+ * Confirmation is a human act (ADR-0061), like `humanOnlyProcedure`: an
+ * agent, or an agent acting for the person (Zoe, gateways, voice), is refused
+ * whichever way it authenticated.
  */
-async function assertHumanPrincipal(
-  db: PrismaClient,
-  userId: string,
-  tokenType: string | undefined,
-): Promise<void> {
-  const forbidden = new TRPCError({
-    code: "FORBIDDEN",
-    message: "Only a person can do this, signed in as themselves — agents (including Zoe) cannot",
-  });
-  if (isAgentActorToken(tokenType)) throw forbidden;
-  const principal = await db.user.findUnique({
-    where: { id: userId },
-    select: { isAgent: true },
-  });
-  if (principal?.isAgent) throw forbidden;
+async function assertHumanPrincipal(ctx: ApiKeyCallerContext): Promise<void> {
+  const principal = await resolveApiKeyCallerPrincipal(ctx);
+  if (principal.kind !== "human") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Only a person can do this, signed in as themselves — agents (including Zoe) cannot",
+    });
+  }
 }
 
 const explicitEntryInput = z
@@ -115,17 +96,12 @@ export const timeEntryRouter = createTRPCRouter({
   /**
    * Create a completed entry with explicit bounds. Never touches the running
    * Timer. Under an agent key the entry belongs to the agent's owner and is
-   * `PROPOSED`; under a Zoe token it is the person's and `PROPOSED`; a
-   * human's entry defaults to `CONFIRMED`.
+   * `PROPOSED`; a human's entry defaults to `CONFIRMED`.
    */
   create: apiKeyMiddleware
     .input(explicitEntryInput)
     .mutation(async ({ ctx, input }) => {
-      const principal = await resolveTimeEntryPrincipal(
-        ctx.db,
-        ctx.userId,
-        ctx.tokenType,
-      );
+      const principal = await resolveTimeEntryPrincipal(ctx);
       await assertOwnerCanViewAction(ctx.db, principal.ownerUserId, input.actionId);
 
       const service = new TimeEntryService(ctx.db);
@@ -135,7 +111,7 @@ export const timeEntryRouter = createTRPCRouter({
         startedAt: input.startedAt,
         endedAt: input.endedAt,
         source: input.source,
-        status: principal.mustPropose ? "PROPOSED" : (input.status ?? "CONFIRMED"),
+        status: principal.writesProposed ? "PROPOSED" : (input.status ?? "CONFIRMED"),
         sourceRef: input.sourceRef,
         note: input.note,
         createdByAgentId: principal.createdByAgentId,
@@ -228,11 +204,7 @@ export const timeEntryRouter = createTRPCRouter({
       ),
     )
     .mutation(async ({ ctx, input }) => {
-      const principal = await resolveTimeEntryPrincipal(
-        ctx.db,
-        ctx.userId,
-        ctx.tokenType,
-      );
+      const principal = await resolveTimeEntryPrincipal(ctx);
       await assertOwnerCanViewAction(ctx.db, principal.ownerUserId, input.actionId);
 
       const service = new TimeEntryService(ctx.db);
@@ -242,7 +214,7 @@ export const timeEntryRouter = createTRPCRouter({
         startedAt: input.startedAt,
         endedAt: input.endedAt,
         source: input.source,
-        status: principal.mustPropose ? "PROPOSED" : (input.status ?? "CONFIRMED"),
+        status: principal.writesProposed ? "PROPOSED" : (input.status ?? "CONFIRMED"),
         sourceRef: input.sourceRef,
         note: input.note,
         createdByAgentId: principal.createdByAgentId,
@@ -263,7 +235,7 @@ export const timeEntryRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      await assertHumanPrincipal(ctx.db, ctx.userId, ctx.tokenType);
+      await assertHumanPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.confirmDay({
         userId: ctx.userId,
@@ -286,7 +258,7 @@ export const timeEntryRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
-      const principal = await resolveTimeEntryPrincipal(ctx.db, ctx.userId, ctx.tokenType);
+      const principal = await resolveTimeEntryPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.dayReport({
         userId: principal.ownerUserId,
@@ -315,7 +287,7 @@ export const timeEntryRouter = createTRPCRouter({
         }),
     )
     .mutation(async ({ ctx, input }) => {
-      await assertHumanPrincipal(ctx.db, ctx.userId, ctx.tokenType);
+      await assertHumanPrincipal(ctx);
       if (input.projectId) {
         const access = await getProjectAccess(ctx.db, ctx.userId, input.projectId);
         if (!access || !hasProjectAccess(access)) {
@@ -400,30 +372,32 @@ export const timeEntryRouter = createTRPCRouter({
           });
         }
       }
-      const service = new TimeEntryService(ctx.db);
       // Editing Proposed time confirms it (ADR-0061) — a person's act. Zoe
       // can correct it for them, but it stays PROPOSED, and she cannot touch
       // time the person already confirmed (ADR-0070).
+      const principal = await resolveApiKeyCallerPrincipal(ctx);
+      const service = new TimeEntryService(ctx.db);
       return service.update({
         userId: ctx.userId,
         entryId: input.entryId,
         startedAt: input.startedAt,
         endedAt: input.endedAt,
         actionId: input.actionId,
-        agentActing: isAgentActorToken(ctx.tokenType),
+        agentActing: principal.kind !== "human",
       });
     }),
 
   delete: apiKeyMiddleware
     .input(z.object({ entryId: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const service = new TimeEntryService(ctx.db);
       // Zoe may discard Proposed time or cancel a running Timer; deleting
       // completed CONFIRMED time is the person's call (ADR-0061, ADR-0070).
+      const principal = await resolveApiKeyCallerPrincipal(ctx);
+      const service = new TimeEntryService(ctx.db);
       return service.delete({
         userId: ctx.userId,
         entryId: input.entryId,
-        agentActing: isAgentActorToken(ctx.tokenType),
+        agentActing: principal.kind !== "human",
       });
     }),
 
@@ -448,7 +422,7 @@ export const timeEntryRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       // An agent key lists its OWNER's entries — the day it writes into
       // (ADR-0061); the shadow user has no time of its own.
-      const principal = await resolveTimeEntryPrincipal(ctx.db, ctx.userId, ctx.tokenType);
+      const principal = await resolveTimeEntryPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.listByDateRange({
         userId: principal.ownerUserId,
@@ -487,7 +461,7 @@ export const timeEntryRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
-      const principal = await resolveTimeEntryPrincipal(ctx.db, ctx.userId, ctx.tokenType);
+      const principal = await resolveTimeEntryPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.listByAction({
         userId: principal.ownerUserId,

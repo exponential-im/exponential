@@ -87,6 +87,8 @@ model User {
   email                          String?                         @unique
   emailVerified                  DateTime?
   image                          String?
+  /// Opt-in vanity name for the Person page URL (`/people/<handle>`). Humans only, lowercase, unique across the install; freed at once when changed or cleared. Rules: `src/lib/personHandle.ts`.
+  handle                         String?                         @unique
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
   onboardingCompletedAt          DateTime?
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
@@ -162,6 +164,8 @@ model User {
   weeklyReviewSharing            WeeklyReviewSharing[]
   weeklyReviewCompletions        WeeklyReviewCompletion[]
   weeklyWorkDigests              WeeklyWorkDigest[]
+  personWeekSummariesViewed      PersonWeekSummary[]             @relation("PersonWeekSummaryViewer")
+  personWeekSummariesAbout       PersonWeekSummary[]             @relation("PersonWeekSummarySubject")
   portfolioReviewCompletions     PortfolioReviewCompletion[]
   workspaceWeeklyFocuses         WorkspaceWeeklyFocus[]
   wheelOfLifeAssessments         WheelOfLifeAssessment[]
@@ -735,7 +739,10 @@ model OutboundPost {
   subjectId   String
   /// What happened to the subject: "published" | "accepted" | "superseded" | …
   event       String
-  channelLinkId String
+  /// The binding this post was enqueued for. Nulled when the binding is removed: a
+  /// sent row is history and survives; a pending row without a link is cancelled by
+  /// the deliverer, never sent.
+  channelLinkId String?
   /// Denormalised from the link at enqueue, so an unbind cannot orphan the history.
   provider            String
   externalId          String
@@ -752,9 +759,10 @@ model OutboundPost {
   requestedById   String?
   createdAt       DateTime  @default(now())
 
-  channelLink ChannelLink @relation(fields: [channelLinkId], references: [id], onDelete: Cascade)
+  channelLink ChannelLink? @relation(fields: [channelLinkId], references: [id], onDelete: SetNull)
 
   /// A double enqueue is a no-op: at most one post per (subject, event, destination).
+  /// Postgres treats nulls as distinct, so rows whose binding was removed never collide.
   @@unique([kind, subjectId, event, channelLinkId])
   /// The sweep's scan.
   @@index([status, attemptAt])
@@ -840,6 +848,40 @@ model WeeklyWorkDigest {
 
   @@unique([userId, isoYear, isoWeek])
   @@index([userId, generatedAt])
+}
+
+// Cached Person week summary (Person page, V2): an AI summary of one person's
+// (`subjectId`) ISO week, written only from the activity events ONE viewer
+// (`viewerId`) can see on that person's page. One row per (viewer, subject, ISO
+// week). It is a different artifact from WeeklyWorkDigest: that one is a
+// person's own, private digest drawing on meetings and assigned items
+// (ADR-0018); this one never reads either.
+//
+// `eventIds` is what makes the cache safe to serve: the ids of the events the
+// text was written from. A read re-checks them against what the viewer can see
+// now, and a row naming an event that is no longer visible (a page went
+// invite-only, a grant was removed) is regenerated instead of shown.
+// See src/server/services/person/weekSummary/.
+model PersonWeekSummary {
+  id          String   @id @default(cuid())
+  viewerId    String
+  subjectId   String
+  isoYear     Int
+  isoWeek     Int // 1–53
+  narrative   String   @db.Text
+  highlights  Json // string[] - at most 3
+  eventIds    Json // string[] - WorkspaceActivityEvent ids the summary was written from
+  truncated   Boolean  @default(false) // the week held more visible events than one summary reads
+  model       String // e.g. "gpt-4o-mini" or "canned" for a week with nothing visible
+  tokensIn    Int?
+  tokensOut   Int?
+  generatedAt DateTime @default(now())
+
+  viewer  User @relation("PersonWeekSummaryViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+  subject User @relation("PersonWeekSummarySubject", fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([viewerId, subjectId, isoYear, isoWeek])
+  @@index([subjectId])
 }
 
 // Per-workspace settings for the resident copywriter that drafts a Workspace
@@ -4743,6 +4785,12 @@ model Assistant {
   /// workspace membership, which is what makes it an assignee (ADR-0067).
   /// Required: the migration backfills every existing row before setting NOT NULL.
   externalAgentId String   @unique
+  /// Set when the Assistant is retired (one Assistant per person, ADR-0072). A
+  /// retired Assistant keeps its row and its principal, so the history it wrote
+  /// stays attributed, but holds no membership, no keys and is never resolved.
+  /// At most one row per `createdById` has this null: the partial unique index
+  /// "Assistant_active_per_user_key" (SQL only — Prisma cannot express it).
+  retiredAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
@@ -6505,4 +6553,18 @@ model AdrSyncRun {
 
   @@index([configId, startedAt])
   @@index([triggeredById])
+}
+
+/// Instance-wide settings for one install (ADR-0081). A single row, id "instance";
+/// an absent row means every default below, which is how exponential.im runs.
+model InstanceSettings {
+  id                  String    @id @default("instance")
+  /// "open" | "invite-only". Null (or no row) means open. Claiming a
+  /// self-host install sets invite-only; an instance admin can change it in /admin.
+  signUpMode          String?
+  /// SHA-256 of the one-time setup token `start:selfhost` prints while the
+  /// install has no instance admin. Cleared when /setup claims it.
+  setupTokenHash      String?
+  setupTokenExpiresAt DateTime?
+  updatedAt           DateTime  @updatedAt
 }

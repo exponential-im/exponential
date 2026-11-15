@@ -11,10 +11,12 @@ import TableRow from "@tiptap/extension-table-row";
 import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
+import { MarkdownHighlight, MarkdownUnderline } from "./marks";
 import { CommentMark } from "./comment-mark";
 import { PlainTextClipboard } from "./plain-text-clipboard";
 import { PageLink } from "./page-link";
 import { DatabaseNode } from "./database-node";
+import { YouTubeNode } from "./youtube-node";
 
 /**
  * The schema for the **PRD body** — the single scoped exception to ADR-0017
@@ -31,9 +33,12 @@ import { DatabaseNode } from "./database-node";
  * projection.
  *
  * Capability is deliberately "Tier B / Linear-grade": headings, lists, task
- * lists, code blocks, tables, links, inline marks, and anchored comment marks.
+ * lists, code blocks, tables, links, YouTube embeds, inline marks, and anchored
+ * comment marks.
  * Every node/mark here is serialisable by tiptap-markdown except
  * {@link CommentMark}, which intentionally drops from the Markdown projection.
+ * Underline and highlight have no Markdown syntax and project as `<u>`/`<mark>`;
+ * see ./marks for why that is declared rather than left to the HTML fallback.
  */
 export const PRD_DEFAULT_PLACEHOLDER =
   "Write the PRD… select text to format or comment, or type / for blocks.";
@@ -83,6 +88,10 @@ export function buildPrdExtensions(
     }),
     TaskList,
     TaskItem.configure({ nested: true }),
+    // Strike is already in StarterKit and native to Markdown (`~~`); these two
+    // are the marks Markdown has no syntax for. See ./marks.
+    MarkdownUnderline,
+    MarkdownHighlight,
     Image.configure({
       inline: false,
       allowBase64: false,
@@ -101,6 +110,8 @@ export function buildPrdExtensions(
     CommentMark,
     options.pageLink ?? PageLink,
     options.database ?? DatabaseNode,
+    // YouTube embeds: a bare watch URL on its own line in Markdown.
+    YouTubeNode,
     PlainTextClipboard,
     Placeholder.configure({
       placeholder: options.placeholder ?? PRD_DEFAULT_PLACEHOLDER,

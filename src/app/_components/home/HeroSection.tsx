@@ -1,6 +1,5 @@
-import { Container } from "@mantine/core";
 import { CTAButton } from "./shared/CTAButton";
-import { PRODUCT_NAME } from "~/lib/brand";
+import { HeroScene } from "./scenes/HeroScene";
 
 interface HeroSectionProps {
   id?: string;
@@ -8,60 +7,47 @@ interface HeroSectionProps {
 
 export function HeroSection({ id }: HeroSectionProps) {
   return (
-    <section
-      id={id}
-      className="bg-hero-gradient min-h-[75vh] flex items-center relative overflow-hidden"
-    >
-      {/* Subtle radial gradient overlay */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background:
-            "radial-gradient(circle at 50% 30%, var(--color-accent-periwinkle) 0%, transparent 50%)",
-          opacity: 0.15,
-        }}
-      />
+    <section id={id} className="relative overflow-hidden pb-16 md:pb-24">
+      <div className="mkt-container relative pt-16 md:pt-24">
+        <div className="mx-auto max-w-5xl text-center">
+          <p className="mkt-eyebrow mkt-rise mb-6">Open source · AGPL-3.0</p>
 
-      <Container size="lg" className="relative z-10 py-16 md:py-24">
-        <div className="text-center max-w-4xl mx-auto">
-          {/* Badge */}
-          <div className="mb-6 md:mb-8 animate-fade-in">
-            <span className="inline-flex items-center px-5 py-2.5 rounded-full bg-gradient-to-r from-accent-indigo/10 to-accent-periwinkle/10 border border-accent-indigo/20 text-white text-sm font-semibold backdrop-blur-sm">
-              🤖 The OS for AI-native organizations
-            </span>
-          </div>
-
-          {/* Headline */}
-          <h1 className="text-4xl md:text-5xl lg:text-[3.5rem] font-bold text-text-primary mb-6 leading-[1.15] font-inter">
-            Where humans and AI{" "}
-            <span className="bg-gradient-to-r from-accent-indigo to-accent-periwinkle bg-clip-text text-transparent">
-              build together.
-            </span>
+          <h1 className="mkt-h1 mkt-rise mb-6">
+            The operating system for startups run by people and agents
           </h1>
 
-          {/* Subheadline */}
-          <p className="text-lg md:text-xl text-text-secondary max-w-2xl mx-auto mb-8 md:mb-10 leading-relaxed">
-            {PRODUCT_NAME} is the coordination layer for AI-first organizations.
-            Goals cascade into projects. AI handles execution. Your team stays
-            aligned.
+          <p className="mkt-lead mkt-rise mx-auto mb-10 max-w-2xl">
+            Goals, projects, meetings and decisions in one place, with every
+            agent accountable for what it does.
           </p>
 
-          {/* CTA Buttons */}
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-            <CTAButton href="/signin" variant="primary" size="large">
-              Get Started Free
+          <div className="mkt-rise flex flex-col items-center justify-center gap-x-8 gap-y-5 sm:flex-row">
+            <CTAButton href="/signin" variant="pill" size="large">
+              Get started free
             </CTAButton>
-            <CTAButton
-              href="#how-it-works"
-              variant="secondary"
-              size="large"
-              showArrow={false}
-            >
-              See how it works
+            <CTAButton href="#self-host" variant="text">
+              Self-host
             </CTAButton>
           </div>
         </div>
-      </Container>
+
+        {/* The product, in the first screen: one action an agent made, and
+            the record of it. The glow is the page's one brand highlight. */}
+        <div className="mkt-rise relative mx-auto mt-16 max-w-5xl md:mt-20">
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 -top-24 h-48"
+            style={{
+              background:
+                "radial-gradient(60% 50% at 50% 50%, color-mix(in srgb, var(--color-brand-primary) 22%, transparent), transparent)",
+            }}
+          />
+          {/* `relative` lifts the scene above the glow behind it. */}
+          <div className="relative">
+            <HeroScene />
+          </div>
+        </div>
+      </div>
     </section>
   );
 }

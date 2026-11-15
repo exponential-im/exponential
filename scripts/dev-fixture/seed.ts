@@ -94,6 +94,12 @@ export const FIXTURE = {
   /** A third, for the mention spec: mentioning an unassigned Assistant offers the assignment. */
   mentionActionName: "Book the fixture offsite dinner",
   /**
+   * The Person page (`/people/<userId>`): activity events by the colleague, so
+   * their page has rows and the feed has a second actor to click through from.
+   */
+  personActivityEntityPrefix: "dev-fixture-person-activity-",
+  personActivityTitles: ["Draft the handover notes", "Review the venue shortlist"],
+  /**
    * A Position (ADR-0068) held by the fixture user's Assistant, so the Assign
    * modal has a title to show under Aria and the settings page has one row.
    * The fixture user and the colleague hold none, so their rows warn.
@@ -173,6 +179,12 @@ export interface SeededFixture {
   projectMeetingsUrl: string;
   /** The project's DRI, a second workspace member — preselected when scheduling. */
   colleagueName: string;
+  /** Their user id, for their Person page (`/people/<id>`). */
+  colleagueUserId: string;
+  /** Titles of the actions the colleague's seeded activity events name, newest last. */
+  colleagueActivityTitles: readonly string[];
+  /** The shadow user of `assistantName` (the fixture user's Assistant). */
+  assistantUserId: string;
   /** A CRM contact in the workspace, invitable as an external attendee. */
   contactName: string;
   /**
@@ -184,6 +196,9 @@ export interface SeededFixture {
   /** A page with no database yet, for the database-block spec (ADR-0078). Reset on every seed. */
   databasePageId: string;
   databasePageUrl: string;
+  /** A prose-only page for the YouTube embed spec, kept apart from the database one. Reset on every seed. */
+  youtubePageId: string;
+  youtubePageUrl: string;
 }
 
 interface TicketSpec {
@@ -362,18 +377,44 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     },
   });
 
-  let feature = await db.feature.findFirst({
-    where: { productId: product.id, name: FIXTURE.featureName },
+  // Found through the seeded tickets first, then by name: a dev session that
+  // renames the feature would otherwise make the next seed miss it and create
+  // a second one, and both then show wherever the fixture feature is listed
+  // (the KR accordion found two "Tickets accordion fixture" links that way).
+  // The name and status are put back on every seed.
+  const anchorTicket = await db.ticket.findUnique({
+    where: { productId_number: { productId: product.id, number: 1 } },
+    select: { feature: { select: { id: true, productId: true } } },
   });
-  feature ??= await db.feature.create({
-    data: {
-      productId: product.id,
-      name: FIXTURE.featureName,
-      description:
-        "Seeded by scripts/seed-dev-fixture.ts for visual verification of the feature Tickets accordion.",
-      status: "IN_PROGRESS",
-      createdById: user.id,
-    },
+  const existingFeatureId =
+    (anchorTicket?.feature?.productId === product.id ? anchorTicket.feature.id : undefined) ??
+    (
+      await db.feature.findFirst({
+        where: { productId: product.id, name: FIXTURE.featureName },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      })
+    )?.id;
+  const feature = existingFeatureId
+    ? await db.feature.update({
+        where: { id: existingFeatureId },
+        data: { name: FIXTURE.featureName, status: "IN_PROGRESS" },
+      })
+    : await db.feature.create({
+        data: {
+          productId: product.id,
+          name: FIXTURE.featureName,
+          description:
+            "Seeded by scripts/seed-dev-fixture.ts for visual verification of the feature Tickets accordion.",
+          status: "IN_PROGRESS",
+          createdById: user.id,
+        },
+      });
+  // Same-named copies left by earlier seeds lose the name, so the fixture
+  // feature is the only one a spec can find by it.
+  await db.feature.updateMany({
+    where: { productId: product.id, name: FIXTURE.featureName, id: { not: feature.id } },
+    data: { name: `${FIXTURE.featureName} (stale copy)` },
   });
 
   let scope = await db.featureScope.findFirst({
@@ -392,8 +433,12 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
   for (const spec of TICKETS) {
     const ticket = await db.ticket.upsert({
       where: { productId_number: { productId: product.id, number: spec.number } },
+      // Title, priority and assignee are put back too: specs find tickets by title.
       update: {
+        title: spec.title,
         status: spec.status,
+        priority: spec.priority,
+        assigneeId: spec.assign ? user.id : null,
         featureId: spec.scopeOnly ? null : feature.id,
         scopeId: spec.scopeOnly ? scope.id : null,
       },
@@ -462,6 +507,22 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     create: { userId: colleague.id, workspaceId: otherWorkspace.id, role: "member" },
   });
   await db.position.deleteMany({ where: { workspaceId: otherWorkspace.id } });
+  // Activity by the colleague, so their Person page (`/people/<id>`) has rows
+  // and `/activity` has an actor other than the fixture user to click through
+  // from. Re-created on every seed so the rows are always the newest.
+  await db.workspaceActivityEvent.deleteMany({
+    where: { entityId: { startsWith: FIXTURE.personActivityEntityPrefix } },
+  });
+  await db.workspaceActivityEvent.createMany({
+    data: FIXTURE.personActivityTitles.map((title, index) => ({
+      workspaceId: workspace.id,
+      userId: colleague.id,
+      entityType: "action",
+      entityId: `${FIXTURE.personActivityEntityPrefix}${index}`,
+      action: "created",
+      metadata: { title },
+    })),
+  });
   // One Assistant each for the fixture user and the colleague, so the Assign
   // modal has "your assistant" to pin first and a teammate's to group below.
   // Each Assistant owns an External agent whose shadow user is a workspace
@@ -661,12 +722,15 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       parentGoalId: opts.parentGoalId ?? null,
       displayOrder: opts.displayOrder,
       workspaceId: workspace.id,
-      ...(opts.onProject ? { projects: { connect: { id: goalProject.id } } } : {}),
     };
+    const projectIds = opts.onProject ? [{ id: goalProject.id }] : [];
+    // `set`, not `connect`: the Goals tab nests every project a goal carries
+    // under it, so a project linked in a dev session (or a renamed copy of
+    // this one) would add rows the spec counts.
     return existing
-      ? await db.goal.update({ where: { id: existing.id }, data })
+      ? await db.goal.update({ where: { id: existing.id }, data: { ...data, projects: { set: projectIds } } })
       : await db.goal.create({
-          data: { title, userId: user.id, ...data },
+          data: { title, userId: user.id, ...data, projects: { connect: projectIds } },
         });
   };
 
@@ -690,6 +754,12 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     parentGoalId: offProjectParentGoal.id,
     onProject: true,
     displayOrder: 3,
+  });
+
+  // And the project's side: the tab lists exactly these three goals.
+  await db.project.update({
+    where: { id: goalProject.id },
+    data: { goals: { set: [parentGoal, childGoal, detachedChildGoal].map((g) => ({ id: g.id })) } },
   });
 
   const completedGoal = await upsertGoal(FIXTURE.completedGoalTitle, {
@@ -783,6 +853,14 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     update: {},
     create: { keyResultId: keyResult.id, featureId: feature.id },
   });
+  // The KR accordion lists exactly one project and one feature: drop links an
+  // earlier fixture row (or a dev session) left on the KR.
+  await db.keyResultProject.deleteMany({
+    where: { keyResultId: keyResult.id, projectId: { not: project.id } },
+  });
+  await db.keyResultFeature.deleteMany({
+    where: { keyResultId: keyResult.id, featureId: { not: feature.id } },
+  });
 
   // Ceremonies (ADR-0059): one Daily Standup definition, one occurrence that
   // has already been captured, and a recorded meeting attached to it - the
@@ -820,8 +898,12 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     create: { ceremonyId: ceremony.id, userId: user.id },
   });
 
-  // 09:00 Europe/Berlin on Monday 8 September 2026 (CEST, UTC+2).
+  // 09:00 Europe/Berlin on Tuesday 8 September 2026 (CEST, UTC+2).
   const occurrenceStart = new Date("2026-09-08T07:00:00.000Z");
+  // The recording started a couple of minutes after the tick, as real ones do.
+  // Dated exactly on it, the meeting page's picker hides "Add occurrence at
+  // <recording time>" (that slot is taken), so ceremonies.spec could not see it.
+  const recordingStart = new Date(occurrenceStart.getTime() + 2 * 60_000);
   const occurrenceEnd = new Date(occurrenceStart.getTime() + ceremony.durationMinutes * 60_000);
   const occurrence = await db.ceremonyOccurrence.upsert({
     where: {
@@ -877,20 +959,20 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       occurrenceId: occurrence.id,
       userId: user.id,
       title: FIXTURE.meetingTitle,
-      meetingDate: occurrenceStart,
+      meetingDate: recordingStart,
       transcription: storedTranscript,
       summary: meetingSummary,
     },
     create: {
       sessionId: FIXTURE.meetingSessionId,
       title: FIXTURE.meetingTitle,
-      meetingDate: occurrenceStart,
+      meetingDate: recordingStart,
       userId: user.id,
       workspaceId: workspace.id,
       occurrenceId: occurrence.id,
       transcription: storedTranscript,
       summary: meetingSummary,
-      processedAt: occurrenceStart,
+      processedAt: recordingStart,
       durationSeconds: 9 * 60,
       participantCount: 2,
     },
@@ -919,7 +1001,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
         url: captureSvg(label),
         timestamp: i === 0 ? "00:42" : "01:58",
         transcriptionSessionId: meeting.id,
-        createdAt: new Date(occurrenceStart.getTime() + (i + 1) * 60_000),
+        createdAt: new Date(recordingStart.getTime() + (i + 1) * 60_000),
       },
     });
   }
@@ -1146,10 +1228,37 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       });
   await db.pageDatabase.deleteMany({ where: { pageId: databasePage.id } });
 
+  // The YouTube embed spec gets its own page: embeds it leaves behind would
+  // otherwise sit under the database-block spec's clicks (a player iframe
+  // takes focus), and the two specs run in parallel.
+  const youtubePageTitle = "YouTube embed fixture";
+  const youtubePageBody = "# YouTube embed fixture\n\nA page the e2e suite embeds videos in.";
+  const existingYoutubePage = await db.knowledgePage.findFirst({
+    where: { workspaceId: workspace.id, createdById: user.id, title: youtubePageTitle, databaseId: null },
+    select: { id: true },
+  });
+  const youtubePage = existingYoutubePage
+    ? await db.knowledgePage.update({
+        where: { id: existingYoutubePage.id },
+        data: { body: youtubePageBody, bodyDoc: Prisma.DbNull, docVersion: { increment: 1 } },
+        select: { id: true },
+      })
+    : await db.knowledgePage.create({
+        data: {
+          workspaceId: workspace.id,
+          createdById: user.id,
+          title: youtubePageTitle,
+          body: youtubePageBody,
+        },
+        select: { id: true },
+      });
+
   const base = `/w/${FIXTURE.workspaceSlug}/products/${FIXTURE.productSlug}`;
   return {
     databasePageId: databasePage.id,
     databasePageUrl: `/w/${FIXTURE.workspaceSlug}/pages/${databasePage.id}`,
+    youtubePageId: youtubePage.id,
+    youtubePageUrl: `/w/${FIXTURE.workspaceSlug}/pages/${youtubePage.id}`,
     tagId: tag.id,
     tagName: FIXTURE.tagName,
     assistantName: FIXTURE.assistantName,
@@ -1173,6 +1282,9 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     openQuestionStatement: FIXTURE.openQuestionStatement,
     projectMeetingsUrl: `/w/${FIXTURE.workspaceSlug}/projects/${project.slug}?tab=transcriptions`,
     colleagueName: FIXTURE.colleagueName,
+    colleagueUserId: colleague.id,
+    colleagueActivityTitles: FIXTURE.personActivityTitles,
+    assistantUserId: ariaAssistant.externalAgent.shadowUserId,
     contactName: `${FIXTURE.contactFirstName} ${FIXTURE.contactLastName}`,
     canScheduleWithContact: canEncrypt,
     projectGoalsUrl: `/w/${FIXTURE.workspaceSlug}/projects/${goalProject.slug}?tab=goals`,
