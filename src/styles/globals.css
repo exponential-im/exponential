@@ -137,6 +137,14 @@
     --accent-due: #F87171;
     --color-text-faint: #adb5bd;
 
+    /* An accent used as TEXT. The accents above are fills: on a white page
+       they read at 1.6:1 to 2.7:1, so labels and pills take these, darkened
+       to 4.5:1 or better (same pattern as --color-warning-text). */
+    --accent-meetings-text: color-mix(in srgb, var(--accent-meetings) 65%, black);
+    --accent-crm-text: color-mix(in srgb, var(--accent-crm) 45%, black);
+    --accent-okr-text: color-mix(in srgb, var(--accent-okr) 55%, black);
+    --accent-due-text: color-mix(in srgb, var(--accent-due) 65%, black);
+
     /* Kanban column + priority badge accents */
     --accent-neutral: #6F7F98;
     --accent-high: #FBA74C;
@@ -379,6 +387,12 @@
     --accent-okr: #F5B94A;
     --accent-due: #F87171;
     --color-text-faint: #3F4A5C;
+
+    /* An accent used as text: on dark surfaces the accent itself reads fine. */
+    --accent-meetings-text: var(--accent-meetings);
+    --accent-crm-text: var(--accent-crm);
+    --accent-okr-text: var(--accent-okr);
+    --accent-due-text: var(--accent-due);
 
     /* Kanban column + priority badge accents */
     --accent-neutral: #6F7F98;

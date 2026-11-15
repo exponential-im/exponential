@@ -96,7 +96,7 @@
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--accent-meetings);
+  color: var(--accent-meetings-text);
   padding: 4px 10px;
   border-radius: 100px;
   background: rgb(var(--accent-meetings-rgb) / 0.12);
@@ -135,7 +135,7 @@
   padding: 1px 6px;
   border-radius: 3px;
   background: rgb(var(--accent-crm-rgb) / 0.14);
-  color: var(--accent-crm);
+  color: var(--accent-crm-text);
 }
 
 .ch-hero__title {
@@ -235,7 +235,7 @@
   color: var(--color-text-muted);
   display: inline-flex; align-items: center; gap: 3px;
 }
-.ch-hero__stat-delta--up { color: var(--accent-crm); }
+.ch-hero__stat-delta--up { color: var(--accent-crm-text); }
 
 /* --- Wheel of Life card ---------------------------------------------- */
 .ch-wheel-card {
@@ -353,7 +353,7 @@
   transition: color 120ms, border-color 120ms;
 }
 .ch-wheel-card__cta:hover {
-  color: var(--accent-meetings);
+  color: var(--accent-meetings-text);
   border-color: rgb(var(--accent-meetings-rgb) / 0.45);
 }
 .ch-wheel-card__empty {
@@ -422,18 +422,18 @@
   background: currentColor;
 }
 .ch-goal-card__health--ontrack {
-  color: var(--accent-crm);
+  color: var(--accent-crm-text);
   background: rgb(var(--accent-crm-rgb) / 0.10);
   border: 1px solid rgb(var(--accent-crm-rgb) / 0.22);
 }
 .ch-goal-card__health--atrisk {
-  color: var(--accent-okr);
+  color: var(--accent-okr-text);
   background: rgb(var(--accent-okr-rgb) / 0.10);
   border: 1px solid rgb(var(--accent-okr-rgb) / 0.22);
 }
 .ch-goal-card__health--stalled,
 .ch-goal-card__health--off-track {
-  color: var(--accent-due);
+  color: var(--accent-due-text);
   background: rgb(var(--accent-due-rgb) / 0.10);
   border: 1px solid rgb(var(--accent-due-rgb) / 0.22);
 }
@@ -516,7 +516,7 @@
   gap: 8px;
 }
 .ch-goal-card__empty-link {
-  color: var(--accent-meetings);
+  color: var(--accent-meetings-text);
   text-decoration: none;
 }
 .ch-goal-card__empty-link:hover { text-decoration: underline; }
@@ -618,12 +618,12 @@
 .ch-commit.is-done .ch-commit__check {
   background: rgb(var(--accent-crm-rgb) / 0.16);
   border-color: rgb(var(--accent-crm-rgb) / 0.22);
-  color: var(--accent-crm);
+  color: var(--accent-crm-text);
 }
 .ch-commit.is-missed .ch-commit__check {
   background: rgb(var(--accent-due-rgb) / 0.10);
   border-color: rgb(var(--accent-due-rgb) / 0.22);
-  color: var(--accent-due);
+  color: var(--accent-due-text);
 }
 .ch-commit__body { min-width: 0; }
 .ch-commit__title {
@@ -664,7 +664,7 @@
 }
 .ch-commit__day.is-done {
   background: rgb(var(--accent-crm-rgb) / 0.10);
-  color: var(--accent-crm);
+  color: var(--accent-crm-text);
 }
 .ch-commit-col__empty {
   margin-top: 10px;
@@ -725,7 +725,7 @@
   background: var(--color-text-faint);
 }
 .ch-reflect__week-status {
-  color: var(--accent-okr);
+  color: var(--accent-okr-text);
   font-size: 11px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -818,7 +818,7 @@
   cursor: pointer;
   text-decoration: none;
 }
-.ch-reflect__history-link:hover { color: var(--accent-meetings); }
+.ch-reflect__history-link:hover { color: var(--accent-meetings-text); }
 
 .ch-reflect__history-list { list-style: none; margin: 0; padding: 0; }
 .ch-reflect__hrow {
@@ -855,7 +855,7 @@
   font-family: var(--ch-font-display);
 }
 .ch-reflect__harrow { color: var(--color-text-faint); }
-.ch-reflect__hrow:hover .ch-reflect__harrow { color: var(--accent-meetings); }
+.ch-reflect__hrow:hover .ch-reflect__harrow { color: var(--accent-meetings-text); }
 
 /* ==========================================================================
    ANIMATIONS
