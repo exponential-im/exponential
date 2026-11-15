@@ -59,6 +59,7 @@ export const PUBLIC_PREFIXES = [
   '/explore',
   '/learn',
   '/product-timeline',
+  '/compare', // marketing comparison pages (Exponential vs …)
   '/features/', // marketing feature pages — bare /features is the app's
   /**
    * Product documentation. Bare, because `/docs` is itself a public index

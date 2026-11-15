@@ -233,6 +233,8 @@ describe('middleware matcher', () => {
       '/blog',
       '/explore',
       '/features/some-marketing-page',
+      '/compare',
+      '/compare/linear',
       '/p/published-page',
       '/updates/acme',
       '/updates/acme/feed.xml',
@@ -260,6 +262,7 @@ describe('middleware matcher', () => {
       '/explorer',
       '/learners',
       '/product-timeline-admin',
+      '/compared',
       '/auth/verify-request-token',
     ])('%s is not opened by a bare public prefix', (route) => {
       expect(isPublicPath(route)).toBe(false);
@@ -271,6 +274,7 @@ describe('middleware matcher', () => {
       ['/blog', '/blog/some-post'],
       ['/explore', '/explore/a-project/bounties/1'],
       ['/learn', '/learn/a-lesson'],
+      ['/compare', '/compare/linear'],
     ])('%s opens itself and %s', (index, child) => {
       expect(isPublicPath(index)).toBe(true);
       expect(isPublicPath(child)).toBe(true);
