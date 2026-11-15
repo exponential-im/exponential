@@ -16,6 +16,7 @@ import { useDisclosure } from "@mantine/hooks";
 import { IconAlertTriangle, IconServer } from "@tabler/icons-react";
 import { MatrixRoomPicker } from "~/app/_components/matrix/MatrixRoomPicker";
 import { MatrixRoomBinding } from "~/app/_components/matrix/MatrixRoomBinding";
+import { Panel } from "~/app/_components/ui";
 import { useState } from "react";
 import { api } from "~/trpc/react";
 
@@ -141,7 +142,7 @@ export function MatrixServerSettings({
       )}
 
       {servers.length > 0 && (
-        <Stack gap={4} className="rounded-md border border-border-primary bg-surface-secondary p-3">
+        <Panel radius="md" padding="sm" className="flex flex-col gap-1">
           <Text size="sm" fw={600} className="text-text-primary">
             Decisions room
           </Text>
@@ -152,7 +153,7 @@ export function MatrixServerSettings({
             switch decisions off.
           </Text>
           <MatrixRoomBinding workspaceId={workspace.id} projectId={null} kind="decision" />
-        </Stack>
+        </Panel>
       )}
 
       {removeMutation.error && (
