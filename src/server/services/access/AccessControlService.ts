@@ -188,7 +188,7 @@ export class AccessControlService {
     if (checkActionPermission(access, permission)) {
       const path = access.isCreator
         ? "owner"
-        : access.isCreatorAgentOwner
+        : access.canEditAsAgentOwner || (permission === "view" && access.hasAgentOwnerAccess)
           ? "agent-owner"
           : access.isAssignee
             ? "assignee"

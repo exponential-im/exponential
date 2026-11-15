@@ -43,13 +43,14 @@ import {
   buildProjectAccessWhere,
 } from "../resolvers/projectResolver";
 
-import { canEditWorkspaceContent } from "../resolvers/workspaceResolver";
+import { buildWorkspaceAccessWhere, canEditWorkspaceContent } from "../resolvers/workspaceResolver";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 function makeActionAccess(overrides: Partial<{
   isCreator: boolean;
-  isCreatorAgentOwner: boolean;
+  hasAgentOwnerAccess: boolean;
+  canEditAsAgentOwner: boolean;
   isAssignee: boolean;
   hasProjectAccess: boolean;
   canEditProject: boolean;
@@ -57,7 +58,8 @@ function makeActionAccess(overrides: Partial<{
 }> = {}) {
   return {
     isCreator: false,
-    isCreatorAgentOwner: false,
+    hasAgentOwnerAccess: false,
+    canEditAsAgentOwner: false,
     isAssignee: false,
     hasProjectAccess: false,
     canEditProject: false,
@@ -166,7 +168,7 @@ describe("canViewAction", () => {
   });
 
   it("the owner of the agent that created it can view", () => {
-    expect(canViewAction(makeActionAccess({ isCreatorAgentOwner: true }))).toBe(true);
+    expect(canViewAction(makeActionAccess({ hasAgentOwnerAccess: true }))).toBe(true);
   });
 
   it("assignee can always view", () => {
@@ -189,8 +191,12 @@ describe("canEditAction", () => {
     expect(canEditAction(makeActionAccess({ isCreator: true }))).toBe(true);
   });
 
-  it("the owner of the agent that created it can edit", () => {
-    expect(canEditAction(makeActionAccess({ isCreatorAgentOwner: true }))).toBe(true);
+  it("the owner of the agent that created it can edit at a write role", () => {
+    expect(canEditAction(makeActionAccess({ canEditAsAgentOwner: true }))).toBe(true);
+  });
+
+  it("read-level agent-owner access (a workspace viewer) cannot edit", () => {
+    expect(canEditAction(makeActionAccess({ hasAgentOwnerAccess: true }))).toBe(false);
   });
 
   it("assignee can edit", () => {
@@ -230,14 +236,16 @@ describe("checkActionPermission", () => {
 
   it("delete requires creator, the creating agent's owner, or project editor", () => {
     expect(checkActionPermission(makeActionAccess({ isCreator: true }), "delete")).toBe(true);
-    expect(checkActionPermission(makeActionAccess({ isCreatorAgentOwner: true }), "delete")).toBe(true);
+    expect(checkActionPermission(makeActionAccess({ canEditAsAgentOwner: true }), "delete")).toBe(true);
+    expect(checkActionPermission(makeActionAccess({ hasAgentOwnerAccess: true }), "delete")).toBe(false);
     expect(checkActionPermission(makeActionAccess({ canEditProject: true }), "delete")).toBe(true);
     expect(checkActionPermission(makeActionAccess({ isAssignee: true }), "delete")).toBe(false);
   });
 
   it("admin requires creator, the creating agent's owner, or project editor", () => {
     expect(checkActionPermission(makeActionAccess({ isCreator: true }), "admin")).toBe(true);
-    expect(checkActionPermission(makeActionAccess({ isCreatorAgentOwner: true }), "admin")).toBe(true);
+    expect(checkActionPermission(makeActionAccess({ canEditAsAgentOwner: true }), "admin")).toBe(true);
+    expect(checkActionPermission(makeActionAccess({ hasAgentOwnerAccess: true }), "admin")).toBe(false);
     expect(checkActionPermission(makeActionAccess({ canEditProject: true }), "admin")).toBe(true);
     expect(checkActionPermission(makeActionAccess({ isAssignee: true }), "admin")).toBe(false);
   });
@@ -261,10 +269,17 @@ describe("buildActionAccessWhere", () => {
     expect(where.OR[0]).toEqual({ createdById: "user-123" });
   });
 
-  it("includes created-by-an-agent-the-user-owns path", () => {
+  it("includes created-by-an-agent-the-user-owns path, scoped to a workspace they still belong to", () => {
     const where = buildActionAccessWhere("user-123");
+    const stillMember = buildWorkspaceAccessWhere("user-123");
     expect(where.OR[1]).toEqual({
       createdBy: { externalAgentShadow: { ownerId: "user-123" } },
+      OR: [
+        { workspace: stillMember },
+        { workspaceId: null, project: { workspace: stillMember } },
+        { workspaceId: null, projectId: null },
+        { workspaceId: null, project: { workspaceId: null } },
+      ],
     });
   });
 

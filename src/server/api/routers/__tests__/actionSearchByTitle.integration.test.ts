@@ -107,9 +107,10 @@ describe("action.searchByTitle", () => {
     expect(ids).not.toContain(oldDone.id);
   });
 
-  // Real SQL for the relation filter behind `isCreatorAgentOwner`: an agent
-  // writes as its shadow user (ADR-0049), so this row has no project, no
-  // assignee and a creator that is nobody's own account.
+  // Real SQL for the nested relation filters behind the agent-owner path
+  // (creator → agent → owner, and the owner's standing in the action's
+  // workspace): an agent writes as its shadow user (ADR-0049), so this row
+  // has no project, no assignee and a creator that is nobody's own account.
   it("lets an agent's owner find, open and complete a project-less action the agent created", async () => {
     const owner = await createUser(db);
     const teammate = await createUser(db);
@@ -144,5 +145,15 @@ describe("action.searchByTitle", () => {
     const theirs = await asTeammate.search.global({ query: "payments", workspaceId: ws.id });
     expect(theirs.results.filter((r) => r.type === "action")).toEqual([]);
     await expect(asTeammate.action.getById({ id: action.id })).rejects.toThrow(/not found/i);
+
+    // The path ends with the workspace: once the owner is removed, neither
+    // the workspace search nor the all-workspaces one reaches the row.
+    await db.workspaceUser.delete({
+      where: { userId_workspaceId: { userId: owner.id, workspaceId: ws.id } },
+    });
+    const afterRemoval = await asOwner.search.global({ query: "payments" });
+    expect(afterRemoval.results.filter((r) => r.type === "action")).toEqual([]);
+    await expect(asOwner.action.getById({ id: action.id })).rejects.toThrow(/not found/i);
+    await expect(asOwner.action.update({ id: action.id, name: "Renamed" })).rejects.toThrow();
   });
 });
