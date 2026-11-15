@@ -25,7 +25,8 @@ import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/co
  * can give itself or another agent a Position, however it authenticated.
  * Owners and admins (`manage_members`) create, rename, delete, set holders
  * and import; a holder who is at least a `member` may edit the Remit of a
- * Position they hold (`update`); a viewer is read-only even as a holder.
+ * Position they hold (`update`); a viewer is read-only even as a holder. A
+ * person may withdraw their own agent from any Position (`withdrawMyAgent`).
  * `coverage` is a read for any member (the chat's import pill).
  *
  * Every procedure takes `workspaceId` so `requireWorkspaceMembership` gates
@@ -562,6 +563,42 @@ export const positionRouter = createTRPCRouter({
         // a holder removed mid-write: the same answers as create/setHolders.
         rethrowPositionWrite(error);
       }
+    }),
+
+  /**
+   * Take your own agent — normally your Assistant — out of a Position an
+   * owner or admin made it a holder of (Agent PRD D9). Authorised not by
+   * `manage_members` but by owning the holder's External agent: you are
+   * accountable for what it does there, so you may always withdraw it. A
+   * stranger's agent is FORBIDDEN; a Position from another workspace, or one
+   * the agent does not hold, is NOT_FOUND. Deletes the one holder row; the
+   * Position reads "Vacant" if that was its last holder.
+   */
+  withdrawMyAgent: humanOnlyProcedure
+    .input(z.object({ workspaceId: z.string(), positionId: z.string(), userId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .mutation(async ({ ctx, input }) => {
+      await requirePositionInWorkspace(ctx.db, input.positionId, input.workspaceId);
+      const agent = await ctx.db.externalAgent.findUnique({
+        where: { shadowUserId: input.userId },
+        select: { ownerId: true },
+      });
+      if (agent?.ownerId !== ctx.session.user.id) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only the person whose agent holds this Position can withdraw it",
+        });
+      }
+      const { count } = await ctx.db.positionHolder.deleteMany({
+        where: {
+          positionId: input.positionId,
+          workspaceUser: { userId: input.userId, workspaceId: input.workspaceId },
+        },
+      });
+      if (count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Your agent does not hold this Position" });
+      }
+      return { positionId: input.positionId, userId: input.userId };
     }),
 
   /**

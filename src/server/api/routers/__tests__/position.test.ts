@@ -562,6 +562,89 @@ describe("position.setHolders", () => {
   });
 });
 
+describe("position.withdrawMyAgent (Agent PRD D9)", () => {
+  let db: DeepMockProxy<PrismaClient>;
+  const AGENT_USER_ID = "shadow-aria";
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    arrangePosition(db);
+    db.positionHolder.deleteMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("the agent's owner withdraws it — even as a plain member — deleting the one holder row", async () => {
+    arrangeCaller(db, "member");
+    db.externalAgent.findUnique.mockResolvedValue({ ownerId: USER_ID } as never);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: AGENT_USER_ID }),
+    ).resolves.toEqual({ positionId: POSITION_ID, userId: AGENT_USER_ID });
+
+    expect(db.externalAgent.findUnique).toHaveBeenCalledWith({
+      where: { shadowUserId: AGENT_USER_ID },
+      select: { ownerId: true },
+    });
+    expect(db.positionHolder.deleteMany).toHaveBeenCalledWith({
+      where: {
+        positionId: POSITION_ID,
+        workspaceUser: { userId: AGENT_USER_ID, workspaceId: WORKSPACE_ID },
+      },
+    });
+  });
+
+  it("a stranger — even an owner by role — → FORBIDDEN, nothing written", async () => {
+    arrangeCaller(db, "owner");
+    db.externalAgent.findUnique.mockResolvedValue({ ownerId: "someone-else" } as never);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: AGENT_USER_ID }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.positionHolder.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("a human holder is not an agent anyone owns → FORBIDDEN", async () => {
+    arrangeCaller(db, "member");
+    db.externalAgent.findUnique.mockResolvedValue(null);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: "human-andi" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.positionHolder.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("a Position from another workspace → NOT_FOUND, before any ownership read", async () => {
+    arrangeCaller(db, "member");
+    arrangePosition(db, OTHER_WORKSPACE_ID);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: AGENT_USER_ID }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(db.externalAgent.findUnique).not.toHaveBeenCalled();
+    expect(db.positionHolder.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("a Position the agent does not hold → NOT_FOUND", async () => {
+    arrangeCaller(db, "member");
+    db.externalAgent.findUnique.mockResolvedValue({ ownerId: USER_ID } as never);
+    db.positionHolder.deleteMany.mockResolvedValue({ count: 0 } as never);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: AGENT_USER_ID }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+
+  it("is refused for an agent principal, nothing written (ADR-0049)", async () => {
+    arrangeCaller(db, "member", { isAgent: true });
+    db.externalAgent.findUnique.mockResolvedValue({ ownerId: USER_ID } as never);
+
+    await expect(
+      caller(db).position.withdrawMyAgent({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userId: AGENT_USER_ID }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.positionHolder.deleteMany).not.toHaveBeenCalled();
+  });
+});
+
 describe("position.list", () => {
   let db: DeepMockProxy<PrismaClient>;
 
