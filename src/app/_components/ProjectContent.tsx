@@ -47,6 +47,7 @@ import {
   IconWorld,
   IconStopwatch,
   IconFileText,
+  IconBookmark,
 } from "@tabler/icons-react";
 import { addDays, format, isBefore, startOfDay } from "date-fns";
 import overviewStyles from "./ProjectOverview.module.css";
@@ -66,6 +67,7 @@ import { GoalIcon } from "./GoalIcon";
 import { IconPicker } from "./IconPicker";
 import { ProjectTimeTab } from "./ProjectTimeTab";
 import { PagesListContent } from "~/app/_components/pages/PagesListContent";
+import { ProjectResourcesTab } from "~/app/_components/knowledge-base/ProjectResourcesTab";
 import { daysLeftLabel, daysUntil, resolveProjectTargetDate } from "~/lib/projectTargetDate";
 import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
@@ -80,6 +82,7 @@ type TabValue =
   | "timeline"
   | "time"
   | "pages"
+  | "resources"
   | "transcriptions"
   | "integrations"
   | "workflows"
@@ -94,6 +97,7 @@ const VALID_TABS: TabValue[] = [
   "timeline",
   "time",
   "pages",
+  "resources",
   "transcriptions",
   "integrations",
   "workflows",
@@ -568,6 +572,9 @@ export function ProjectContent({
                   Pages
                 </Tabs.Tab>
               )}
+              <Tabs.Tab value="resources" leftSection={<IconBookmark size={14} />}>
+                Resources
+              </Tabs.Tab>
               {/* Team Weekly Planning Tabs - Only show for team projects */}
               {project.teamId && (
                 <>
@@ -671,6 +678,17 @@ export function ProjectContent({
                   workspaceSlug={workspace.slug}
                   projectId={resolvedProjectId}
                   readOnly={!myAccess?.canEdit}
+                />
+              )}
+            </Tabs.Panel>
+
+            <Tabs.Panel value="resources">
+              {/* Mounted only while active, like Pages: its list is its own query. */}
+              {activeTab === "resources" && (
+                <ProjectResourcesTab
+                  projectId={resolvedProjectId}
+                  workspaceSlug={workspace?.slug}
+                  canEdit={!!myAccess?.canEdit}
                 />
               )}
             </Tabs.Panel>
@@ -924,6 +942,19 @@ export function ProjectContent({
                   <MatrixRoomBinding
                     workspaceId={workspaceId}
                     projectId={resolvedProjectId}
+                  />
+                )}
+                <Text size="sm" className="text-text-secondary" mt="xs">
+                  Decisions → Matrix. Posted when a person confirms, accepts or
+                  supersedes one of this project&apos;s decisions; agent drafts never
+                  post. Off keeps them out of Matrix even when the workspace has a
+                  decisions room.
+                </Text>
+                {workspaceId && resolvedProjectId && (
+                  <MatrixRoomBinding
+                    workspaceId={workspaceId}
+                    projectId={resolvedProjectId}
+                    kind="decision"
                   />
                 )}
               </Stack>

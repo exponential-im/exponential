@@ -20,8 +20,18 @@ import { markdownBytes } from "~/lib/pages/markdown-outline";
 
 type Db = PrismaClient | Prisma.TransactionClient;
 
-/** `baseline` rows are seeded by the migration for pages that predate history; never written here. */
-export type PageRevisionKind = "baseline" | "create" | "editor" | "markdown" | "restore";
+/**
+ * `baseline` rows are seeded by the migration for pages that predate history;
+ * never written here. `properties` is a Row's values written through
+ * `database.*` (ADR-0078): it snapshots body and properties both.
+ */
+export type PageRevisionKind =
+  | "baseline"
+  | "create"
+  | "editor"
+  | "markdown"
+  | "properties"
+  | "restore";
 
 /** Editor saves by one author inside this window are one revision. */
 export const REVISION_FOLD_WINDOW_MS = 10 * 60 * 1000;
@@ -37,6 +47,13 @@ export interface RecordPageRevisionInput {
   authorId: string | null;
   /** Why the change was made. A note always gets its own row. */
   note?: string | null;
+  /**
+   * Fold into the latest revision of the same kind by the same author inside
+   * the window. Defaults to true for `editor`; a `properties` write from the
+   * table block passes true too, so cell edits read as one session, while
+   * the same write from the CLI or an agent leaves it false.
+   */
+  fold?: boolean;
   now?: Date;
 }
 
@@ -50,7 +67,15 @@ export async function recordPageRevision(
 ): Promise<{ id: string; folded: boolean }> {
   const page = await db.knowledgePage.findUnique({
     where: { id: input.pageId },
-    select: { title: true, body: true, bodyDoc: true, source: true, asOf: true, docVersion: true },
+    select: {
+      title: true,
+      body: true,
+      bodyDoc: true,
+      source: true,
+      asOf: true,
+      properties: true,
+      docVersion: true,
+    },
   });
   if (!page) {
     throw new Error(`recordPageRevision: page ${input.pageId} not found`);
@@ -60,8 +85,12 @@ export async function recordPageRevision(
   // A null doc is written as SQL NULL (not JSON `null`), matching the page row.
   const bodyDoc =
     page.bodyDoc === null ? Prisma.DbNull : (page.bodyDoc as Prisma.InputJsonValue);
+  // A Row's values travel with its body (ADR-0078); null on an ordinary page.
+  const properties =
+    page.properties === null ? Prisma.DbNull : (page.properties as Prisma.InputJsonValue);
 
-  if (input.kind === "editor" && !note) {
+  const fold = input.fold ?? input.kind === "editor";
+  if (fold && !note) {
     const latest = await db.knowledgePageRevision.findFirst({
       where: { pageId: input.pageId },
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -69,7 +98,7 @@ export async function recordPageRevision(
     });
     const foldable =
       latest &&
-      latest.kind === "editor" &&
+      latest.kind === input.kind &&
       latest.authorId === input.authorId &&
       !latest.note &&
       now.getTime() - latest.updatedAt.getTime() < REVISION_FOLD_WINDOW_MS;
@@ -83,6 +112,7 @@ export async function recordPageRevision(
           bodyDoc,
           source: page.source,
           asOf: page.asOf,
+          properties,
           bodyBytes: markdownBytes(page.body),
           updatedAt: now,
         },
@@ -100,6 +130,7 @@ export async function recordPageRevision(
       bodyDoc,
       source: page.source,
       asOf: page.asOf,
+      properties,
       bodyBytes: markdownBytes(page.body),
       kind: input.kind,
       note,
@@ -110,6 +141,35 @@ export async function recordPageRevision(
     select: { id: true },
   });
   return { id: created.id, folded: false };
+}
+
+/**
+ * The editing session another author has open on this page, if any: their
+ * latest `editor` revision was touched inside the fold window, so their tab is
+ * autosaving right now. A Markdown write landing underneath would hand them a
+ * conflict on their next keystroke (ADR-0074).
+ */
+export async function findActiveEditingSession(
+  db: Db,
+  input: { pageId: string; excludingAuthorId: string; now?: Date },
+): Promise<{ userId: string; name: string | null; since: Date } | null> {
+  const now = input.now ?? new Date();
+  const latest = await db.knowledgePageRevision.findFirst({
+    where: {
+      pageId: input.pageId,
+      kind: "editor",
+      authorId: { not: input.excludingAuthorId },
+      updatedAt: { gte: new Date(now.getTime() - REVISION_FOLD_WINDOW_MS) },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: {
+      authorId: true,
+      createdAt: true,
+      author: { select: { name: true } },
+    },
+  });
+  if (!latest?.authorId) return null;
+  return { userId: latest.authorId, name: latest.author?.name ?? null, since: latest.createdAt };
 }
 
 export interface RevisionDiffStats {

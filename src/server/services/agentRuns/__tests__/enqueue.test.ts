@@ -3,7 +3,7 @@
  * agent principal, none for humans, none while a live run exists, none on a
  * parked or finished action. Mocked Prisma — no DB.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { enqueueAgentRunsForAssignees, cancelQueuedRunsForUnassigned, resumeWaitingRunsOnReply } from "../enqueue";
@@ -37,10 +37,38 @@ describe("enqueueAgentRunsForAssignees", () => {
     });
   });
 
+  describe("on an install with no Assistant (production, MASTRA_API_URL unset)", () => {
+    beforeEach(() => {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("MASTRA_API_URL", "");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("queues no hosted (MASTRA) run, which would never be dispatched", async () => {
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([]);
+      expect(db.agentRun.create).not.toHaveBeenCalled();
+    });
+
+    it("still queues a locally executed agent's run", async () => {
+      db.externalAgent.findMany.mockResolvedValue([{ id: AGENT, executor: "LOCAL_CLI" }] as never);
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([{ id: "run-1", agentId: AGENT, executor: "LOCAL_CLI" }]);
+    });
+
+    it("queues the hosted run again once MASTRA_API_URL is set (exponential.im)", async () => {
+      vi.stubEnv("MASTRA_API_URL", "https://mastra.example.test");
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([{ id: "run-1", agentId: AGENT, executor: "MASTRA" }]);
+    });
+  });
+
   it("only an Assistant's principal gets a run — plain External agents keep picking actions up themselves", async () => {
     await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
     expect(db.externalAgent.findMany.mock.calls[0]?.[0]).toMatchObject({
-      where: { shadowUserId: { in: [SHADOW] }, assistant: { isNot: null } },
+      where: { shadowUserId: { in: [SHADOW] }, assistant: { is: { retiredAt: null } } },
     });
   });
 
@@ -135,7 +163,7 @@ describe("resumeWaitingRunsOnReply", () => {
       where: {
         actionId: ACTION,
         status: "WAITING_ON_OWNER",
-        agent: { assistant: { isNot: null } },
+        agent: { assistant: { is: { retiredAt: null } } },
         OR: [{ requestedById: "owner-1" }, { agent: { ownerId: "owner-1" } }],
       },
       select: { agentId: true },
@@ -189,3 +217,29 @@ describe("resumeWaitingRunsOnReply", () => {
   });
 });
 
+describe("a retired Assistant is never run-eligible (ADR-0072)", () => {
+  const db = mockDeep<PrismaClient>();
+
+  beforeEach(() => {
+    mockReset(db);
+    db.externalAgent.findMany.mockResolvedValue([] as never);
+  });
+
+  it("assignment filters on a non-retired Assistant, not merely an Assistant", async () => {
+    await enqueueAgentRunsForAssignees(db, { actionId: "action-1", userIds: ["shadow-1"], requestedById: "human-1" });
+
+    const where = db.externalAgent.findMany.mock.calls[0]?.[0]?.where;
+    expect(where).toEqual({ shadowUserId: { in: ["shadow-1"] }, assistant: { is: { retiredAt: null } } });
+    expect(db.agentRun.create).not.toHaveBeenCalled();
+  });
+
+  it("a reply resumes only non-retired Assistants' waiting runs", async () => {
+    db.agentRun.findMany.mockResolvedValue([] as never);
+    await resumeWaitingRunsOnReply(db, { actionId: "action-1", authorId: "owner-1", commentId: "c-1" });
+
+    expect(db.agentRun.findMany.mock.calls[0]?.[0]?.where).toMatchObject({
+      agent: { assistant: { is: { retiredAt: null } } },
+    });
+    expect(db.agentRun.create).not.toHaveBeenCalled();
+  });
+});

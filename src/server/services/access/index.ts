@@ -67,6 +67,7 @@ export {
 // Resolvers (for direct use when needed)
 export {
   getWorkspaceMembership,
+  getWorkspaceRoles,
   filterWorkspaceMembers,
   assertWorkspaceRole,
   assertWorkspaceMembership,
@@ -85,8 +86,15 @@ export {
   canEditProject,
   canManageProjectMembers,
   buildProjectAccessWhere,
+  buildProjectInsiderWhere,
   buildProjectEditWhere,
 } from "./resolvers/projectResolver";
+export {
+  buildSharedResourceWhere,
+  listSharedResourceProjectIds,
+  resourceOwnerInWorkspaceWhere,
+} from "./resolvers/resourceResolver";
+export { projectAccessDeniedError, type ProjectDeniedAction } from "./projectDenial";
 export {
   getActionAccess,
   canViewAction,
@@ -122,6 +130,9 @@ export {
   buildKnowledgePageAccessWhere,
   listKnowledgePageViewers,
   canManageKnowledgePageAccess,
+  canShareKnowledgePage,
+  canGrantKnowledgePageRole,
+  canChangeKnowledgePageGrant,
   isKnowledgePageInviteRole,
 } from "./resolvers/knowledgePageResolver";
 export type {

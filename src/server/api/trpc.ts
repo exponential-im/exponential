@@ -18,11 +18,12 @@ import { db } from "~/server/db";
 import {
   SECURITY_FIX_TIMESTAMP,
   CURRENT_SECURITY_VERSION,
-  type JWTTokenType,
 } from "~/server/utils/jwt";
 import { hashExternalAgentKey, isExternalAgentKey } from "~/server/utils/external-agent-keys";
 import { captureProcedureCall, resolveSurface } from "~/server/analytics/posthog";
 import { conflictFromError } from "~/server/services/revisions/revisionConflict";
+import { propertyRejectionFromError } from "~/server/services/databases/values";
+import { alreadyInProjectFromError } from "~/server/services/resources/alreadyInProject";
 import { isPersonCredential, resolvePrincipal, type Principal } from "~/server/services/access/principal";
 
 /**
@@ -229,6 +230,14 @@ const t = initTRPC.context<typeof createTRPCContext>().create({
         // (entity, id, field, expected and current revision) so clients can
         // re-read and reconcile rather than parse the message.
         conflict: conflictFromError(error),
+        // A database write rejected by the property-type registry (ADR-0078):
+        // which property, and why, so the CLI and the table block can point at
+        // the cell instead of parsing the message.
+        property: propertyRejectionFromError(error),
+        // Filing a Resource under a Project that already lists the page
+        // (ADR-0082): which Resource holds its place and who saved it, so a
+        // client can say "Already in this project, saved by James".
+        alreadyInProject: alreadyInProjectFromError(error),
       },
     };
   },
@@ -312,38 +321,6 @@ export const protectedProcedure = t.procedure
     });
   })
   .use(analyticsMiddleware);
-
-/**
- * Who is acting behind each token type. `agent`: an agent is doing the
- * acting even when the session user is a person — an External agent's key,
- * Zoe's agent-context JWT, the chat gateways (Zoe answering in WhatsApp /
- * Telegram / Matrix) and a voice session. `person`: the person themselves —
- * personal API tokens (the CLI), the extension, devices.
- *
- * Exhaustive over `JWTTokenType`, so a new token type (a new Zoe surface)
- * does not compile until someone classifies it.
- */
-const TOKEN_ACTOR: Record<JWTTokenType | "agent-key", "agent" | "person"> = {
-  "agent-key": "agent",
-  "agent-context": "agent",
-  "whatsapp-gateway": "agent",
-  "telegram-gateway": "agent",
-  "matrix-gateway": "agent",
-  "voice-session": "agent",
-  "api-token": "person",
-  "extension-token": "person",
-  "device-token": "person",
-};
-
-/**
- * Whether the caller's token says an agent, not the person, is acting. No
- * token type is a browser session (the person). A type this map doesn't
- * know counts as an agent, so the check fails closed.
- */
-export function isAgentActorToken(tokenType: string | undefined): boolean {
-  if (tokenType === undefined) return false;
-  return !Object.hasOwn(TOKEN_ACTOR, tokenType) || TOKEN_ACTOR[tokenType as keyof typeof TOKEN_ACTOR] === "agent";
-}
 
 /**
  * Human-only procedure (ADR-0049, ADR-0070, ADR-0071)

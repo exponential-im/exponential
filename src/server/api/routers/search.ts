@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import {
   buildActionAccessWhere,
@@ -12,8 +12,11 @@ import {
   isWorkspaceGuest,
 } from "~/server/services/access";
 import { stripHtml } from "~/lib/utils";
-import { shortIdSearchWhere, ticketUrlId } from "~/lib/fun-ids";
+import { ticketUrlId } from "~/lib/fun-ids";
+import { searchTicketsIdFirst } from "~/plugins/product/server/services/ticketTextSearch";
 import { getKnowledgeService } from "~/server/services/KnowledgeService";
+import { resolvePrincipal } from "~/server/services/access/principal";
+import { isAiConfigured } from "~/server/services/ai/requireAi";
 
 /**
  * Global search — the server-side equivalent of the Cmd+K palette
@@ -233,36 +236,41 @@ async function searchKeyResults({ db, userId, q, workspaceId, limit }: SearchArg
 }
 
 // Mirrors ticket.list's assertWorkspaceAccess gate (direct or team-based
-// workspace membership via the ticket's product; guests denied).
+// workspace membership via the ticket's product; guests denied). A query that
+// names a ticket (`snappy.thunder`, `42`, `#42`, `EXP-42`) puts that ticket
+// first; see searchTicketsIdFirst.
 async function searchTickets({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
-  const tickets = await db.ticket.findMany({
-    where: {
-      product: {
-        ...(workspaceId ? { workspaceId } : {}),
-        workspace: { is: buildWorkspaceAccessWhere(userId) },
-      },
-      OR: [
-        { title: insensitive(q) },
-        // Fun shortIds match word-order-insensitively ("toucan.prime" finds
-        // prime.toucan).
-        ...shortIdSearchWhere(q),
-        // An all-digits query also matches the ticket's sequential number.
-        ...(/^\d+$/.test(q) && parseInt(q, 10) > 0
-          ? [{ number: parseInt(q, 10) }]
-          : []),
-      ],
+  const accessWhere: Prisma.TicketWhereInput = {
+    product: {
+      ...(workspaceId ? { workspaceId } : {}),
+      workspace: { is: buildWorkspaceAccessWhere(userId) },
     },
-    select: {
-      id: true,
-      title: true,
-      number: true,
-      shortId: true,
-      status: true,
-      product: {
-        select: { slug: true, workspace: { select: { id: true, slug: true, name: true } } },
-      },
-    },
-    take: limit,
+  };
+  const tickets = await searchTicketsIdFirst({
+    query: q,
+    limit,
+    find: (match, take, skip = 0) =>
+      db.ticket.findMany({
+        where: { AND: [accessWhere, match] },
+        select: {
+          id: true,
+          title: true,
+          number: true,
+          shortId: true,
+          status: true,
+          product: {
+            select: {
+              slug: true,
+              name: true,
+              workspace: { select: { id: true, slug: true, name: true } },
+            },
+          },
+        },
+        orderBy: { updatedAt: "desc" },
+        take,
+        ...(skip > 0 ? { skip } : {}),
+      }),
+    productName: (t) => t.product.name,
   });
   return tickets.map((t) => ({
     type: "ticket",
@@ -579,6 +587,8 @@ export const searchRouter = createTRPCRouter({
       select: { slug: true },
     });
     if (!workspace) return empty;
+    // Semantic search needs an embeddings provider; without one it's switched off.
+    if (!isAiConfigured("openai")) return empty;
 
     let chunks;
     try {
@@ -590,6 +600,10 @@ export const searchRouter = createTRPCRouter({
         pageViewerId: userId,
         transcriptionViewerId: userId,
         resourceViewerId: userId,
+        // A person also finds the Resources filed under Projects they are
+        // in (ADR-0082). An agent's shadow user is a workspace member too,
+        // and must not: its reach is its owner's own Resources (ADR-0079).
+        resourceSharedWithViewer: (await resolvePrincipal(ctx)).kind !== "agent",
         // Uploaded documents have no page to link to yet, so their chunks are
         // always dropped below; searching them would only spend the over-fetch.
         sourceTypes: input.sourceTypes ?? SEARCHABLE_KNOWLEDGE_SOURCES,

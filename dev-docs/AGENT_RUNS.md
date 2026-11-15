@@ -15,12 +15,13 @@ How an **Assistant** becomes an assignee, what happens when an Action is assigne
 | Asks for help | In the chat | `ask-owner` comment mentioning whoever assigned the Action (the owner when nobody did); the run pauses, and that person's or the owner's reply resumes it | Comments and @mentions by convention |
 | Visible progress | Chat stream | Title spinner, "Working 1m · called N tools" pill, owner-only transcript, Delegated inbox tab | Comments and status changes |
 
-**The gate that keeps these apart:** `enqueueAgentRunsForAssignees` only creates a run for a principal whose External agent has an `assistant` (`assistant: { isNot: null }`). Assigning a plain External agent starts **no** hosted run, so a self-driving bot is never double-worked by the dispatcher. V2 widens hosted-run eligibility to agents whose `executor` is `LOCAL_CLI`, where the owner's own runner claims the run instead of polling actions.
+**The gate that keeps these apart:** `enqueueAgentRunsForAssignees` only creates a run for a principal whose External agent has a **non-retired** `assistant` (`RUN_ELIGIBLE_AGENT_WHERE` = `assistant: { is: { retiredAt: null } }`, ADR-0072 — retirement keeps the Assistant row, so `isNot: null` alone would leave a retired Assistant eligible; the reply-resume uses the same filter). Assigning a plain External agent starts **no** hosted run, so a self-driving bot is never double-worked by the dispatcher. V2 widens hosted-run eligibility to agents whose `executor` is `LOCAL_CLI`, where the owner's own runner claims the run instead of polling actions.
 
 ## Data model
 
 ```
 Assistant 1──1 ExternalAgent 1──1 User(isAgent)        (ADR-0067: the principal)
+  one non-retired per person, no workspace (ADR-0072); where it works = the shadow user's WorkspaceUser rows
                  │  executor: MASTRA | LOCAL_CLI
                  └──< AgentRun >── Action
                          │  status: QUEUED → RUNNING → SUCCEEDED | FAILED | WAITING_ON_OWNER | TIMED_OUT
@@ -113,7 +114,7 @@ The pill, the transcript and the Delegated tab read the same `AgentRun` rows, so
 ## Testing
 
 - Unit (mocked Prisma): `services/agentRuns/__tests__/*` (enqueue/coalescing/resume, dispatch claim + JWT + finish, events seq + runner batches, sweep, finish hook, include, `presentation` for waiting-for-runner), `routers/__tests__/mastraRunCallbacks.test.ts`, `agentRunCancel.test.ts`, `agentRunRunner.test.ts` (V2 runner surface), `agentRunListForAction.test.ts`, `notifications/emit/__tests__/agentRunNotification.test.ts`.
-- E2E: `e2e/agent-run.spec.ts` runs a Mastra **stub** on port 4199 (the Playwright dev server is started with `MASTRA_API_URL` pointing at it and `CRON_SECRET=e2e-cron-secret`, see `playwright.config.ts`), assigns the fixture Assistant, kicks the dispatcher, and asserts the ring, the pill flip, the stub's `reportProgress` callback and the transcript. `e2e/assign-to-assistant.spec.ts` covers the picker.
+- E2E: `e2e/agent-run.spec.ts` runs a Mastra **stub** on port 4199 (the Playwright dev server is started with `MASTRA_API_URL` pointing at it and `CRON_SECRET=e2e-cron-secret`, see `playwright.config.ts`), assigns the fixture Assistant, kicks the dispatcher, and asserts the ring. The assign mutation's own `after()` kick reaches the same server (`localhost:$PORT`) and usually claims the run first, so the spec accepts either dispatcher winning and asserts on the outcome. It then checks one stub call, `SUCCEEDED`, the pill flip, the stub's `reportProgress` callback and the transcript. `e2e/assign-to-assistant.spec.ts` covers the picker.
 - Not covered automatically: a run against a real Mastra.
 
 ## Extending

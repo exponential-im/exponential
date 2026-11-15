@@ -1,7 +1,7 @@
 import Layout from "~/app/_components/layout/Layout";
 import "~/styles/globals.css";
 import { GeistSans } from "geist/font/sans";
-import { inter } from '~/lib/fonts';
+import { fontVariables } from '~/lib/fonts';
 import { type Metadata } from "next";
 import { TRPCReactProvider } from "~/trpc/react";
 import '@mantine/core/styles.css';
@@ -9,10 +9,12 @@ import '@mantine/notifications/styles.css';
 import '@mantine/dates/styles.css';
 import { ThemeProvider } from '~/providers/ThemeProvider';
 import { AgentModalProvider } from '~/providers/AgentModalProvider';
+import { AiCapabilitiesProvider } from '~/providers/AiCapabilitiesProvider';
+import { resolveAiCapabilities } from '~/server/services/ai/capabilities';
 import { BugReportProvider } from '~/providers/BugReportProvider';
 import { themes } from '~/config/themes';
 import { getThemeDomain } from '~/config/site';
-import { Analytics } from '@vercel/analytics/next';
+import { PublicAnalytics } from '~/app/_components/layout/PublicAnalytics';
 import { PostHogIdentify } from '~/app/_components/analytics/PostHogIdentify';
 import { GoogleAnalytics } from '@next/third-parties/google';
 import { ZoeDrawer, ZoeFab } from '~/app/_components/layout/ZoeDrawer';
@@ -53,9 +55,12 @@ export default async function RootLayout({
   // Layout below awaits the same call. Only the fields the UI reads are
   // passed, so the raw token never lands in page HTML.
   const session = await auth();
+  // Resolved per request (auth() makes this layout dynamic), so a key added
+  // to a running install and a restart is enough — nothing is baked at build.
+  const aiCapabilities = resolveAiCapabilities(process.env);
 
   return (
-    <html lang="en" data-mantine-color-scheme="dark" className={`${GeistSans.variable} ${inter.variable} h-full`} suppressHydrationWarning>
+    <html lang="en" data-mantine-color-scheme="dark" className={`${GeistSans.variable} ${fontVariables} h-full`} suppressHydrationWarning>
       <head>
         {/* Migration + dark-variant first, then Mantine's scheme script reads
             the (possibly just-migrated) mantine-color-scheme-value key. */}
@@ -74,13 +79,14 @@ export default async function RootLayout({
           <TRPCReactProvider>
             <SessionProvider session={session ? { user: session.user, expires: session.expires } : null}>
               <MantineRootProvider>
+                <AiCapabilitiesProvider capabilities={aiCapabilities}>
                 <AgentModalProvider>
                   <BugReportProvider>
                     <WorkspaceProvider>
                       <ActiveTimerProvider>
                         <Layout domain={domain}>
                           {children}
-                          <Analytics />
+                          <PublicAnalytics />
                           <PostHogIdentify />
                           {process.env.NEXT_PUBLIC_GA_ID && (
                             <GoogleAnalytics gaId={process.env.NEXT_PUBLIC_GA_ID} />
@@ -94,6 +100,7 @@ export default async function RootLayout({
                     </WorkspaceProvider>
                   </BugReportProvider>
                 </AgentModalProvider>
+                </AiCapabilitiesProvider>
               </MantineRootProvider>
             </SessionProvider>
           </TRPCReactProvider>

@@ -103,6 +103,21 @@ owners/admins (escape hatch) retain access. Members of the owning team do
 NOT keep access; add them as project members. `isPublic` overrides
 restriction for view.
 
+**External agents** (ADR-0049) reach a restricted project only as explicit
+`ProjectMember`s — they are never workspace admins, so the escape hatch never
+applies. `project.addMember` and `updateMemberRole` admit an agent's shadow user
+when it is already a member of the project's workspace, its owner has access to
+the project, and the role is `viewer`, or `editor` only if the owner can edit
+(`assertAgentProjectMembership`); `removeMember` on a person also removes that
+person's agents (`cascadeOwnerRemovedFromProject`), demoting a person to viewer
+clamps their agents to viewer (`cascadeOwnerProjectRoleChanged`), and losing the workspace
+(`externalAgent.revokeWorkspace`, `cascadeOwnerRemovedFromWorkspace`) drops the
+agent's project memberships there (`revokeAgentProjectMembershipsInWorkspace`).
+A project refusal is worded by `projectAccessDeniedError`: it names the account
+(and its owner for an agent), the project and the missing access, so the person
+reading it in a terminal knows what to grant. Use it instead of a bare
+"Access denied" wherever a project decides.
+
 ### Meetings (TranscriptionSessions)
 
 Resolver: `resolvers/transcriptionResolver.ts` — the single source of truth
@@ -128,6 +143,33 @@ A user can **edit** a meeting if ANY of these are true:
 3. It has no project and they hold a non-`viewer` role in its workspace
 
 Attendance (path 2 for view) never grants edit.
+
+### Resources
+
+A Resource is owned by the person who saved it (`Resource.userId`), and **every write stays with
+the owner**: describing, moving, archiving, deleting, pinning, re-indexing and changing read
+state all go through `scopedRows()` in `src/server/api/routers/resource.ts`. The one exception is
+**unfile**, which anyone who can edit the Project may do.
+
+Reading has one more path. **Filing shares** ([ADR-0082](../docs/adr/0082-resource-filed-under-a-project-is-shared-with-it.md)):
+a user can **view** a Resource if ANY of these are true:
+
+1. They own it
+2. It is filed under a Project, and all of:
+   - it sits in that Project's workspace (filing sets this)
+   - they reach the Project by a membership path (`buildProjectInsiderWhere`: creator, Project
+     member, team or workspace member when unrestricted, workspace owner/admin when restricted).
+     A public Project's `isPublic` flag is **not** enough
+   - its owner still belongs to the Project's workspace, directly or through a team
+
+The rule lives in `resolvers/resourceResolver.ts` (`buildSharedResourceWhere`) and the router's
+`visibleRows()`. It applies to `resource.get`, `resource.identities`, `resource.list` when a
+`projectId` is given, and the Knowledge search (`resourceSharedWithViewer`), which restates it in
+SQL against the live Resource row. Every other list (the Knowledge page, the Reading list) is the
+caller's own. Read state is never returned for a Resource the caller does not own.
+
+An **agent principal** gets none of path 2: it works on its owner's rows in the workspaces
+delegated to it (ADR-0079). Callers pass `resourceSharedWithViewer` only for a person.
 
 ### Workspaces
 
@@ -307,6 +349,7 @@ archive: protectedProcedure
 | `src/server/services/access/resolvers/workspaceResolver.ts` | Workspace membership lookup |
 | `src/server/services/access/resolvers/teamResolver.ts` | Team membership lookup |
 | `src/server/services/access/resolvers/projectResolver.ts` | Multi-path project access resolution |
+| `src/server/services/access/resolvers/resourceResolver.ts` | Resources shared through a Project: `buildSharedResourceWhere()`, `listSharedResourceProjectIds()` |
 | `src/server/services/access/resolvers/actionResolver.ts` | Action access + `buildActionAccessWhere()` (read) / `buildActionEditWhere()` / `buildActionDeleteWhere()` (write) |
 
 ---

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { useAiCapabilities } from '~/providers/AiCapabilitiesProvider';
 import { api } from "~/trpc/react";
 import DOMPurify from 'dompurify';
 import ReactMarkdown from 'react-markdown';
@@ -465,10 +466,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
   const utils = api.useUtils();
 
   // Fetch the user's custom assistant (if configured)
-  const { data: customAssistant } = api.assistant.getDefault.useQuery(
-    { workspaceId: workspaceId ?? '' },
-    { enabled: !!workspaceId }
-  );
+  const { data: customAssistant } = api.assistant.getMine.useQuery();
 
   // Use prop if provided, otherwise fall back to pageContext (auto-detected from current page)
   const projectId = projectIdProp ?? (pageContext?.data?.projectId as string | undefined);
@@ -690,6 +688,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
 
   const [isStreaming, setIsStreaming] = useState(false);
   const transcribeAudio = api.tools.transcribe.useMutation();
+  const aiCapabilities = useAiCapabilities();
   const chooseAgent = api.mastra.chooseAgent.useMutation();
   // The one call to our own backend a local-wiki turn makes. Everything after it
   // goes browser → Mastra directly, so wiki content never reaches Vercel.
@@ -1701,6 +1700,9 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
               styles={TEXT_INPUT_STYLES}
             />
             <div className="absolute right-3 bottom-2 flex items-center gap-2">
+              {/* Voice needs OpenAI Realtime, dictation OpenAI Whisper: each is
+                  left out on an install without an OpenAI key. */}
+              {aiCapabilities.voice && (
               <ActionIcon
                 onClick={handleVoiceToggle}
                 disabled={!voiceActive && !canStartVoice}
@@ -1720,6 +1722,8 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
               >
                 🎙
               </ActionIcon>
+              )}
+              {aiCapabilities.openai && (
               <ActionIcon
                 onClick={handleMicClick}
                 variant={isRecording ? "filled" : "subtle"}
@@ -1735,6 +1739,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
                   <IconMicrophone size={18} />
                 )}
               </ActionIcon>
+              )}
               <ActionIcon
                 type="submit"
                 variant="subtle"

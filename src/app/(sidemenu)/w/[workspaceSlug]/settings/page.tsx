@@ -33,6 +33,7 @@ import {
   IconCoin,
   IconSun,
   IconCalendarCheck,
+  IconBrandGithub,
   IconBrandSlack,
   IconBrandNotion,
   IconRefresh,
@@ -53,16 +54,18 @@ import {
   IconAlertTriangle,
   type Icon as TablerIcon,
 } from '@tabler/icons-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { PersonLink } from '~/app/_components/people/PersonLink';
 import { InviteMemberModal } from '~/app/_components/InviteMemberModal';
 import { EditMemberRoleModal } from '~/app/_components/EditMemberRoleModal';
 import { PendingInvitationsTable } from '~/app/_components/PendingInvitationsTable';
 import { WorkspaceTeamsSection } from '~/app/_components/WorkspaceTeamsSection';
 import { PositionsSection } from '~/app/_components/PositionsSection';
 import { SlackChannelSettings } from '~/app/_components/SlackChannelSettings';
+import { GithubRepositoriesSettings } from '~/app/_components/integrations/GithubRepositoriesSettings';
 import { ZulipSettings } from '~/app/_components/ZulipSettings';
 import { MatrixServerSettings } from '~/app/_components/MatrixServerSettings';
 import { SentrySettings } from '~/app/_components/SentrySettings';
@@ -89,22 +92,34 @@ import {
   type SidebarGroup,
 } from '~/app/_components/settings/SettingsShell';
 import { WorkspaceUpdatesSettings } from '~/app/_components/settings/WorkspaceUpdatesSettings';
+import { AiFeaturesSettings } from '~/app/_components/settings/AiFeaturesSettings';
 
-type SectionId =
-  | 'general'
-  | 'members'
-  | 'teams'
-  | 'features'
-  | 'integrations'
-  | 'plugins'
-  | 'ceremonies'
-  | 'updates'
-  | 'danger';
+const SECTION_IDS = [
+  'general',
+  'members',
+  'teams',
+  'features',
+  'integrations',
+  'plugins',
+  'ceremonies',
+  'updates',
+  'danger',
+] as const;
+
+type SectionId = (typeof SECTION_IDS)[number];
+
+/** `?section=integrations` opens that section, so other pages and OAuth returns can link to it. */
+function sectionFromParam(value: string | null): SectionId {
+  return SECTION_IDS.find((id) => id === value) ?? 'general';
+}
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
   const { workspace, workspaceId, isLoading, userRole, refetchWorkspace } = useWorkspace();
-  const [section, setSection] = useState<SectionId>('general');
+  const searchParams = useSearchParams();
+  const [section, setSection] = useState<SectionId>(() =>
+    sectionFromParam(searchParams.get('section')),
+  );
   const [editingField, setEditingField] = useState<'name' | 'description' | 'aiInstructions' | null>(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -992,7 +1007,9 @@ export default function WorkspaceSettingsPage() {
                       </Avatar>
                       <div className="min-w-0">
                         <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] font-medium text-text-primary">
-                          <span className="max-w-full truncate">{member.user.name ?? 'Unknown'}</span>
+                          <PersonLink userId={member.userId} className="max-w-full truncate">
+                            {member.user.name ?? 'Unknown'}
+                          </PersonLink>
                           {member.user.isAgent && (
                             <span className="inline-flex shrink-0 items-center gap-0.5 rounded border border-border-primary px-1 text-[10px] font-normal text-text-muted">
                               <IconRobotFace size={10} aria-hidden="true" />
@@ -1325,6 +1342,7 @@ export default function WorkspaceSettingsPage() {
 
         {section === 'integrations' && (
           <>
+            <AiFeaturesSettings />
             <SettingsSection
               icon={IconMail}
               title="Email Account"
@@ -1471,6 +1489,16 @@ export default function WorkspaceSettingsPage() {
                   workspace={{ id: workspaceId, name: workspace.name }}
                   canManage={canEdit}
                 />
+              </SettingsSection>
+            )}
+
+            {workspaceId && (
+              <SettingsSection
+                icon={IconBrandGithub}
+                title="GitHub"
+                description="Choose the repositories this workspace tracks. Their pull requests and commits feed the activity feed, delivery metrics and the Decision Log."
+              >
+                <GithubRepositoriesSettings />
               </SettingsSection>
             )}
 

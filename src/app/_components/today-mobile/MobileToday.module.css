@@ -129,11 +129,11 @@
 }
 
 .selected .dow {
-  color: var(--accent-okr);
+  color: var(--color-link);
 }
 
 .selected .date {
-  color: var(--accent-okr);
+  color: var(--color-link);
 }
 
 /* ── Filter pills ──────────────────────────── */
@@ -204,28 +204,36 @@
 .fab {
   position: fixed;
   right: 20px;
-  bottom: 24px;
+  bottom: calc(24px + env(safe-area-inset-bottom));
   z-index: 50;
   display: grid;
   width: 60px;
   height: 60px;
   border-radius: 50%;
   border: 0;
-  background: var(--accent-okr);
-  color: var(--color-bg-primary);
+  background: var(--color-brand-primary);
+  color: var(--color-text-inverse);
   place-items: center;
   cursor: pointer;
-  box-shadow: 0 12px 28px color-mix(in srgb, var(--accent-okr) 45%, transparent);
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--color-brand-primary) 45%, transparent);
   transition: transform 120ms ease, box-shadow 120ms ease;
 }
 
 .fab:hover {
   transform: translateY(-1px);
-  box-shadow: 0 16px 32px color-mix(in srgb, var(--accent-okr) 55%, transparent);
+  box-shadow: 0 16px 32px color-mix(in srgb, var(--color-brand-primary) 55%, transparent);
 }
 
 .fab:active {
   transform: translateY(0);
+}
+
+/* The assistant launcher (.zoeFab in layout/ZoeDrawer.module.css) holds the
+   bottom-right corner of every page: 52px tall, 24px above the safe area, and
+   stacked above this button. When it is on screen, sit 16px above it instead
+   of underneath it. Both are centred 50px from the right edge. */
+.fab[data-above-launcher] {
+  bottom: calc(24px + 52px + 16px + env(safe-area-inset-bottom));
 }
 
 @media (min-width: 769px) {

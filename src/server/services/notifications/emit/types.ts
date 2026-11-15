@@ -38,8 +38,9 @@ export interface MeetingParticipantAddedSubject {
 }
 
 /**
- * Page shared (ADR-0069): an invite-only Page and the workspace members just
- * invited to it. The access gate re-checks each still can view the page.
+ * Page shared (ADR-0069, ADR-0080): a Page, in any mode, and the workspace
+ * members just granted access to it. The access gate re-checks each still can
+ * view the page.
  */
 export interface PageSharedSubject {
   pageId: string;
@@ -72,9 +73,10 @@ export interface AgendaReadySubject {
 }
 
 /**
- * Mention (V2): a comment on some target (action / feature / scope), already
- * resolved to its workspace + display name + deep-link. Recipients are parsed
- * from the `@[Name](id)` markup and membership-filtered by the resolver.
+ * Mention (V2): a comment on some target (action / ticket / feature / scope /
+ * insight / page), already resolved to its workspace + display name +
+ * deep-link. Recipients are parsed from the `@[Name](id)` markup and
+ * membership-filtered by the resolver.
  */
 export interface MentionSubject {
   /** Comment id — stabilises the dedup key per (comment, recipient). */
@@ -89,6 +91,13 @@ export interface MentionSubject {
   targetName: string;
   /** Workspace-relative deep link to the comment thread. */
   targetPath: string;
+  /**
+   * Set when the comment is on a KnowledgePage: recipients are then gated by
+   * view access to that page, not workspace membership alone, so a mention on
+   * an invite-only page (ADR-0069) never sends its title and preview to a
+   * member who can't open it.
+   */
+  pageId?: string;
 }
 
 /**

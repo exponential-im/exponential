@@ -21,6 +21,7 @@ import {
   IconGitBranch,
   IconMicrophone,
   IconDatabase,
+  IconUserCircle,
 } from "@tabler/icons-react";
 import Link from "next/link";
 import { signOut } from "next-auth/react";
@@ -31,10 +32,13 @@ import { useBugReport } from "~/providers/BugReportProvider";
 import { useNavigationPreferences } from "~/hooks/useNavigationPreferences";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { getDarkTheme, setDarkTheme } from "~/lib/dark-theme";
+import { personHref } from "~/lib/personHref";
+import { api } from "~/trpc/react";
 
 interface UserMenuProps {
   session: {
     user: {
+      id?: string | null;
       name?: string | null;
       email?: string | null;
       image?: string | null;
@@ -57,6 +61,12 @@ export function UserMenu({ session, onClose }: UserMenuProps) {
   const kbHref = workspaceSlug ? `/w/${workspaceSlug}/knowledge-base` : "/knowledge-base";
 
   const user = session.user;
+  // "Your page" links by handle once you have one. The session does not carry
+  // it, so read the profile (shared with Settings, which refreshes it on save).
+  const { data: profile } = api.user.getProfile.useQuery(undefined, {
+    enabled: !!user.id,
+    staleTime: 5 * 60 * 1000,
+  });
   const initials = user.name
     ? user.name
         .split(" ")
@@ -107,6 +117,18 @@ export function UserMenu({ session, onClose }: UserMenuProps) {
                 </Menu.Label>
                 <Menu.Divider className="border-border-primary" />
               </>
+            )}
+
+            {user.id && (
+              <Menu.Item
+                leftSection={<IconUserCircle size={16} />}
+                component={Link}
+                href={personHref(user.id, profile?.handle)}
+                onClick={onClose}
+                className="text-text-primary hover:bg-surface-hover"
+              >
+                Your page
+              </Menu.Item>
             )}
 
             <Menu.Item
@@ -278,7 +300,7 @@ export function UserMenu({ session, onClose }: UserMenuProps) {
             <Menu.Item
               leftSection={<GithubIcon className="h-4 w-4" />}
               component="a"
-              href="https://github.com/positonic/exponential"
+              href="https://github.com/exponential-im/exponential"
               target="_blank"
               rel="noopener noreferrer"
               className="text-text-primary hover:bg-surface-hover"
