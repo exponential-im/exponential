@@ -103,6 +103,7 @@ import {
   buildActionAccessWhere,
   buildWorkspaceAccessWhere,
 } from "~/server/services/access";
+import { matchesWhere } from "~/test/prismaWhere";
 
 const callerId = "user-1";
 const workspaceId = "ws-1";
@@ -239,6 +240,98 @@ describe("search router — global (mocked)", () => {
 
     expect(dbMock.goal.findMany).not.toHaveBeenCalled();
     expect(res.results.filter((r) => r.type === "goal")).toEqual([]);
+  });
+});
+
+describe("search router — global finds what the caller's agent created (mocked)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  const AGENT = "agent-shadow-1";
+
+  interface ActionRow {
+    id: string;
+    name: string;
+    status: string;
+    workspaceId: string | null;
+    createdById: string;
+    /** The creator's agent row: null for a person, the owner for a shadow user. */
+    createdBy: { externalAgentShadow: { ownerId: string } | null };
+    assignees: { userId: string }[];
+    project: null;
+  }
+
+  /** What an MCP `actions.create` with no project and no assignee writes. */
+  const agentAction = (ownerId: string, overrides: Partial<ActionRow> = {}): ActionRow => ({
+    id: "a-paddle",
+    name: "Open a Paddle account for the Venture Studio UG",
+    status: "ACTIVE",
+    workspaceId,
+    createdById: AGENT,
+    createdBy: { externalAgentShadow: { ownerId } },
+    assignees: [],
+    project: null,
+    ...overrides,
+  });
+
+  /** Stand-in for Postgres: returns the rows the query's own `where` admits. */
+  function stubActions(rows: ActionRow[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dbMock.action.findMany.mockImplementation(((args: any) => {
+      const hits = rows
+        .filter((r) => matchesWhere({ ...r }, args.where as Record<string, unknown>))
+        .map((r) => ({
+          id: r.id,
+          name: r.name,
+          kanbanStatus: null,
+          workspace: workspaceRef,
+          project: null,
+        }));
+      return Promise.resolve(hits);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+  }
+
+  const actionIds = (res: { results: { type: string; id: string }[] }) =>
+    res.results.filter((r) => r.type === "action").map((r) => r.id);
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    stubEmptyResults(dbMock);
+  });
+
+  it("finds a project-less, unassigned action created by an agent the caller owns", async () => {
+    stubActions([agentAction(callerId)]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual(["a-paddle"]);
+    // The palette's "all workspaces" scope sends no workspaceId.
+    expect(actionIds(await caller.search.global({ query: "paddle" }))).toEqual(["a-paddle"]);
+  });
+
+  it("keeps it from everyone else: a project-less action stays personal", async () => {
+    // Created by a teammate's agent, and by a teammate in person.
+    stubActions([
+      agentAction("someone-else"),
+      agentAction("someone-else", {
+        id: "a-human",
+        createdById: "someone-else",
+        createdBy: { externalAgentShadow: null },
+      }),
+    ]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual([]);
+  });
+
+  it("still leaves out the owner's agent's DELETED and DRAFT actions", async () => {
+    stubActions([
+      agentAction(callerId, { id: "a-deleted", status: "DELETED" }),
+      agentAction(callerId, { id: "a-draft", status: "DRAFT" }),
+    ]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual([]);
   });
 });
 

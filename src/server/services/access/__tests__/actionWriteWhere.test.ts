@@ -17,6 +17,7 @@ import {
   buildActionEditWhere,
   buildActionDeleteWhere,
   canEditAction,
+  canViewAction,
   checkActionPermission,
 } from "../resolvers/actionResolver";
 import {
@@ -56,9 +57,19 @@ interface ProjectRow {
 
 interface ActionRow {
   createdById: string;
+  /**
+   * The creator's agent row. Null when a person created the action; when an
+   * agent did (its shadow user is `createdById`), the person who owns it.
+   */
+  createdBy: { externalAgentShadow: { ownerId: string } | null };
   assignees: { userId: string }[];
   project: ProjectRow | null;
 }
+
+const byPerson: ActionRow["createdBy"] = { externalAgentShadow: null };
+const byAgentOf = (ownerId: string): ActionRow["createdBy"] => ({
+  externalAgentShadow: { ownerId },
+});
 
 function project(overrides: Partial<ProjectRow> = {}): ProjectRow {
   return {
@@ -75,6 +86,7 @@ function project(overrides: Partial<ProjectRow> = {}): ProjectRow {
 function action(overrides: Partial<ActionRow> = {}): ActionRow {
   return {
     createdById: OTHER,
+    createdBy: byPerson,
     assignees: [],
     project: project(),
     ...overrides,
@@ -112,6 +124,7 @@ function actionAccessOf(a: ActionRow) {
   const pa = a.project ? projectAccessOf(a.project) : null;
   return {
     isCreator: a.createdById === ME,
+    isCreatorAgentOwner: a.createdBy.externalAgentShadow?.ownerId === ME,
     isAssignee: a.assignees.some((x) => x.userId === ME),
     hasProjectAccess: pa ? hasProjectAccess(pa) : false,
     canEditProject: pa ? canEditProject(pa) : false,
@@ -149,13 +162,36 @@ const projectArb: fc.Arbitrary<ProjectRow> = fc.record({
   ),
 });
 
-const actionArb: fc.Arbitrary<ActionRow> = fc.record({
-  createdById: userArb,
-  assignees: membersArb,
-  project: fc.option(projectArb, { nil: null }),
-});
+// Who wrote the row: ME, another person, or an agent's shadow user, whose
+// owner is ME or someone else. A shadow user is never a person's own id.
+const AGENT = "agent-shadow";
+const creatorArb: fc.Arbitrary<Pick<ActionRow, "createdById" | "createdBy">> = fc.oneof(
+  userArb.map((createdById) => ({ createdById, createdBy: byPerson })),
+  userArb.map((ownerId) => ({ createdById: AGENT, createdBy: byAgentOf(ownerId) })),
+);
+
+const actionArb: fc.Arbitrary<ActionRow> = fc
+  .tuple(
+    creatorArb,
+    fc.record({
+      assignees: membersArb,
+      project: fc.option(projectArb, { nil: null }),
+    }),
+  )
+  .map(([creator, rest]) => ({ ...creator, ...rest }));
 
 // ── Mirror properties ───────────────────────────────────────────────
+
+describe("buildActionAccessWhere mirrors canViewAction", () => {
+  it("admits a row iff the per-row view check does", () => {
+    fc.assert(
+      fc.property(actionArb, (a) => {
+        expect(canRead(a)).toBe(canViewAction(actionAccessOf(a)));
+      }),
+      { numRuns: 2000 },
+    );
+  });
+});
 
 describe("buildActionEditWhere mirrors canEditAction", () => {
   it("admits a row iff the per-row edit check does", () => {
@@ -254,6 +290,30 @@ describe("write scoping vs the read clause", () => {
     const a = action({ createdById: ME, project: null });
     expect(canEdit(a)).toBe(true);
     expect(canDelete(a)).toBe(true);
+  });
+
+  it("the owner of the agent that created a project-less action reads, edits and deletes it", () => {
+    // What an MCP `actions.create` with no project and no assignee writes.
+    const a = action({ createdById: AGENT, createdBy: byAgentOf(ME), project: null });
+    expect(canRead(a)).toBe(true);
+    expect(canEdit(a)).toBe(true);
+    expect(canDelete(a)).toBe(true);
+  });
+
+  it("someone else's agent grants nothing, whatever the caller's workspace role", () => {
+    const projectLess = action({ createdById: AGENT, createdBy: byAgentOf(OTHER), project: null });
+    expect(canRead(projectLess)).toBe(false);
+    expect(canEdit(projectLess)).toBe(false);
+    expect(canDelete(projectLess)).toBe(false);
+
+    // In a restricted project the caller cannot reach, owning the workspace's
+    // other agents is not a way in either.
+    const restricted = action({
+      createdById: AGENT,
+      createdBy: byAgentOf(OTHER),
+      project: project({ isRestricted: true, workspace: inWorkspace("member") }),
+    });
+    expect(canRead(restricted)).toBe(false);
   });
 
   it("restricted project: workspace member is refused, owner escape hatch allowed", () => {

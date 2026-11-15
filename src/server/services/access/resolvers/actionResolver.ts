@@ -3,6 +3,7 @@
  *
  * Resolves action access through all possible paths:
  * - Direct ownership (createdById, when no assignees)
+ * - Owning the agent that created it (ADR-0049 delegation invariant)
  * - Assignee
  * - Project access (creator, member, team member, workspace member, public)
  *
@@ -22,6 +23,14 @@ import {
 
 interface ActionAccessInfo {
   isCreator: boolean;
+  /**
+   * The action was created by an agent this user owns: an External agent or
+   * an Assistant, writing as its shadow user (ADR-0049, ADR-0067). The owner
+   * stands where the creator stands, for view, edit and delete alike: an
+   * agent's access never exceeds its owner's, and without this path a
+   * project-less action an agent created was readable by the agent alone.
+   */
+  isCreatorAgentOwner: boolean;
   isAssignee: boolean;
   hasProjectAccess: boolean;
   canEditProject: boolean;
@@ -44,12 +53,14 @@ export async function getActionAccess(
       createdById: true,
       projectId: true,
       assignees: { select: { userId: true } },
+      createdBy: { select: { externalAgentShadow: { select: { ownerId: true } } } },
     },
   });
 
   if (!action) return null;
 
   const isCreator = action.createdById === userId;
+  const isCreatorAgentOwner = action.createdBy?.externalAgentShadow?.ownerId === userId;
   const isAssignee = action.assignees.some((a) => a.userId === userId);
 
   // Check project-level access if action belongs to a project
@@ -60,6 +71,7 @@ export async function getActionAccess(
 
   return {
     isCreator,
+    isCreatorAgentOwner,
     isAssignee,
     hasProjectAccess: projectAccess ? hasProjectAccess(projectAccess) : false,
     canEditProject: projectAccess ? canEditProject(projectAccess) : false,
@@ -67,10 +79,21 @@ export async function getActionAccess(
   };
 }
 
+/**
+ * The DB-level twin of `isCreatorAgentOwner`: actions whose creator is the
+ * shadow user of an agent this user owns. One clause, shared by the read,
+ * edit and delete builders, so the three cannot drift.
+ */
+function createdByOwnedAgentWhere(userId: string): Prisma.ActionWhereInput {
+  return { createdBy: { externalAgentShadow: { ownerId: userId } } };
+}
+
 /** Check if user can view this action */
 export function canViewAction(access: ActionAccessInfo): boolean {
   // Creator can always view their own actions
   if (access.isCreator) return true;
+  // So can the owner of the agent that created it
+  if (access.isCreatorAgentOwner) return true;
   // Assignee can always view
   if (access.isAssignee) return true;
   // Project access grants view
@@ -82,6 +105,8 @@ export function canViewAction(access: ActionAccessInfo): boolean {
 export function canEditAction(access: ActionAccessInfo): boolean {
   // Creator can always edit
   if (access.isCreator) return true;
+  // So can the owner of the agent that created it
+  if (access.isCreatorAgentOwner) return true;
   // Assignee can edit
   if (access.isAssignee) return true;
   // Project editor (creator, team admin, workspace admin) can edit
@@ -101,10 +126,11 @@ export function checkActionPermission(
     case "assign":
       return canEditAction(access);
     case "delete":
-      // Only creator or project editors can delete
-      return access.isCreator || access.canEditProject;
+      // Only the creator, the owner of the agent that created it, or project
+      // editors can delete
+      return access.isCreator || access.isCreatorAgentOwner || access.canEditProject;
     case "admin":
-      return access.isCreator || access.canEditProject;
+      return access.isCreator || access.isCreatorAgentOwner || access.canEditProject;
     default:
       return false;
   }
@@ -126,12 +152,16 @@ export function checkActionPermission(
  * to actions in restricted projects are filtered out.
  *
  * Actions with no project (`projectId: null`) are unaffected by restriction.
+ * They are personal: the creator, the owner of the agent that created them,
+ * and the assignees see them, and nobody else in the workspace does.
  */
 export function buildActionAccessWhere(userId: string) {
   return {
     OR: [
       // Created by user
       { createdById: userId },
+      // Created by an agent the user owns
+      createdByOwnedAgentWhere(userId),
       // Assigned to user
       { assignees: { some: { userId } } },
       // User is the project creator
@@ -170,8 +200,8 @@ export function buildActionAccessWhere(userId: string) {
  * snapshot), where a per-viewer filter cannot apply because the text is
  * stored once. Only Actions in an unrestricted or public project of this
  * workspace qualify. A project-less Action is visible only to its creator
- * and assignees, and a restricted project's only to its members, so both
- * are left out.
+ * (and, when an agent created it, the agent's owner) and assignees, and a
+ * restricted project's only to its members, so both are left out.
  */
 export function buildWorkspaceAudienceActionWhere(workspaceId: string): Prisma.ActionWhereInput {
   return {
@@ -182,9 +212,10 @@ export function buildWorkspaceAudienceActionWhere(workspaceId: string): Prisma.A
 
 /**
  * Prisma WHERE clause for actions a user can **edit** — the DB-level mirror of
- * {@link canEditAction}: creator, assignee, or someone who can edit the
- * action's project ({@link buildProjectEditWhere}). Public visibility and a
- * workspace `viewer` role grant nothing here.
+ * {@link canEditAction}: creator, owner of the agent that created it,
+ * assignee, or someone who can edit the action's project
+ * ({@link buildProjectEditWhere}). Public visibility and a workspace `viewer`
+ * role grant nothing here.
  *
  * Use to scope bulk writes (`updateMany`) and to pick the rows a write may touch.
  */
@@ -192,6 +223,7 @@ export function buildActionEditWhere(userId: string): Prisma.ActionWhereInput {
   return {
     OR: [
       { createdById: userId },
+      createdByOwnedAgentWhere(userId),
       { assignees: { some: { userId } } },
       { project: buildProjectEditWhere(userId) },
     ],
@@ -200,13 +232,15 @@ export function buildActionEditWhere(userId: string): Prisma.ActionWhereInput {
 
 /**
  * Prisma WHERE clause for actions a user can **delete** — the DB-level mirror
- * of `checkActionPermission(access, "delete")`: the creator or a project
- * editor. Being assigned is not enough to hard-delete.
+ * of `checkActionPermission(access, "delete")`: the creator, the owner of the
+ * agent that created it, or a project editor. Being assigned is not enough to
+ * hard-delete.
  */
 export function buildActionDeleteWhere(userId: string): Prisma.ActionWhereInput {
   return {
     OR: [
       { createdById: userId },
+      createdByOwnedAgentWhere(userId),
       { project: buildProjectEditWhere(userId) },
     ],
   };
