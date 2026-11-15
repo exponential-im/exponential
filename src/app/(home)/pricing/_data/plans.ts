@@ -209,6 +209,6 @@ export const FAQ = [
   {
     question: "What is a design partner?",
     answer:
-      "One of about ten startups, three or more people using Exponential every week with an agent connected, that joins a 30-minute call with us each month while we shape Team. Design partners get Team free for 24 months from launch. To apply, email james@exponential.im.",
+      `One of about ten startups, three or more people using Exponential every week with an agent connected, that joins a 30-minute call with us each month while we shape Team. Design partners get Team free for 24 months from launch. To apply, email ${FOUNDER_EMAIL}.`,
   },
 ];
