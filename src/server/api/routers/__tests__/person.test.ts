@@ -548,6 +548,7 @@ describe("person router", () => {
         image: null,
         isAgent: false,
       });
+      expect(result.user.handle ?? null).toBeNull();
       const select = dbMock.user.findUnique.mock.calls[0]?.[0]?.select;
       expect(select).toBeDefined();
       expect(select).not.toHaveProperty("email");
@@ -706,6 +707,12 @@ describe("person router", () => {
 
       expect(byHandle).toEqual(byId);
       expect(byHandle.user.id).toBe(SUBJECT);
+    });
+
+    it("returns the subject's handle, so an id link can land on the handle URL", async () => {
+      const result = await asViewer().person.get({ userId: SUBJECT });
+
+      expect(result.user.handle).toBe("sam");
     });
 
     it("reads a handle in the URL without regard to case", async () => {
