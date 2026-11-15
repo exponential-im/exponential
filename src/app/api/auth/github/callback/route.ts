@@ -10,6 +10,7 @@ import {
   workspaceGithubSettingsPath,
   type GithubInstallResult,
 } from "~/lib/github/installResult";
+import { resolveInstallReturnPath } from "~/server/services/github/installReturn";
 
 const callbackSchema = z.object({
   installation_id: z.string(),
@@ -28,33 +29,14 @@ const BASE_URL = process.env.NEXTAUTH_URL || "http://localhost:3000";
 // In production, use Redis or database to track processed installations
 const processedInstallations = new Set<string>();
 
-/**
- * Where to send someone whose install was started from a workspace: back to
- * that workspace's GitHub section, saying how it went. Null when the state
- * names no workspace (the legacy project flow) or one the caller is not a
- * member of, so nobody is redirected into a workspace they cannot open.
- */
+/** The workspace an install was started from, as an absolute URL, or null. */
 async function workspaceReturnUrl(
   state: string | null | undefined,
   userId: string,
   result?: GithubInstallResult,
 ): Promise<string | null> {
-  if (!state) return null;
-  let workspaceId: unknown;
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(state, "base64").toString());
-    workspaceId = (parsed as { workspaceId?: unknown } | null)?.workspaceId;
-  } catch {
-    return null;
-  }
-  if (typeof workspaceId !== "string" || !workspaceId) return null;
-
-  const membership = await db.workspaceUser.findFirst({
-    where: { workspaceId, userId },
-    select: { workspace: { select: { slug: true } } },
-  });
-  if (!membership) return null;
-  return `${BASE_URL}${workspaceGithubSettingsPath(membership.workspace.slug, result)}`;
+  const path = await resolveInstallReturnPath(db, state, userId, result);
+  return path ? `${BASE_URL}${path}` : null;
 }
 
 /** The account integrations page shows `?error=` as a notification. */
@@ -64,9 +46,10 @@ function accountErrorUrl(message: string): string {
 
 export async function GET(request: NextRequest) {
   const isDev = process.env.NODE_ENV !== "production";
+  // One id for the whole request, so the catch block's log lines can be matched
+  // to the ones above them.
+  const requestId = crypto.randomUUID().slice(0, 8);
   try {
-    // Add request tracking for debugging
-    const requestId = crypto.randomUUID().slice(0, 8);
     if (isDev) {
       console.log(
         `[GitHub Callback ${requestId}] Processing request: ${request.url}`,
@@ -317,7 +300,6 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.redirect(redirectUrl);
   } catch (error) {
-    const requestId = crypto.randomUUID().slice(0, 8);
     console.error(
       `[GitHub Callback ${requestId}] OAuth callback error:`,
       error,
