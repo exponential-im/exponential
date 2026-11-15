@@ -44,7 +44,8 @@ model Resource {
   id          String    @id @default(cuid())
   title       String
   description String?
-  url         String?                          // Source URL
+  url         String?                          // Address it was last saved from (what its link opens)
+  identity    String?                          // What a save is matched by; see src/lib/resources/identity.ts
   rawContent  String?                          // Original HTML/content
   content     String?                          // Cleaned text
   contentType String    @default("web_page")   // web_page | document | pdf | bookmark | note
@@ -239,6 +240,13 @@ const { resource } = await api.resource.create.mutate({
   generateEmbeddings: true, // auto-embed
 });
 ```
+
+A save with a `url` is matched against the caller's Resources by the page's **identity**
+(`pageIdentity` in `src/lib/resources/identity.ts`), not the raw URL: the same page saved from
+another address (other dates, a tracking parameter) updates the one Resource, and `url` becomes
+the address of the latest save. A client that can see the page may pass `declaredUrl` (its
+`og:url` or canonical link); it is used for matching only, and ignored unless it names the same
+host and path as `url`.
 
 ### Semantic Search
 

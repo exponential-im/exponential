@@ -14,6 +14,7 @@ import {
 import { resolvePrincipal, type PrincipalContext } from "~/server/services/access/principal";
 import { triggerVideoArticle } from "~/server/services/youtubeSummary/triggerVideoArticle";
 import { isVideoArticle } from "~/lib/resources/reader";
+import { resourceAddresses } from "~/lib/resources/identity";
 import { youtubeVideoId } from "~/utils/youtube";
 
 const contentTypeEnum = z.enum([
@@ -254,7 +255,14 @@ export const resourceRouter = createTRPCRouter({
       z.object({
         title: z.string().min(1),
         description: z.string().optional(),
+        // The address visited. Stored without tracking parameters, as the
+        // address the Resource's link opens.
         url: z.string().url().optional(),
+        // The URL the page declares for itself (`og:url` or a canonical
+        // link). Used for matching only, and only when it passes the guard in
+        // `pageIdentity`; never validated as a URL, because a page that
+        // declares nonsense must still save.
+        declaredUrl: z.string().optional(),
         content: z.string().optional(),
         rawContent: z
           .string()
@@ -307,13 +315,19 @@ export const resourceRouter = createTRPCRouter({
       // link does not, and must not blank out a body saved earlier.
       const hasBody = Boolean(content ?? input.rawContent);
 
-      // Dedupe by URL (D-0027): a URL the caller already saved is brought
-      // back to the queue and refreshed, never duplicated. An agent only
+      // One Resource per page (D-0027, ADR-0082): a page the caller already
+      // saved is brought back to the queue and refreshed, never duplicated.
+      // Pages are matched by identity, so the same listing saved with other
+      // dates or a tracking parameter is the same Resource. An agent only
       // matches rows in its scope, so a re-save never reveals or moves a row
-      // its owner keeps outside the delegated workspaces.
-      const existing = input.url
+      // its owner keeps outside the delegated workspaces. Rows that pre-date
+      // identity were never merged, so two may match: the one touched last
+      // is the one a save refreshes.
+      const addresses = input.url ? resourceAddresses(input.url, input.declaredUrl) : null;
+      const existing = addresses
         ? await ctx.db.resource.findFirst({
-            where: { ...scopedRows(scope), url: input.url },
+            where: { ...scopedRows(scope), identity: addresses.identity },
+            orderBy: { updatedAt: "desc" },
           })
         : null;
 
@@ -330,6 +344,9 @@ export const resourceRouter = createTRPCRouter({
           where: { id: existing.id },
           data: {
             archivedAt: null,
+            // The latest save wins: the link reopens the page as it was
+            // last saved, with that visit's dates.
+            ...addresses,
             ...read,
             ...(replacesBody && {
               title: input.title,
@@ -363,7 +380,7 @@ export const resourceRouter = createTRPCRouter({
         data: {
           title: input.title,
           description: input.description,
-          url: input.url,
+          ...addresses,
           content,
           rawContent: input.rawContent,
           contentType: input.contentType,

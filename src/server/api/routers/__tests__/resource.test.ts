@@ -417,6 +417,84 @@ describe("resource router — reading list (mocked)", () => {
       expect(dbMock.resource.update).not.toHaveBeenCalled();
     });
 
+    describe("identity and last-saved address (witty.otter)", () => {
+      const LISTING = "https://www.airbnb.com/rooms/53368445";
+      const JANUARY = `${LISTING}?adults=4&check_in=2027-01-25&check_out=2027-01-30&source_impression_id=p3_x`;
+      const MARCH = `${LISTING}?adults=2&check_in=2027-03-01&check_out=2027-03-05&utm_source=mail`;
+
+      it("a new save stores the visited address without tracking, and the page's identity", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "new" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Villa", url: JANUARY, declaredUrl: LISTING, contentType: "bookmark" });
+
+        expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ userId: callerId, identity: LISTING });
+        expect(dbMock.resource.create.mock.calls[0]![0].data).toMatchObject({
+          url: `${LISTING}?adults=4&check_in=2027-01-25&check_out=2027-01-30`,
+          identity: LISTING,
+        });
+      });
+
+      it("the same listing saved with other dates updates the one Resource, whose link opens the second visit", async () => {
+        dbMock.resource.findFirst.mockResolvedValue(
+          fakeResource({ id: "old", url: `${LISTING}?adults=4&check_in=2027-01-25&check_out=2027-01-30`, identity: LISTING }),
+        );
+        dbMock.resource.update.mockResolvedValue(fakeResource({ id: "old" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        const out = await caller.resource.create({ title: "Villa", url: MARCH, declaredUrl: LISTING });
+
+        expect(out.created).toBe(false);
+        expect(dbMock.resource.create).not.toHaveBeenCalled();
+        expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ userId: callerId, identity: LISTING });
+        expect(dbMock.resource.update.mock.calls[0]![0].data).toMatchObject({
+          url: `${LISTING}?adults=2&check_in=2027-03-01&check_out=2027-03-05`,
+          identity: LISTING,
+        });
+      });
+
+      it("two searches stay two Resources when the site declares one generic address for both", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "new" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+        const declaredUrl = "https://www.google.com/travel/flights";
+
+        await caller.resource.create({ title: "ACE", url: "https://www.google.com/travel/flights/search?tfs=ACE", declaredUrl });
+        await caller.resource.create({ title: "FNC", url: "https://www.google.com/travel/flights/search?tfs=FNC", declaredUrl });
+
+        const matchedOn = dbMock.resource.findFirst.mock.calls.map((call) => (call[0]!.where as { identity: string }).identity);
+        expect(matchedOn).toEqual([
+          "https://www.google.com/travel/flights/search?tfs=ACE",
+          "https://www.google.com/travel/flights/search?tfs=FNC",
+        ]);
+        expect(dbMock.resource.create).toHaveBeenCalledTimes(2);
+      });
+
+      it("ignores a declared URL on another host, and saves when it is not a URL at all", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "new" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+        const url = "https://shop.example.com/item/9?ref=home";
+
+        await caller.resource.create({ title: "Item", url, declaredUrl: "https://tracker.example.net/item/9" });
+        await caller.resource.create({ title: "Item", url, declaredUrl: "/item/9" });
+
+        for (const call of dbMock.resource.create.mock.calls) {
+          expect(call[0].data).toMatchObject({ url, identity: url });
+        }
+      });
+
+      it("a note with no URL has no identity and is never matched", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "note", url: null }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "A note", content: "pasted", contentType: "note", generateEmbeddings: false });
+
+        expect(dbMock.resource.findFirst).not.toHaveBeenCalled();
+        const data = dbMock.resource.create.mock.calls[0]![0].data;
+        expect(data).not.toHaveProperty("url");
+        expect(data).not.toHaveProperty("identity");
+      });
+    });
+
     describe("re-saving a URL already in the list (dedupe, D-0027)", () => {
       it("un-archives, returns to to_read, refreshes the body, and reports created: false", async () => {
         dbMock.resource.findFirst.mockResolvedValue(
@@ -440,7 +518,8 @@ describe("resource router — reading list (mocked)", () => {
 
         expect(dbMock.resource.create).not.toHaveBeenCalled();
         expect(dbMock.resource.findFirst).toHaveBeenCalledWith({
-          where: { userId: callerId, url: "https://example.com/post" },
+          where: { userId: callerId, identity: "https://example.com/post" },
+          orderBy: { updatedAt: "desc" },
         });
         const call = dbMock.resource.update.mock.calls[0]![0];
         expect(call.where).toEqual({ id: "old" });
@@ -678,7 +757,26 @@ describe("resource router — agent works on its owner's list (mocked)", () => {
     expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({
       userId: OWNER_ID,
       workspaceId: { in: ["w1"] },
-      url: "https://example.com/post",
+      identity: "https://example.com/post",
+    });
+  });
+
+  it("matches a page saved from another address only inside its delegated workspaces", async () => {
+    dbMock.resource.create.mockResolvedValue(fakeResource({ userId: OWNER_ID }));
+
+    await agentCaller().resource.create({
+      title: "A listing",
+      url: "https://www.airbnb.com/rooms/53368445?adults=2&utm_source=mail",
+      declaredUrl: "https://www.airbnb.com/rooms/53368445",
+      contentType: "bookmark",
+      workspaceId: "w1",
+      generateEmbeddings: false,
+    });
+
+    expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({
+      userId: OWNER_ID,
+      workspaceId: { in: ["w1"] },
+      identity: "https://www.airbnb.com/rooms/53368445",
     });
   });
 
