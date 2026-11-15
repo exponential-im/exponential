@@ -6,7 +6,7 @@ import { blankToNull } from "~/server/utils/blankToNull";
 import type { PrismaClient } from "@prisma/client";
 import { findGatewayAssistant } from "~/server/services/assistant/gatewayAssistant";
 import { ensureAssistantForUser } from "~/server/services/assistant/ensureAssistant";
-import { resolveAssistantForUser } from "~/server/services/assistant/resolveAssistant";
+import { activeAssistantQuery, resolveAssistantForUser } from "~/server/services/assistant/resolveAssistant";
 import { renameAssistantPrincipal } from "~/server/services/assistant/principal";
 import { retireAssistant } from "~/server/services/assistant/retire";
 import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
@@ -207,6 +207,18 @@ export const assistantRouter = createTRPCRouter({
         orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
       });
     }),
+
+  /**
+   * The calling user's Assistant, wherever they are (ADR-0072), or null when
+   * they have none yet — chat is then "Zoe" acting as them. No workspace: one
+   * Assistant per person, through the shared resolver's query.
+   */
+  getMine: protectedProcedure.query(async ({ ctx }) => {
+    return ctx.db.assistant.findFirst({
+      ...activeAssistantQuery(ctx.session.user.id),
+      include: ASSISTANT_PRINCIPAL_INCLUDE,
+    });
+  }),
 
   /** Get the calling user's default assistant for a workspace (or null) */
   getDefault: protectedProcedure

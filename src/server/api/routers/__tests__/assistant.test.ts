@@ -285,3 +285,30 @@ describe("assistant router — per-user default scoping", () => {
     expect(dbMock.user.create).not.toHaveBeenCalled();
   });
 });
+
+describe("assistant.getMine — one Assistant per person (ADR-0072)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    dbMock = mockDeep<PrismaClient>();
+  });
+
+  it("resolves the caller's non-retired Assistant with no workspace in the query", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(ownedAssistant as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.getMine()).resolves.toMatchObject({ id: ASSISTANT_ID });
+
+    const args = dbMock.assistant.findFirst.mock.calls[0]?.[0];
+    expect(args?.where).toEqual({ createdById: OWNER_ID, retiredAt: null });
+    expect(args?.orderBy).toEqual({ updatedAt: "desc" });
+    expect(args?.include).toHaveProperty("externalAgent");
+  });
+
+  it("is null for a person with no Assistant yet", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(null);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.getMine()).resolves.toBeNull();
+  });
+});
