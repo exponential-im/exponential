@@ -5,8 +5,6 @@ import { TRPCError } from "@trpc/server";
 import { blankToNull } from "~/server/utils/blankToNull";
 import type { PrismaClient } from "@prisma/client";
 import { ensureAssistantForUser } from "~/server/services/assistant/ensureAssistant";
-import { findPersonalWorkspaceId } from "~/server/services/assistant/personalWorkspace";
-import { canDelegateFromRole } from "~/lib/agentDelegation";
 import {
   activeAssistantQuery,
   assistantWorksInWorkspaceWhere,
@@ -20,7 +18,6 @@ import {
   requireDelegableWorkspaces,
   revokeAgentWorkspace,
 } from "~/server/services/externalAgentAccess";
-import type { AssistantDefaults } from "~/server/services/assistant/ensureAssistant";
 
 /** Same ceiling as `externalAgent.createKey`: an Assistant's principal is an External agent. */
 const MAX_RUNNER_KEYS = 10;
@@ -83,41 +80,6 @@ async function getOwnedAssistantOrThrow(
   return assistant;
 }
 
-/**
- * The calling user's Assistant, created on first need with its first
- * membership in their Personal workspace (ADR-0072).
- */
-async function ensureMyAssistant(
-  db: PrismaClient,
-  userId: string,
-  defaults: Omit<AssistantDefaults, "workspaceId" | "grantMembership"> = {},
-) {
-  const existing = await resolveAssistantForUser(db, userId);
-  if (existing) return { assistant: existing, created: false };
-
-  const personalWorkspaceId = await findPersonalWorkspaceId(db, userId);
-  if (!personalWorkspaceId) {
-    throw new TRPCError({
-      code: "PRECONDITION_FAILED",
-      message: "Your Personal workspace isn't set up yet. Open any workspace, then try again.",
-    });
-  }
-  // Delegation invariant (ADR-0049): the membership row only where the
-  // person holds a delegating role — in their own Personal workspace,
-  // always, but the allowlist is the rule, not the assumption.
-  const membership = await db.workspaceUser.findUnique({
-    where: { userId_workspaceId: { userId, workspaceId: personalWorkspaceId } },
-    select: { role: true },
-  });
-
-  // An Assistant is a principal (ADR-0067), created in one transaction.
-  return ensureAssistantForUser(db, userId, {
-    workspaceId: personalWorkspaceId,
-    grantMembership: canDelegateFromRole(membership?.role),
-    ...defaults,
-  });
-}
-
 export const assistantRouter = createTRPCRouter({
   /**
    * Personalise the calling user's Assistant for the first time — the
@@ -150,7 +112,7 @@ export const assistantRouter = createTRPCRouter({
         });
       }
 
-      const { assistant } = await ensureMyAssistant(ctx.db, userId, input);
+      const { assistant } = await ensureAssistantForUser(ctx.db, userId, input);
       return assistant;
     }),
 
@@ -170,7 +132,7 @@ export const assistantRouter = createTRPCRouter({
       // lazily created Assistant behind.
       await requireDelegableWorkspaces(ctx.db, userId, [input.workspaceId]);
 
-      const { assistant } = await ensureMyAssistant(ctx.db, userId);
+      const { assistant } = await ensureAssistantForUser(ctx.db, userId);
       const principal = await ctx.db.externalAgent.findUniqueOrThrow({
         where: { id: assistant.externalAgentId },
         select: { shadowUserId: true },

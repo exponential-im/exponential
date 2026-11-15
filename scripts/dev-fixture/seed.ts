@@ -18,6 +18,7 @@ import { createHash } from "crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { encryptString } from "../../src/server/utils/encryption";
 import { createAssistantPrincipal } from "../../src/server/services/assistant/principal";
+import { memberGrant } from "../../src/server/services/externalAgentAccess";
 
 export const FIXTURE = {
   userEmail: "dev-fixture@exponential.test",
@@ -538,21 +539,12 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     });
     if (existing) {
       await db.assistant.update({ where: { id: existing.id }, data: { name } });
-      await db.workspaceUser.upsert({
-        where: {
-          userId_workspaceId: { userId: existing.externalAgent.shadowUserId, workspaceId: workspace.id },
-        },
-        create: { userId: existing.externalAgent.shadowUserId, workspaceId: workspace.id, role: "member" },
-        update: { role: "member" },
-      });
+      await memberGrant(db, existing.externalAgent.shadowUserId, workspace.id);
       return { id: existing.id };
     }
     return db.$transaction(async (tx) => {
-      const { externalAgentId } = await createAssistantPrincipal(tx, {
-        name,
-        ownerId,
-        workspaceId: workspace.id,
-      });
+      const { externalAgentId, shadowUserId } = await createAssistantPrincipal(tx, { name, ownerId });
+      await memberGrant(tx, shadowUserId, workspace.id);
       return tx.assistant.create({
         data: {
           name,
