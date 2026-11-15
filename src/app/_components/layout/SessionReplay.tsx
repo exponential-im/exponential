@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { usePathname } from 'next/navigation';
 import type { PostHog } from 'posthog-js';
 import { env } from '~/env';
@@ -108,17 +108,22 @@ function initPostHog(posthog: PostHog, key: string) {
 export function SessionReplay() {
   const pathname = usePathname();
   const key = env.NEXT_PUBLIC_POSTHOG_KEY;
+  // The page the user is on now, read when posthog-js finishes loading.
+  const latestPath = useRef(pathname);
+  latestPath.current = pathname;
 
   useEffect(() => {
     if (!key) return;
     if (shouldRecord(pathname)) {
       void loadPostHog(key).then((posthog) => {
+        // They may have left for an unrecorded page while it loaded.
+        if (!shouldRecord(latestPath.current)) return;
         if (!posthog.sessionRecordingStarted()) posthog.startSessionRecording();
       });
     } else if (client) {
-      void client.then((posthog) => {
-        if (posthog.sessionRecordingStarted()) posthog.stopSessionRecording();
-      });
+      // Unconditional: PostHog starts recording asynchronously, so a start
+      // can still be in flight and not yet report itself as started.
+      void client.then((posthog) => posthog.stopSessionRecording());
     }
   }, [key, pathname]);
 
