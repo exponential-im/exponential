@@ -145,6 +145,12 @@ function ModelKeySection({
           <Pill size="xs" tone={modelKey.status === 'failing' ? 'danger' : 'brand'}>
             {modelKey.status === 'failing' ? 'Not working' : 'Working'}
           </Pill>
+          {modelKey.status === 'failing' && (
+            <div className="mt-1.5 text-xs text-text-muted">
+              Anthropic stopped accepting this key, so the Assistant is back on the monthly allowance. Replace the
+              key to run on your own again.
+            </div>
+          )}
         </SettingsField>
       )}
       {showForm && (

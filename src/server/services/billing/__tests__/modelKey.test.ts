@@ -20,6 +20,7 @@ vi.hoisted(() => {
 import {
   getModelKeyStatus,
   getWorkingModelKey,
+  markModelKeyFailing,
   removeModelKey,
   saveModelKey,
   validateAnthropicKey,
@@ -149,6 +150,45 @@ describe("a saved key", () => {
 
     await expect(getWorkingModelKey(db, WORKSPACE)).resolves.toBeNull();
     await expect(getModelKeyStatus(db, WORKSPACE)).resolves.toBeNull();
+  });
+
+  it("is marked as failing once, however many turns report it", async () => {
+    const valid = { last4: "7Q4x", status: "valid", checkedAt: NOW.toISOString() };
+    const later = new Date("2026-11-20T08:00:00.000Z");
+    db.integration.findFirst.mockResolvedValueOnce({ id: "int-1", providerConfig: valid } as never);
+
+    await expect(markModelKeyFailing(db, WORKSPACE, later)).resolves.toEqual({
+      last4: "7Q4x",
+      status: "failing",
+      checkedAt: later,
+    });
+    expect(db.integration.update).toHaveBeenCalledWith({
+      where: { id: "int-1" },
+      data: { providerConfig: { last4: "7Q4x", status: "failing", checkedAt: later.toISOString() } },
+    });
+
+    // A second report finds it already marked: nothing changes, nobody is told again.
+    db.integration.findFirst.mockResolvedValueOnce({
+      id: "int-1",
+      providerConfig: { ...valid, status: "failing" },
+    } as never);
+    await expect(markModelKeyFailing(db, WORKSPACE, later)).resolves.toBeNull();
+    expect(db.integration.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("has nothing to mark when the workspace has no key", async () => {
+    db.integration.findFirst.mockResolvedValue(null);
+
+    await expect(markModelKeyFailing(db, WORKSPACE)).resolves.toBeNull();
+    expect(db.integration.update).not.toHaveBeenCalled();
+  });
+
+  it("works again once a new key is saved over a failing one", async () => {
+    await saveModelKey(db, { workspaceId: WORKSPACE, apiKey: API_KEY, now: NOW });
+    db.integration.findFirst.mockResolvedValue(storedRow() as never);
+
+    await expect(getModelKeyStatus(db, WORKSPACE)).resolves.toMatchObject({ status: "valid" });
+    await expect(getWorkingModelKey(db, WORKSPACE)).resolves.toBe(API_KEY);
   });
 
   it("is deleted whole on removal, and removing nothing reports that", async () => {

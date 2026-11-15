@@ -166,6 +166,32 @@ export async function saveModelKey(
 }
 
 /**
+ * Mark the workspace's key as no longer working, so `getWorkingModelKey`
+ * stops handing it out and the Assistant falls back to the hosted key.
+ * Returns the key's status when this call is what changed it, and null when
+ * there is no key or it was already marked: a burst of failing turns then
+ * tells owners once, not once per turn. Saving a key again clears it.
+ */
+export async function markModelKeyFailing(
+  db: Pick<PrismaClient, "integration">,
+  workspaceId: string,
+  now: Date = new Date(),
+): Promise<ModelKeyStatus | null> {
+  const integration = await db.integration.findFirst({
+    where: modelKeyWhere(workspaceId),
+    select: { id: true, providerConfig: true },
+  });
+  const current = integration ? parseStatus(integration.providerConfig) : null;
+  if (!integration || !current || current.status === "failing") return null;
+
+  await db.integration.update({
+    where: { id: integration.id },
+    data: { providerConfig: statusConfig(current.last4, "failing", now) },
+  });
+  return { last4: current.last4, status: "failing", checkedAt: now };
+}
+
+/**
  * Delete the workspace's key (the credential row goes with its integration).
  * The Assistant goes back to the hosted key and the monthly allowance.
  * Returns false when there was no key to remove.

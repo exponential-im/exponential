@@ -4,6 +4,10 @@
  * turn's user belongs to. Everyone else gets FORBIDDEN or a null that says
  * nothing about whether a key exists.
  *
+ * `mastra.reportModelKeyFailure`: Mastra's report that Anthropic refused the
+ * key. The key is marked as failing and the workspace's owners and admins are
+ * told, once.
+ *
  * Mocked Prisma (`vitest-mock-extended`), same harness as
  * `mastraCallAgent.test.ts`. The key store itself is covered by
  * `modelKey.test.ts`.
@@ -70,10 +74,15 @@ vi.mock("~/server/db", () => {
 });
 
 const getWorkingModelKey = vi.hoisted(() => vi.fn());
+const markModelKeyFailing = vi.hoisted(() => vi.fn());
 vi.mock("~/server/services/billing/modelKey", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   getWorkingModelKey,
+  markModelKeyFailing,
 }));
+// The notification pipeline has its own tests (billingNotification.test.ts).
+const emitNotification = vi.hoisted(() => vi.fn());
+vi.mock("~/server/services/notifications/emit/emitNotification", () => ({ emitNotification }));
 
 import { createMockCaller } from "~/test/trpc-helpers";
 import { MASTRA_SERVER_KEY_HEADER } from "~/server/utils/mastraServerAuth";
@@ -159,3 +168,83 @@ describe("mastra.getModelKey", () => {
     expect(getWorkingModelKey).not.toHaveBeenCalled();
   });
 });
+
+describe("mastra.reportModelKeyFailure", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+  const original = { mode: process.env.BILLING_MODE, serverKey: process.env.MASTRA_SERVER_API_KEY };
+  const FAILED_AT = new Date("2026-11-15T10:00:00.000Z");
+
+  const report = (serverKey?: string) =>
+    createMockCaller({
+      userId: USER_ID,
+      db: dbMock,
+      tokenType: "agent-context",
+      headers: new Headers(serverKey === undefined ? {} : { [MASTRA_SERVER_KEY_HEADER]: serverKey }),
+    }).mastra.reportModelKeyFailure({ workspaceId: WORKSPACE });
+
+  function isMember(member: boolean) {
+    dbMock.workspaceUser.findUnique.mockResolvedValue(
+      (member ? { role: "member", workspaceId: WORKSPACE } : null) as never,
+    );
+    dbMock.teamUser.findFirst.mockResolvedValue(null as never);
+  }
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    process.env.BILLING_MODE = "meter";
+    process.env.MASTRA_SERVER_API_KEY = SERVER_KEY;
+    markModelKeyFailing.mockReset().mockResolvedValue({ last4: "7Q4x", status: "failing", checkedAt: FAILED_AT });
+    emitNotification.mockReset().mockResolvedValue(["owner-1"]);
+    isMember(true);
+  });
+
+  afterEach(() => {
+    if (original.mode === undefined) delete process.env.BILLING_MODE;
+    else process.env.BILLING_MODE = original.mode;
+    if (original.serverKey === undefined) delete process.env.MASTRA_SERVER_API_KEY;
+    else process.env.MASTRA_SERVER_API_KEY = original.serverKey;
+  });
+
+  it("marks the key as failing and tells the workspace's owners and admins which key", async () => {
+    await expect(report(SERVER_KEY)).resolves.toEqual({ marked: true });
+
+    expect(markModelKeyFailing).toHaveBeenCalledWith(expect.anything(), WORKSPACE);
+    expect(emitNotification).toHaveBeenCalledTimes(1);
+    expect(emitNotification.mock.calls[0]?.[0]).toMatchObject({
+      category: "billing",
+      // Nobody is left out as "the actor": the owner whose turn hit the dead key must hear too.
+      actorUserId: null,
+      subject: { workspaceId: WORKSPACE, event: "model_key_failing", keyLast4: "7Q4x", occurredAt: FAILED_AT },
+    });
+  });
+
+  it("tells nobody again when the key was already marked", async () => {
+    markModelKeyFailing.mockResolvedValue(null);
+
+    await expect(report(SERVER_KEY)).resolves.toEqual({ marked: false });
+    expect(emitNotification).not.toHaveBeenCalled();
+  });
+
+  it("refuses a caller without the server key, and changes nothing", async () => {
+    await expect(report()).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(report("not-the-server-key")).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(markModelKeyFailing).not.toHaveBeenCalled();
+    expect(emitNotification).not.toHaveBeenCalled();
+  });
+
+  it("does nothing for a workspace the turn's user is not in", async () => {
+    isMember(false);
+
+    await expect(report(SERVER_KEY)).resolves.toEqual({ marked: false });
+    expect(markModelKeyFailing).not.toHaveBeenCalled();
+  });
+
+  it("does nothing on an install that does not meter", async () => {
+    delete process.env.BILLING_MODE;
+
+    await expect(report(SERVER_KEY)).resolves.toEqual({ marked: false });
+    expect(markModelKeyFailing).not.toHaveBeenCalled();
+  });
+});
+

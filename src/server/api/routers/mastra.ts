@@ -17,7 +17,9 @@ import { priceTokenBreakdown, turnTokenBreakdown } from "~/server/services/ai/co
 import { readGenerateUsage } from "~/server/services/billing/mastraUsage";
 import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
 import { isMeteringOn, resolveBillingMode } from "~/server/services/billing/config";
-import { getWorkingModelKey } from "~/server/services/billing/modelKey";
+import { getWorkingModelKey, markModelKeyFailing } from "~/server/services/billing/modelKey";
+import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
+import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
 import { isMastraServerRequest } from "~/server/utils/mastraServerAuth";
 import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { TRPCError } from "@trpc/server";
@@ -746,6 +748,46 @@ export const mastraRouter = createTRPCRouter({
       if (!membership) return { key: null };
 
       return { key: await getWorkingModelKey(ctx.db, input.workspaceId) };
+    }),
+
+  /**
+   * Mastra's report that Anthropic refused the workspace's own key on a turn
+   * (a 401, a 403 or a billing error). The key is marked as failing, so later
+   * turns run on the hosted key and count against the allowance again, and
+   * the workspace's owners and admins are told once, with a link to replace
+   * it. Further reports for a key already marked do nothing.
+   *
+   * Same two checks as `getModelKey`: the Mastra server's key, and a turn
+   * user who belongs to the workspace. Nothing is revealed to anyone else.
+   */
+  reportModelKeyFailure: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (!isMastraServerRequest(ctx.headers)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the Mastra server may report on a model key" });
+      }
+      if (!isMeteringOn(resolveBillingMode(process.env))) return { marked: false };
+
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!membership) return { marked: false };
+
+      const failing = await markModelKeyFailing(ctx.db, input.workspaceId);
+      if (!failing) return { marked: false };
+
+      // Nobody "did" this, so there is no actor to leave out: an owner whose
+      // own chat turn hit the dead key is exactly who needs to hear.
+      await emitNotification({
+        db: ctx.db,
+        actorUserId: null,
+        category: NOTIFICATION_CATEGORIES.BILLING,
+        subject: {
+          workspaceId: input.workspaceId,
+          event: "model_key_failing",
+          keyLast4: failing.last4,
+          occurredAt: failing.checkedAt,
+        },
+      });
+      return { marked: true };
     }),
 
   // API Key Generation for Mastra Agents and Webhooks (32 characters)
