@@ -144,6 +144,8 @@ function fakeResource(overrides: Partial<Record<string, unknown>> = {}) {
     createdAt: new Date("2026-10-01T00:00:00Z"),
     updatedAt: new Date("2026-10-01T00:00:00Z"),
     archivedAt: null,
+    // Who saved it, as the reads that return rows select it.
+    user: { id: (overrides.userId as string | undefined) ?? "caller-1", name: "Owner" },
     ...overrides,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any;
@@ -270,6 +272,9 @@ describe("resource router — reading list (mocked)", () => {
     triggerArticleMock.mockReset();
     // No row for the URL unless a test says otherwise (dedupe, D-0027).
     dbMock.resource.findFirst.mockResolvedValue(null);
+    // No workspace, so nothing is shared with the caller through a Project
+    // unless a test says otherwise (ADR-0082).
+    dbMock.workspace.findMany.mockResolvedValue([]);
   });
 
   describe("create", () => {
@@ -1036,6 +1041,127 @@ describe("resource router — reading list (mocked)", () => {
     });
   });
 
+  describe("filing shares (perky.nova, ADR-0082)", () => {
+    // The caller is in workspace w1, so Resources filed under its Projects can reach them.
+    const sharedW1 = expect.objectContaining({ workspaceId: "w1" }) as unknown;
+    const ownOrShared = { OR: [{ userId: callerId }, { OR: [sharedW1] }] };
+    const teammates = fakeResource({ id: "theirs", userId: "teammate", projectId: "p1", readStatus: "reading", readAt: new Date() });
+
+    beforeEach(() => {
+      dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+      dbMock.project.findUnique.mockResolvedValue({
+        createdById: callerId,
+        teamId: null,
+        workspaceId: "w1",
+        isPublic: false,
+        isRestricted: false,
+      } as never);
+    });
+
+    it("the reader opens a Resource the caller can see, with its saver and without the owner's read state", async () => {
+      dbMock.resource.findFirst.mockResolvedValue(teammates);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.get({ id: "theirs" });
+
+      expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ id: "theirs", ...ownOrShared });
+      expect(out.resource).toMatchObject({
+        id: "theirs",
+        isMine: false,
+        owner: { id: "teammate", name: "Owner" },
+        readStatus: null,
+        readAt: null,
+      });
+      expect(out.resource).not.toHaveProperty("user");
+    });
+
+    it("a Project's list is everything filed there that the caller may see, each with who saved it", async () => {
+      dbMock.resource.findMany.mockResolvedValue([teammates, fakeResource({ id: "mine", projectId: "p1" })]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.list({ projectId: "p1" });
+
+      const where = dbMock.resource.findMany.mock.calls[0]![0]!.where as Record<string, unknown>;
+      expect(where).not.toHaveProperty("userId");
+      expect(where.projectId).toBe("p1");
+      expect(where.AND).toEqual([{ OR: [{ userId: callerId }, { AND: [{ projectId: "p1" }, { OR: [sharedW1] }] }] }]);
+      expect(out.resources.map((r) => [r.id, r.isMine, r.readStatus])).toEqual([
+        ["theirs", false, null],
+        ["mine", true, "to_read"],
+      ]);
+    });
+
+    it("every other list stays the caller's own: the Knowledge page, and the Reading list even inside a Project", async () => {
+      dbMock.resource.findMany.mockResolvedValue([]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await caller.resource.list({ workspaceId: "w1" });
+      await caller.resource.list({ projectId: "p1", readStatus: "unread" });
+
+      for (const call of dbMock.resource.findMany.mock.calls) {
+        expect(call[0]!.where).toMatchObject({ userId: callerId });
+      }
+      expect(dbMock.workspace.findMany).not.toHaveBeenCalled();
+    });
+
+    it("the identities read includes Resources in Projects the caller can see", async () => {
+      dbMock.resource.findMany.mockResolvedValue([]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await caller.resource.identities();
+
+      expect(dbMock.resource.findMany.mock.calls[0]![0]!.where).toEqual({
+        ...ownOrShared,
+        archivedAt: null,
+        identity: { not: null },
+      });
+    });
+
+    it("every write looks only at the caller's own rows, so a shared Resource is not theirs to change", async () => {
+      dbMock.resource.findFirst.mockResolvedValue(null);
+      dbMock.resource.updateMany.mockResolvedValue({ count: 0 });
+      dbMock.resource.deleteMany.mockResolvedValue({ count: 0 });
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      const refused = { code: "NOT_FOUND" } satisfies Partial<TRPCError>;
+
+      await expect(caller.resource.update({ id: "theirs", description: "x" })).rejects.toMatchObject(refused);
+      await expect(caller.resource.setReadStatus({ id: "theirs", readStatus: "read" })).rejects.toMatchObject(refused);
+      await expect(caller.resource.setPinned({ id: "theirs", pinned: true })).rejects.toMatchObject(refused);
+      await expect(caller.resource.regenerateEmbeddings({ id: "theirs" })).rejects.toMatchObject(refused);
+      await expect(caller.resource.archive({ id: "theirs" })).rejects.toMatchObject(refused);
+      await expect(caller.resource.unarchive({ id: "theirs" })).rejects.toMatchObject(refused);
+      await expect(caller.resource.delete({ id: "theirs" })).rejects.toMatchObject(refused);
+
+      const wheres = [
+        ...dbMock.resource.findFirst.mock.calls.map((call) => call[0]!.where),
+        ...dbMock.resource.updateMany.mock.calls.map((call) => call[0].where),
+        ...dbMock.resource.deleteMany.mock.calls.map((call) => call[0]!.where),
+      ];
+      expect(wheres).toHaveLength(7);
+      for (const where of wheres) expect(where).toEqual({ id: "theirs", userId: callerId });
+      expect(dbMock.resource.update).not.toHaveBeenCalled();
+    });
+
+    it("filing puts the Resource in the Project's workspace, on a save and on a move", async () => {
+      dbMock.resource.create.mockResolvedValue(fakeResource({ id: "new" }));
+      dbMock.workspaceUser.count.mockResolvedValue(1);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await caller.resource.create({ title: "x", url: "https://example.com/a", projectId: "p1", workspaceId: "elsewhere" });
+      expect(dbMock.resource.create.mock.calls[0]![0].data).toMatchObject({ projectId: "p1", workspaceId: "w1" });
+
+      dbMock.resource.findFirst.mockResolvedValue(fakeResource({ id: "mine", workspaceId: "home", projectId: null }));
+      dbMock.resource.update.mockResolvedValue(fakeResource({ id: "mine", workspaceId: "w1", projectId: "p1" }));
+      await caller.resource.update({ id: "mine", projectId: "p1" });
+      expect(dbMock.resource.update.mock.calls[0]![0].data).toMatchObject({ projectId: "p1", workspaceId: "w1" });
+      // Its index entries go with it, so the Project's members can find it.
+      expect(dbMock.knowledgeChunk.updateMany).toHaveBeenCalledWith({
+        where: { sourceType: "resource", sourceId: "mine" },
+        data: { projectId: "p1", workspaceId: "w1" },
+      });
+    });
+  });
+
   describe("setReadStatus", () => {
     it("marks read with a readAt stamp and touches nothing else", async () => {
       dbMock.resource.findFirst.mockResolvedValue(fakeResource());
@@ -1207,6 +1333,29 @@ describe("resource router — agent works on its owner's list (mocked)", () => {
     });
     // The list is the owner's, so its entries are "mine" to the agent keeping it.
     expect(out.items[0]).toMatchObject({ isMine: true, readStatus: "to_read" });
+  });
+
+  it("gains no view of other people's shared Resources (ADR-0082 leaves an agent's reach alone)", async () => {
+    dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+    dbMock.resource.findMany.mockResolvedValue([]);
+    dbMock.resource.findFirst.mockResolvedValue(null);
+    // A Project both the agent and its owner pass the gate of.
+    dbMock.project.findUnique.mockResolvedValue({
+      createdById: OWNER_ID,
+      teamId: null,
+      workspaceId: "w1",
+      isPublic: true,
+      isRestricted: false,
+    } as never);
+    const own = { userId: OWNER_ID, workspaceId: { in: ["w1"] } };
+
+    await agentCaller().resource.identities();
+    await agentCaller().resource.list({ projectId: "p1" });
+    await expect(agentCaller().resource.get({ id: "theirs" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    expect(dbMock.resource.findMany.mock.calls[0]![0]!.where).toEqual({ ...own, archivedAt: null, identity: { not: null } });
+    expect(dbMock.resource.findMany.mock.calls[1]![0]!.where).toMatchObject(own);
+    expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ id: "theirs", ...own });
   });
 
   it("marks read only on the owner's rows it can reach", async () => {

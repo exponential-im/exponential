@@ -10,6 +10,7 @@ import {
   getProjectAccess,
   hasProjectAccess,
   canEditProject,
+  buildSharedResourceWhere,
 } from "~/server/services/access";
 import { resolvePrincipal, type PrincipalContext } from "~/server/services/access/principal";
 import { triggerVideoArticle } from "~/server/services/youtubeSummary/triggerVideoArticle";
@@ -199,6 +200,8 @@ const resourceListSelect = {
   updatedAt: true,
   archivedAt: true,
   project: { select: { id: true, name: true } },
+  // Who saved it. Leaves the response as `owner`; see `forViewer`.
+  user: { select: { id: true, name: true } },
 } as const;
 
 /**
@@ -242,12 +245,70 @@ export async function resolveResourceScope(ctx: PrincipalContext): Promise<Resou
   };
 }
 
-/** The rows a scope may read or change. */
+/**
+ * The rows that are the scope's own: the only rows it may CHANGE, and the
+ * whole of its Knowledge page and Reading list. Every write is scoped by
+ * this, so a Resource shared through a Project stays its owner's to describe,
+ * move, archive, delete, pin, re-index and mark read (ADR-0082).
+ */
 function scopedRows(scope: ResourceScope): Prisma.ResourceWhereInput {
   return {
     userId: scope.ownerId,
     ...(scope.workspaceIds && { workspaceId: { in: scope.workspaceIds } }),
   };
+}
+
+/**
+ * The rows a scope may READ: its own, and for a person the Resources other
+ * people filed under Projects they are in, because filing shares (ADR-0082;
+ * the rule is `buildSharedResourceWhere`). An agent's reach is unchanged
+ * (ADR-0079): its owner's rows in delegated workspaces, never anyone else's
+ * shared Resources.
+ *
+ * Shaped to be spread into a `where` beside other fields.
+ */
+async function visibleRows(
+  db: PrismaClient,
+  scope: ResourceScope,
+  only: { projectId?: string } = {},
+): Promise<Prisma.ResourceWhereInput> {
+  const own = scopedRows(scope);
+  if (scope.agentId) return own;
+  const shared = await buildSharedResourceWhere(db, scope.ownerId, only);
+  return shared ? { OR: [own, shared] } : own;
+}
+
+/**
+ * A row as its viewer may see it: who saved it, whether that is the caller,
+ * and the read state only when it is. Read state belongs to the owner alone,
+ * so nobody else's `readStatus` or `readAt` leaves the server.
+ */
+function forViewer<
+  Row extends { user: { id: string; name: string | null }; readStatus: string; readAt: Date | null },
+>(row: Row, scope: ResourceScope) {
+  const { user, ...rest } = row;
+  const isMine = user.id === scope.ownerId;
+  return {
+    ...rest,
+    owner: user,
+    isMine,
+    readStatus: isMine ? row.readStatus : null,
+    readAt: isMine ? row.readAt : null,
+  };
+}
+
+/**
+ * The workspace of a Project. Filing a Resource under a Project puts it in
+ * the Project's workspace (ADR-0082): that is what makes it shared, and a
+ * row filed in one workspace but sitting in another would be shared with
+ * nobody.
+ */
+async function projectWorkspaceId(db: PrismaClient, projectId: string): Promise<string | null> {
+  const project = await db.project.findUnique({
+    where: { id: projectId },
+    select: { workspaceId: true },
+  });
+  return project?.workspaceId ?? null;
 }
 
 /** Every gate user must be a member of the workspace. */
@@ -294,6 +355,23 @@ const SAVED_ROW_OMIT = { pageText: true } as const;
 
 /** Entries per page of `resource.identities`. */
 export const IDENTITIES_PAGE_SIZE = 1000;
+
+/**
+ * Keep a Resource's index entries where the Resource is. A chunk carries a
+ * copy of its source's workspace and Project, which the Knowledge search
+ * scopes and filters by, and moving a Resource does not re-embed it. Without
+ * this a Resource filed under a Project in another workspace could be opened
+ * by the Project's members and never found by them.
+ */
+async function moveChunksWithResource(
+  db: PrismaClient,
+  resource: { id: string; projectId: string | null; workspaceId: string | null },
+): Promise<void> {
+  await db.knowledgeChunk.updateMany({
+    where: { sourceType: "resource", sourceId: resource.id },
+    data: { projectId: resource.projectId, workspaceId: resource.workspaceId },
+  });
+}
 
 const resourceProcedure = protectedProcedure.use(async ({ ctx, next }) =>
   next({ ctx: { scope: await resolveResourceScope(ctx) } }),
@@ -342,7 +420,6 @@ export const resourceRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       const { scope } = ctx;
-      assertAgentCanPlace(scope, input.workspaceId);
 
       // Verify project access if specified — creating a resource in a project
       // requires edit access to that project.
@@ -356,12 +433,21 @@ export const resourceRouter = createTRPCRouter({
         );
       }
 
-      // Verify workspace access if specified
-      if (input.workspaceId) {
+      // Filing under a Project puts the Resource in the Project's workspace,
+      // whatever workspace the caller named.
+      const workspaceId =
+        (input.projectId ? await projectWorkspaceId(ctx.db, input.projectId) : null) ??
+        input.workspaceId;
+      assertAgentCanPlace(scope, workspaceId);
+
+      // The caller must belong to a workspace they name. An agent must be
+      // delegated the workspace the Resource lands in, named or not.
+      const gatedWorkspaceId = scope.agentId ? workspaceId : input.workspaceId;
+      if (gatedWorkspaceId) {
         await assertWorkspaceMember(
           ctx.db,
           scope,
-          input.workspaceId,
+          gatedWorkspaceId,
           new TRPCError({ code: "NOT_FOUND", message: "Workspace not found or access denied" }),
         );
       }
@@ -431,10 +517,22 @@ export const resourceRouter = createTRPCRouter({
               publishedAt: new Date(input.publishedAt),
             }),
             ...(input.tags.length > 0 && { tags: input.tags }),
-            ...(input.projectId !== undefined && { projectId: input.projectId }),
-            ...(input.workspaceId !== undefined && { workspaceId: input.workspaceId }),
+            // A save that names a Project files the Resource there, in the
+            // Project's workspace. One that names only a workspace moves a
+            // Resource that is not filed, and leaves a filed one with its
+            // Project.
+            ...(input.projectId !== undefined
+              ? { projectId: input.projectId, ...(workspaceId !== undefined && { workspaceId }) }
+              : workspaceId !== undefined && !existing.projectId && { workspaceId }),
           },
         });
+
+        if (
+          resource.projectId !== existing.projectId ||
+          resource.workspaceId !== existing.workspaceId
+        ) {
+          await moveChunksWithResource(ctx.db, resource);
+        }
 
         processSaveAfterResponse(ctx.db, resource, {
           embedBody: input.generateEmbeddings && (replacesBody || replacesPageText),
@@ -463,7 +561,7 @@ export const resourceRouter = createTRPCRouter({
           userId: scope.ownerId,
           createdByAgentId: scope.agentId,
           projectId: input.projectId,
-          workspaceId: input.workspaceId,
+          workspaceId,
           ...saveReadState(input, null),
         },
       });
@@ -480,21 +578,25 @@ export const resourceRouter = createTRPCRouter({
   get: resourceProcedure
     .input(z.object({ id: z.string() }))
     .query(async ({ ctx, input }) => {
-      const resource = await ctx.db.resource.findFirst({
-        where: { id: input.id, ...scopedRows(ctx.scope) },
+      // The reader opens anything the caller can see: their own Resources,
+      // and those filed under Projects they are in.
+      const row = await ctx.db.resource.findFirst({
+        where: { id: input.id, ...(await visibleRows(ctx.db, ctx.scope)) },
         omit: SAVED_ROW_OMIT,
         include: {
           project: { select: { id: true, name: true } },
           workspace: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true } },
         },
       });
 
-      if (!resource) {
+      if (!row) {
         throw new TRPCError({
           code: "NOT_FOUND",
           message: "Resource not found",
         });
       }
+      const resource = forViewer(row, ctx.scope);
 
       // Get chunk count
       const knowledgeService = getKnowledgeService(ctx.db);
@@ -531,7 +633,11 @@ export const resourceRouter = createTRPCRouter({
       const limit = input?.limit ?? IDENTITIES_PAGE_SIZE;
 
       const rows = await ctx.db.resource.findMany({
-        where: { ...scopedRows(scope), archivedAt: null, identity: { not: null } },
+        where: {
+          ...(await visibleRows(ctx.db, scope)),
+          archivedAt: null,
+          identity: { not: null },
+        },
         take: limit + 1,
         ...(input?.cursor && { cursor: { id: input.cursor }, skip: 1 }),
         orderBy: { id: "asc" },
@@ -551,6 +657,8 @@ export const resourceRouter = createTRPCRouter({
       if (hasMore) rows.pop();
       const nextCursor = hasMore ? rows[rows.length - 1]?.id : undefined;
       const items = rows.map(({ user, readStatus, ...row }) => {
+        // A Resource someone else filed under a Project the caller is in is
+        // listed too, flagged as not theirs and without its read state.
         const isMine = user.id === scope.ownerId;
         return { ...row, owner: user, isMine, readStatus: isMine ? readStatus : null };
       });
@@ -589,18 +697,36 @@ export const resourceRouter = createTRPCRouter({
         );
       }
 
-      const where: Record<string, unknown> = {
-        ...scopedRows(scope),
-        ...(input.projectId && { projectId: input.projectId }),
+      // A Project's list is everything filed there that the caller may see,
+      // whoever saved it (ADR-0082). Every other list is the caller's own:
+      // the Knowledge page, and the Reading list, which a shared Resource
+      // joins for its owner only. So a read-state filter keeps the list the
+      // caller's own even inside a Project.
+      const listsProject = Boolean(input.projectId) && !input.readStatus && !scope.agentId;
+      const rows = listsProject
+        ? await visibleRows(ctx.db, scope, { projectId: input.projectId })
+        : scopedRows(scope);
+
+      // Under AND so neither can collide with the title/description `OR`
+      // below: the rows of a Project's list, which are an OR of the caller's
+      // own and the shared, and the workspace view.
+      const and: Prisma.ResourceWhereInput[] = [
+        ...(listsProject ? [rows] : []),
         // A workspace view also lists the caller's rows that have no
         // workspace (saved from the unscoped /knowledge-base page, or
         // pre-dating workspaces) — otherwise they show up nowhere. Safe
-        // because `userId` already limits the list to the caller's own rows;
-        // an agent's `workspaceId IN` scope still drops them.
-        // Under AND so it can't collide with the title/description `OR` below.
-        ...(input.workspaceId && {
-          AND: [{ OR: [{ workspaceId: input.workspaceId }, { workspaceId: null }] }],
-        }),
+        // because a row with no workspace is never shared, so only the
+        // caller's own can match; an agent's `workspaceId IN` scope still
+        // drops them.
+        ...(input.workspaceId
+          ? [{ OR: [{ workspaceId: input.workspaceId }, { workspaceId: null }] }]
+          : []),
+      ];
+
+      const where: Record<string, unknown> = {
+        ...(!listsProject && rows),
+        ...(and.length > 0 && { AND: and }),
+        ...(input.projectId && { projectId: input.projectId }),
         ...(input.contentType && { contentType: input.contentType }),
         ...(!input.includeArchived && { archivedAt: null }),
         ...(input.readStatus === "unread"
@@ -643,7 +769,7 @@ export const resourceRouter = createTRPCRouter({
         nextCursor = resources[resources.length - 1]?.id;
       }
 
-      return { resources, nextCursor };
+      return { resources: resources.map((row) => forViewer(row, scope)), nextCursor };
     }),
 
   // Update a resource
@@ -696,6 +822,17 @@ export const resourceRouter = createTRPCRouter({
         }
       }
 
+      // Filing sets the workspace (ADR-0082). Moving into a Project is what
+      // shares a Resource, so it goes to the Project's workspace; and while it
+      // is filed it stays there, whatever workspace the caller names.
+      const projectId = input.projectId === undefined ? existing.projectId : input.projectId;
+      const changesPlacement = Boolean(input.projectId) || input.workspaceId !== undefined;
+      const filedWorkspaceId =
+        projectId && changesPlacement ? await projectWorkspaceId(ctx.db, projectId) : null;
+      if (filedWorkspaceId && scope.workspaceIds && !scope.workspaceIds.includes(filedWorkspaceId)) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Workspace not found or access denied" });
+      }
+
       const { id, regenerateEmbeddings, readStatus, ...updateData } = input;
 
       // Recalculate word count if content changed
@@ -708,11 +845,19 @@ export const resourceRouter = createTRPCRouter({
         omit: SAVED_ROW_OMIT,
         data: {
           ...updateData,
+          ...(filedWorkspaceId && { workspaceId: filedWorkspaceId }),
           ...(wordCount !== undefined && { wordCount }),
           ...(readStatus !== undefined &&
             readTransition(readStatus, existing.readStatus, existing.readAt)),
         },
       });
+
+      if (
+        resource.projectId !== existing.projectId ||
+        resource.workspaceId !== existing.workspaceId
+      ) {
+        await moveChunksWithResource(ctx.db, resource);
+      }
 
       // Regenerate embeddings if content changed or requested
       if (regenerateEmbeddings || input.content) {
@@ -886,10 +1031,16 @@ export const resourceRouter = createTRPCRouter({
 
       const { KnowledgeService } = await import("~/server/services/KnowledgeService");
       const knowledgeService = getKnowledgeService(ctx.db);
+      // Search follows visibility (ADR-0082): a person finds the text of
+      // their own Resources and of those filed under Projects they are in,
+      // and nothing else. `userId` would narrow to chunks the owner embedded,
+      // hiding every shared Resource, so only an agent, whose reach is its
+      // owner's rows, passes it.
       const results = await knowledgeService.search(input.query, {
         workspaceId: input.workspaceId,
-        userId: scope.ownerId,
+        ...(scope.agentId && { userId: scope.ownerId }),
         resourceViewerId: scope.ownerId,
+        resourceSharedWithViewer: !scope.agentId,
         projectId: input.projectId,
         sourceTypes: ["resource"],
         limit: input.limit,
