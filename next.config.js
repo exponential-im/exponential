@@ -92,6 +92,12 @@ const config = {
     webpackMemoryOptimizations: true,
     cpus: 2,
   },
+  // The sitemap renders per request and reads the Markdown under content/ at
+  // runtime. Tracing missed content/learn, so production served a sitemap
+  // without a single /learn article. Ship all of content/ with the route.
+  outputFileTracingIncludes: {
+    "/sitemap.xml": ["./content/**/*"],
+  },
   turbopack: {
     resolveAlias: {
       "markdown-it": "markdown-it/dist/index.cjs.js",
