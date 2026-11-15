@@ -449,6 +449,7 @@ export default function WorkspaceSettingsPage() {
     onSuccess: () => {
       refetchWorkspace();
       void utils.assistant.getMine.invalidate();
+      void utils.assistant.myWorkspaces.invalidate();
       notifications.show({
         title: 'Assistant added',
         message: `${myAssistant?.name ?? 'Your Assistant'} can now be assigned work in ${workspace?.name ?? 'this workspace'}.`,

@@ -113,6 +113,7 @@ export const FIXTURE = {
 export interface SeededFixture {
   userId: string;
   workspaceSlug: string;
+  workspaceName: string;
   /** A second workspace the fixture user owns, for cross-workspace cases. */
   otherWorkspaceSlug: string;
   otherWorkspaceName: string;
@@ -1307,6 +1308,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       offProjectParent: offProjectParentGoal.id,
       detachedChild: detachedChildGoal.id,
     },
+    workspaceName: FIXTURE.workspaceName,
     userId: user.id,
     workspaceSlug: FIXTURE.workspaceSlug,
     otherWorkspaceSlug: FIXTURE.otherWorkspaceSlug,

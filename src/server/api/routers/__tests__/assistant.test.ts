@@ -421,3 +421,45 @@ describe("assistant.removeFromWorkspace", () => {
     expect(dbMock.workspaceUser.deleteMany).not.toHaveBeenCalled();
   });
 });
+
+describe("assistant.myWorkspaces — Settings → Assistant's list", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+  });
+
+  const memberships = [
+    { role: "owner", workspace: { id: "ws-personal", name: "Personal", slug: "p", type: "personal" } },
+    { role: "member", workspace: { id: "ws-team", name: "Team", slug: "t", type: "team" } },
+    { role: "viewer", workspace: { id: "ws-view", name: "Viewing", slug: "v", type: "team" } },
+  ];
+
+  it("marks where the Assistant works and where its person may add it", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue({ externalAgent: { shadowUserId: "shadow-1" } } as never);
+    dbMock.workspaceUser.findMany.mockImplementation(((args: { where: { userId: string } }) =>
+      Promise.resolve(
+        args.where.userId === "shadow-1" ? [{ workspaceId: "ws-personal" }] : memberships,
+      )) as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await expect(caller.assistant.myWorkspaces()).resolves.toEqual([
+      { id: "ws-personal", name: "Personal", slug: "p", type: "personal", canAdd: true, assistantIsMember: true },
+      { id: "ws-team", name: "Team", slug: "t", type: "team", canAdd: true, assistantIsMember: false },
+      // A viewer cannot delegate member-level access (ADR-0049).
+      { id: "ws-view", name: "Viewing", slug: "v", type: "team", canAdd: false, assistantIsMember: false },
+    ]);
+  });
+
+  it("with no Assistant yet, it works nowhere", async () => {
+    dbMock.assistant.findFirst.mockResolvedValue(null);
+    dbMock.workspaceUser.findMany.mockResolvedValue(memberships as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    const result = await caller.assistant.myWorkspaces();
+
+    expect(result.every((w) => !w.assistantIsMember)).toBe(true);
+    expect(dbMock.workspaceUser.findMany).toHaveBeenCalledTimes(1);
+  });
+});

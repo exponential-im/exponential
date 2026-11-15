@@ -10,6 +10,7 @@ import {
   assistantWorksInWorkspaceWhere,
   resolveAssistantForUser,
 } from "~/server/services/assistant/resolveAssistant";
+import { canDelegateFromRole } from "~/lib/agentDelegation";
 import { renameAssistantPrincipal } from "~/server/services/assistant/principal";
 import { retireAssistant } from "~/server/services/assistant/retire";
 import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
@@ -254,6 +255,42 @@ export const assistantRouter = createTRPCRouter({
       ...activeAssistantQuery(ctx.session.user.id),
       include: ASSISTANT_PRINCIPAL_INCLUDE,
     });
+  }),
+
+  /**
+   * Every workspace the calling user belongs to directly, with whether their
+   * Assistant works there and whether they may add it (a delegating role,
+   * ADR-0049) — Settings → Assistant's "Where it works" list. With no
+   * Assistant yet, it works nowhere.
+   */
+  myWorkspaces: protectedProcedure.query(async ({ ctx }) => {
+    const userId = ctx.session.user.id;
+    const [assistant, memberships] = await Promise.all([
+      ctx.db.assistant.findFirst({
+        ...activeAssistantQuery(userId),
+        select: { externalAgent: { select: { shadowUserId: true } } },
+      }),
+      ctx.db.workspaceUser.findMany({
+        where: { userId },
+        orderBy: { joinedAt: "asc" },
+        select: { role: true, workspace: { select: { id: true, name: true, slug: true, type: true } } },
+      }),
+    ]);
+    const worksIn = new Set(
+      assistant
+        ? (
+            await ctx.db.workspaceUser.findMany({
+              where: { userId: assistant.externalAgent.shadowUserId },
+              select: { workspaceId: true },
+            })
+          ).map((m) => m.workspaceId)
+        : [],
+    );
+    return memberships.map((m) => ({
+      ...m.workspace,
+      canAdd: canDelegateFromRole(m.role),
+      assistantIsMember: worksIn.has(m.workspace.id),
+    }));
   }),
 
   /**
