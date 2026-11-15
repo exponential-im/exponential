@@ -1559,6 +1559,30 @@ describe("resource router — agent works on its owner's list (mocked)", () => {
     expect(dbMock.resource.findFirst.mock.calls[0]![0]!.where).toEqual({ id: "theirs", ...own });
   });
 
+  it("keeps its owner's own copy in a delegated workspace when the Project already lists the page", async () => {
+    dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+    dbMock.project.findUnique.mockResolvedValue({
+      createdById: OWNER_ID,
+      teamId: null,
+      workspaceId: "w1",
+      isPublic: true,
+      isRestricted: false,
+    } as never);
+    // The agent and its owner are both members of w1, so both may edit the Project.
+    dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "member" } as never);
+    dbMock.resource.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "theirs", title: "Villa", user: { id: "teammate", name: "James" } } as never);
+    dbMock.resource.create.mockResolvedValue(fakeResource({ userId: OWNER_ID }));
+
+    // A Project and no workspace named, and the Reading list asked for by default.
+    await agentCaller().resource.create({ title: "Villa", url: "https://example.com/villa", projectId: "p1" });
+
+    const data = dbMock.resource.create.mock.calls[0]![0].data;
+    expect(data).toMatchObject({ userId: OWNER_ID, workspaceId: "w1" });
+    expect(data.projectId).toBeUndefined();
+  });
+
   it("unfiles only its owner's Resources, never one a teammate filed", async () => {
     dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
     dbMock.resource.findFirst.mockResolvedValue(null);

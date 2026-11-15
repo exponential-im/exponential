@@ -519,7 +519,10 @@ export const resourceRouter = createTRPCRouter({
         ? {
             // The caller's own Resource leaves the Project if it was there.
             projectId: existing?.projectId === alreadyInProject.projectId ? null : undefined,
-            workspaceId: input.workspaceId,
+            // As a save with no Project: the workspace the caller named. An
+            // agent must still land in a delegated workspace (ADR-0079), so
+            // with none named its save stays in the Project's.
+            workspaceId: input.workspaceId ?? (scope.agentId ? workspaceId : undefined),
           }
         : { projectId: input.projectId, workspaceId };
 
