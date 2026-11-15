@@ -148,36 +148,53 @@ client surface is covered without its own SDK. Decision:
   `src/app/api/trpc/[trpc]/route.ts`, after the response but before Vercel freezes the
   function.
 
-### Browser: page views and session replay
+### Browser: masked session replay only
 
-`posthog-js` is initialised in `src/instrumentation-client.ts` from
-`src/lib/analytics/posthogBrowser.ts`, and `PostHogIdentify` in the signed-in layout ties the
-browser to the same user id as the server events. Signing out resets the identity.
+The browser runs **no general analytics SDK**: no page views, no identification. Vercel Web
+Analytics counts public page views. The only browser-side PostHog is session replay, in
+`src/app/_components/layout/SessionReplay.tsx`, mounted in the signed-in layout.
 
-- **Captured**: `$pageview` on every URL change (App Router included), `$pageleave`, and
-  session replay when it is enabled in the PostHog project settings.
-- **Not captured**: autocapture clicks (element text would leak content) and exceptions
-  (Sentry owns those). Anonymous visitors get no person profile.
-- **Replays mask all text and inputs.** Structure, navigation and clicks stay visible; what
-  people wrote does not. Relaxing this is a privacy decision, not a config tweak.
-- **Transport**: same-origin `/ingest/*`, rewritten to PostHog's EU hosts in
-  `next.config.js`, so ad blockers and the CSP leave it alone. `/ingest` is excluded from
-  the auth middleware like `/monitoring`.
-- **Trailing slashes**: PostHog's endpoints need them, so `skipTrailingSlashRedirect` is on
-  and the middleware restores the `/foo/` → `/foo` redirect for pages
-  (`src/lib/trailingSlash.ts`). That redirect is load-bearing for auth: `/features/` is a
-  public prefix but would otherwise render the gated `/features` page.
+- **Where**: only `REPLAY_PATHS` (`/onboarding`, `/welcome`, `/w/exponential`), meaning the
+  signup path and our own workspace. Customer workspaces are never recorded, and other pages
+  never download `posthog-js` (it is imported dynamically on the first recorded page).
+- **Masking, in the browser before anything is sent**: every text node
+  (`maskTextSelector: '*'`) and input; images, video, canvas and iframes are blocked; and
+  attributes go through an allowlist (`maskAttribute`). Only what a replay needs to render
+  is kept (class, SVG geometry, ARIA state, short Mantine `data-*` tokens, stylesheet links).
+  `title`, `aria-label`, `alt`, `href`, `id`, `value` and anything unlisted are masked.
+  posthog-js's `mask_all_text` / `mask_all_element_attributes` only affect autocapture, so
+  they do nothing for replay.
+- **Anonymous and storage-free**: never `identify`d, `person_profiles: 'identified_only'`,
+  `persistence: 'memory'`. That means no cookies or localStorage, so replays cannot be joined
+  to the server events' person.
+- **Off**: autocapture, page views, heatmaps, dead clicks, exceptions, surveys, console logs,
+  network timing, request headers and bodies.
+- **Transport**: straight to `*.i.posthog.com`, which is listed in the report-only CSP. There is
+  no same-origin proxy, so ad blockers drop some replays. That's acceptable for a sample, and
+  it avoids `skipTrailingSlashRedirect`, which would disable Next's trailing-slash redirect
+  that the public allowlist relies on (`/features/` vs `/features`).
+- **Navigation**: recording starts only if the visitor is still on a recorded page when
+  `posthog-js` finishes loading, and leaving one always stops it
+  (`SessionReplay.navigation.test.tsx`).
+
+Widening `REPLAY_PATHS` to customer workspaces, or identifying replays, is a privacy decision
+(and a privacy-page change), not a config tweak.
 
 ### Environment variables
 
 | Variable | Where | Notes |
 |---|---|---|
-| `NEXT_PUBLIC_POSTHOG_KEY` | Vercel production (preview optional) | Project API key. Enables browser and server analytics. Unset = disabled. |
+| `NEXT_PUBLIC_POSTHOG_KEY` | Vercel production (preview optional) | Project API key. Enables server events and browser replay. Unset = disabled. |
+| `NEXT_PUBLIC_POSTHOG_HOST` | Optional | Browser replay host, defaults to `https://eu.i.posthog.com`. |
 | `POSTHOG_KEY` | Optional | Server-side override of the key. |
-| `POSTHOG_HOST` | Optional | Server-side host, defaults to `https://eu.i.posthog.com`. The browser proxy is EU-only. |
+| `POSTHOG_HOST` | Optional | Server-side host, defaults to `https://eu.i.posthog.com`. |
+
+In the PostHog project settings: enable session replay, enable **Discard client IP data**,
+and leave console-log and network capture off.
 
 To see real events locally, put a project key in `.env.local` as `NEXT_PUBLIC_POSTHOG_KEY`,
-run the dev server, browse and perform a mutation, then watch PostHog's Activity tab.
+run the dev server, perform a mutation, and watch PostHog's Activity tab. Open `/welcome` to
+produce a replay.
 
 ## Other signals
 

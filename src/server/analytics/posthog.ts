@@ -108,21 +108,29 @@ function getClient(): PostHog | null {
     client = null;
     return client;
   }
-  client = new PostHog(key, {
-    host: env.POSTHOG_HOST ?? "https://eu.i.posthog.com",
-    // Events queue in memory and are sent on flush. On Vercel the tRPC route
-    // handler flushes via `after()` once the response is out, because the
-    // function is frozen as soon as it responds (dev-docs/OBSERVABILITY.md).
-    flushAt: 20,
-    flushInterval: 10_000,
-    // Never resolve the caller's location from the function's IP. The
-    // request IP is deliberately not forwarded either (no PII by default,
-    // matching Sentry's `sendDefaultPii: false`).
-    disableGeoip: true,
-  });
-  client.on("error", (error: unknown) => {
-    console.error("[analytics] PostHog client error:", error);
-  });
+  // Construction runs inside a request (the first captured call), so a failure
+  // here must disable analytics rather than fail a request whose work is done.
+  try {
+    const created = new PostHog(key, {
+      host: env.POSTHOG_HOST ?? "https://eu.i.posthog.com",
+      // Events queue in memory and are sent on flush. On Vercel the tRPC route
+      // handler flushes via `after()` once the response is out, because the
+      // function is frozen as soon as it responds (dev-docs/OBSERVABILITY.md).
+      flushAt: 20,
+      flushInterval: 10_000,
+      // Never resolve the caller's location from the function's IP. The
+      // request IP is deliberately not forwarded either (no PII by default,
+      // matching Sentry's `sendDefaultPii: false`).
+      disableGeoip: true,
+    });
+    created.on("error", (error: unknown) => {
+      console.error("[analytics] PostHog client error:", error);
+    });
+    client = created;
+  } catch (error) {
+    console.error("[analytics] PostHog client failed to start; analytics disabled:", error);
+    client = null;
+  }
   return client;
 }
 

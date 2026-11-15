@@ -25,15 +25,16 @@ talk to it. Instrumenting each separately would mean many SDKs and drifting voca
    leak to a third party.
 5. **Flush inside `after()`** in the tRPC route handler, because Vercel freezes the function
    once the response is sent.
-6. **The browser SDK adds only what the server cannot see**: page views, page leaves and
-   session replay. Autocapture is off, replays mask all text and inputs, and only signed-in
-   users get person profiles. It reaches PostHog through a same-origin `/ingest` proxy, so
-   ad blockers and the CSP leave it alone. One public key (`NEXT_PUBLIC_POSTHOG_KEY`) drives
-   both halves.
-7. **Next's trailing-slash redirect moves into the middleware.** The proxy needs
-   `skipTrailingSlashRedirect`, which turns the redirect off globally; the middleware
-   restores it for page paths because the public allowlist treats `/features/` and
-   `/features` differently.
+6. **The browser runs masked session replay only, on a few pages.** No page views, no
+   identification, no cookies (`persistence: 'memory'`). Replay records only the signup
+   path and our own workspace (`REPLAY_PATHS`), masks all text, inputs and content-bearing
+   attributes, and blocks media. Customer workspaces hold private and humanitarian data,
+   so they are never recorded, and replays are never joined to a person. One public key
+   (`NEXT_PUBLIC_POSTHOG_KEY`) drives both halves.
+7. **No same-origin proxy.** Replay goes straight to `*.i.posthog.com` (allowed in the CSP).
+   A proxy would need `skipTrailingSlashRedirect`, which turns Next's trailing-slash
+   redirect off app-wide; the public allowlist depends on that redirect. Losing some replays
+   to ad blockers is acceptable for a sample.
 
 ## Considered alternatives
 
@@ -42,16 +43,20 @@ talk to it. Instrumenting each separately would mean many SDKs and drifting voca
   volume demands it. Only `POSTHOG_HOST` would change.
 - **Umami / Plausible**: page views only. **OpenPanel**: lighter but no replay or flags.
 - **Per-client SDKs**: rejected for drift and effort.
+- **Browser SDK on every page** (page views, identified replays everywhere, `/ingest`
+  proxy): the first draft of this PR. Rejected because it recorded customer workspaces,
+  linked replays to accounts and set cookies site-wide, and the proxy forced an auth-relevant
+  routing change.
 
 ## Consequences
 
 - Setting `NEXT_PUBLIC_POSTHOG_KEY` in Vercel turns both halves on; unset, everything is a
   no-op.
+- Product analytics come from server events alone; page-view funnels stay in Vercel Web
+  Analytics, which counts public pages only.
 - Procedures called from React Server Components are captured but rely on the 10s timer to
   flush, so on Vercel they can be lost. Client traffic goes through the route handler.
 - The Tauri shell uses the cookie session and reports as `web`.
-- Vercel Analytics and Google Analytics still run alongside; either can be removed once
-  PostHog's web analytics has been trusted for a while.
 - Masked replays show where people struggle, not what they typed. Unmasking any region
   needs its own privacy decision.
 - Renaming a procedure renames its event; treat procedure paths as a stable vocabulary

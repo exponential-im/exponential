@@ -197,4 +197,29 @@ describe("captureProcedureCall", () => {
     expect(constructorSpy).not.toHaveBeenCalled();
     expect(capture).not.toHaveBeenCalled();
   });
+
+  it("disables analytics instead of throwing when the client cannot start", async () => {
+    fakeEnv.POSTHOG_KEY = "phc_test";
+    constructorSpy.mockImplementationOnce(() => {
+      throw new Error("bad option");
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const call = {
+      userId: "u1",
+      path: "action.create",
+      type: "mutation" as const,
+      surface: "web" as const,
+      ok: true,
+      durationMs: 3,
+    };
+
+    expect(() => captureProcedureCall(call)).not.toThrow();
+    await expect(flushAnalytics()).resolves.toBeUndefined();
+    expect(isAnalyticsEnabled()).toBe(false);
+    // Not retried on every request: the failure is cached as "disabled".
+    captureProcedureCall(call);
+    expect(constructorSpy).toHaveBeenCalledTimes(1);
+    expect(capture).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
 });
