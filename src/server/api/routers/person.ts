@@ -1,25 +1,41 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import {
   FEED_PAGE_SIZE,
   getAggregatedActivityFeed,
 } from "~/server/services/activity/feed";
+import { resolvePersonSubjectId } from "~/server/services/person/handle";
 import {
   getPersonSummary,
   resolvePersonScope,
 } from "~/server/services/person/personPage";
+import {
+  getPersonWeekSummary,
+  PersonSummaryRateLimitError,
+} from "~/server/services/person/weekSummary/summary";
 
 /**
- * Person page (`/people/<userId>`): one page per person, human or agent,
- * showing what they did across the workspaces the viewer belongs to. Read-only.
- * The visibility and not-found rules live in `services/person/personPage.ts`.
+ * The `/people/<segment>` route segment: a user id, or the handle of a person
+ * who picked one. Every procedure resolves it to a user id first and only then
+ * applies the scope guard, so a handle is never treated differently from an id.
+ * The key stays `userId` because an id is always accepted.
+ */
+const personRef = z.string().min(1).max(200);
+
+/**
+ * Person page (`/people/<userId>` or `/people/<handle>`): one page per person,
+ * human or agent, showing what they did across the workspaces the viewer
+ * belongs to. Read-only. The visibility and not-found rules live in
+ * `services/person/personPage.ts`; handles in `services/person/handle.ts`.
  */
 export const personRouter = createTRPCRouter({
   get: protectedProcedure
-    .input(z.object({ userId: z.string().min(1) }))
-    .query(({ ctx, input }) =>
-      getPersonSummary(ctx.db, ctx.session.user.id, input.userId),
-    ),
+    .input(z.object({ userId: personRef }))
+    .query(async ({ ctx, input }) => {
+      const subjectId = await resolvePersonSubjectId(ctx.db, input.userId);
+      return getPersonSummary(ctx.db, ctx.session.user.id, subjectId);
+    }),
 
   /**
    * The subject's activity events from every workspace the viewer belongs to.
@@ -30,7 +46,7 @@ export const personRouter = createTRPCRouter({
   getFeed: protectedProcedure
     .input(
       z.object({
-        userId: z.string().min(1),
+        userId: personRef,
         cursor: z.string().optional(),
         limit: z.number().int().min(1).max(50).optional(),
         source: z.string().optional(),
@@ -39,10 +55,11 @@ export const personRouter = createTRPCRouter({
       }),
     )
     .query(async ({ ctx, input }) => {
+      const subjectId = await resolvePersonSubjectId(ctx.db, input.userId);
       const scope = await resolvePersonScope(
         ctx.db,
         ctx.session.user.id,
-        input.userId,
+        subjectId,
       );
 
       const visibleIds = scope.visibleWorkspaces.map(
@@ -63,7 +80,47 @@ export const personRouter = createTRPCRouter({
         cursor: input.cursor,
         limit: input.limit ?? FEED_PAGE_SIZE,
         source: input.source,
-        actorUserId: input.userId,
+        actorUserId: subjectId,
       });
+    }),
+
+  /**
+   * An AI-written summary of one week of the subject's work, built only from
+   * the events the viewer can see on this page and stored per viewer, subject
+   * and ISO week. `isoYear`/`isoWeek` page back to an earlier week; `force`
+   * regenerates (rate-limited). Never available for your own page: that shows
+   * your Weekly work digest instead.
+   */
+  getWeekSummary: protectedProcedure
+    .input(
+      z.object({
+        userId: personRef,
+        isoYear: z.number().int().optional(),
+        isoWeek: z.number().int().min(1).max(53).optional(),
+        force: z.boolean().optional(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const target =
+        input.isoYear != null && input.isoWeek != null
+          ? { isoYear: input.isoYear, isoWeek: input.isoWeek }
+          : undefined;
+      const subjectId = await resolvePersonSubjectId(ctx.db, input.userId);
+      try {
+        return await getPersonWeekSummary(ctx.db, {
+          viewerId: ctx.session.user.id,
+          subjectId,
+          target,
+          force: input.force,
+        });
+      } catch (err) {
+        if (err instanceof PersonSummaryRateLimitError) {
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: "Too many summaries were written recently — try again shortly.",
+          });
+        }
+        throw err;
+      }
     }),
 });

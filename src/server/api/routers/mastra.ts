@@ -20,6 +20,7 @@ import { getKnowledgeService } from "~/server/services/KnowledgeService";
 import { generateAgentJWT, generateJWT } from "~/server/utils/jwt";
 import { capToolCallsForTurn, redactToolArgs } from "~/server/utils/redactToolArgs";
 import { resolveAgentActionSource } from "~/server/utils/actionSource";
+import { resolvePrincipal } from "~/server/services/access/principal";
 import { actionWriteDeps, applyActionUpdate, createAction } from "~/server/services/actions";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -447,7 +448,8 @@ export const mastraRouter = createTRPCRouter({
       // else simply doesn't resolve, and the request falls through to `agentId`.
       if (input.assistantId) {
         const assistant = await ctx.db.assistant.findFirst({
-          where: { id: input.assistantId, createdById: ctx.session.user.id },
+          // A retired Assistant (ADR-0072) never lends its persona, as in the stream route.
+          where: { id: input.assistantId, createdById: ctx.session.user.id, retiredAt: null },
         });
 
         if (assistant) {
@@ -1395,7 +1397,7 @@ export const mastraRouter = createTRPCRouter({
         dueDate: parseAgentDate(input.dueDate, "dueDate") ?? undefined,
         scheduledStart: parseAgentDate(input.scheduledStart, "scheduledStart") ?? undefined,
         projectId: input.projectId,
-        source: resolveAgentActionSource(ctx.tokenType),
+        source: resolveAgentActionSource(await resolvePrincipal(ctx), ctx.tokenType),
       });
 
       console.log(`✅ [tRPC createAction] CREATED: id=${action.id}, name="${action.name}", projectId=${action.projectId}`);
@@ -1486,7 +1488,7 @@ export const mastraRouter = createTRPCRouter({
         status: "ACTIVE",
         scheduledStart: scheduledStart ?? undefined,
         dueDate: dueDate ?? undefined,
-        source: resolveAgentActionSource(ctx.tokenType),
+        source: resolveAgentActionSource(await resolvePrincipal(ctx), ctx.tokenType),
       });
       const action = {
         ...created,
@@ -4091,6 +4093,9 @@ export const mastraRouter = createTRPCRouter({
         note: z.string().optional(),
         source: z.string().nullish(),
         asOf: z.coerce.date().nullish(),
+        // Write even while someone else is mid-session in the editor. Only
+        // after the person has said so; the default is to wait (ADR-0074).
+        force: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -4104,6 +4109,7 @@ export const mastraRouter = createTRPCRouter({
         note: input.note,
         source: input.source,
         asOf: input.asOf,
+        force: input.force,
       });
       // The agent sends Markdown `body` (never `bodyDoc`), so page.update takes
       // the metadata path and returns the full record (not the {id, docVersion}

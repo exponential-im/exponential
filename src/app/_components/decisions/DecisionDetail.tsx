@@ -30,6 +30,7 @@ import {
   parseEvidence,
 } from "~/lib/decision-evidence";
 import { api } from "~/trpc/react";
+import { agentDecisionAuthor } from "~/lib/decision-log";
 
 /**
  * A Decision's content (ADR-0060): statement, status, provenance (the
@@ -149,7 +150,7 @@ export function DecisionDetail({
               {decision.source === "MEETING"
                 ? "meeting"
                 : decision.source === "AGENT"
-                  ? "logged by Zoe"
+                  ? `logged by ${agentDecisionAuthor(decision) ?? "an agent"}`
                   : "manual"}
             </Badge>
           </Group>

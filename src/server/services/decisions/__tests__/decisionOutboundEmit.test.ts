@@ -21,6 +21,15 @@ import { confirmDraft, createDecision, setStatus } from "../decisionService";
 
 const WORKSPACE_ID = "ws-1";
 const USER = "user-1";
+/** Who is acting comes from the verified credential (Principal), never a label. */
+const HUMAN = { kind: "human", userId: USER, surface: "web" } as const;
+const AGENT = {
+  kind: "agent",
+  userId: "agent-1",
+  agentId: "ext-1",
+  ownerId: USER,
+  surface: "agent-key",
+} as const;
 
 const CONFIRMED = {
   id: "dec-1",
@@ -56,7 +65,7 @@ describe("decision service → outbound posts", () => {
     db.workspace.update.mockResolvedValue({ decisionCounter: 7 } as never);
     db.decision.create.mockResolvedValue(CONFIRMED as never);
 
-    await createDecision(db, { workspaceId: WORKSPACE_ID, createdById: USER, statement: "Use tRPC" });
+    await createDecision(db, { workspaceId: WORKSPACE_ID, createdById: USER, statement: "Use tRPC", principal: HUMAN });
 
     expect(emitOutboundPost).toHaveBeenCalledWith(db, {
       kind: "decision",
@@ -76,45 +85,40 @@ describe("decision service → outbound posts", () => {
       workspaceId: WORKSPACE_ID,
       createdById: "agent-1",
       statement: "x",
-      asDraft: true,
-      creatorIsAgent: true,
+      principal: AGENT,
     });
 
     expect(emitOutboundPost).not.toHaveBeenCalled();
   });
 
-  it("accepting emits `accepted`; an agent actor's status change emits with actorIsAgent", async () => {
+  it("accepting, superseding-class moves and deprecating emit their transition for a person", async () => {
     db.decision.findFirst.mockResolvedValue(CONFIRMED as never);
     db.decision.update.mockResolvedValue({ ...CONFIRMED, status: "ACCEPTED" } as never);
 
-    await setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: USER, status: "ACCEPTED" });
+    await setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN, status: "ACCEPTED" });
     expect(emitOutboundPost).toHaveBeenLastCalledWith(
       db,
       expect.objectContaining({ event: "accepted", actorIsAgent: false }),
     );
 
-    await setStatus(db, {
-      decisionId: "dec-1",
-      workspaceId: WORKSPACE_ID,
-      userId: USER,
-      status: "DEPRECATED",
-      actorIsAgent: true,
-    });
+    await setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN, status: "DEPRECATED" });
     expect(emitOutboundPost).toHaveBeenLastCalledWith(
       db,
-      expect.objectContaining({ event: "deprecated", actorIsAgent: true }),
+      expect.objectContaining({ event: "deprecated", actorIsAgent: false }),
     );
   });
 
-  it("an agent principal's login counts as an agent actor even without the token flag", async () => {
-    db.user.findUnique.mockResolvedValue({ id: "agent-1", name: "Bot", email: null, isAgent: true } as never);
-    db.user.findFirst.mockResolvedValue({ id: "agent-1" } as never);
+  it("an agent cannot move a confirmed decision at all, so nothing is ever posted for one", async () => {
     db.decision.findFirst.mockResolvedValue(CONFIRMED as never);
-    db.decision.update.mockResolvedValue({ ...CONFIRMED, status: "ACCEPTED" } as never);
 
-    await setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: "agent-1", status: "ACCEPTED" });
+    await expect(
+      setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: "agent-1", principal: AGENT, status: "ACCEPTED" }),
+    ).rejects.toThrow();
+    await expect(
+      confirmDraft(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: "agent-1", principal: AGENT }),
+    ).rejects.toThrow();
 
-    expect(emitOutboundPost).toHaveBeenLastCalledWith(db, expect.objectContaining({ actorIsAgent: true }));
+    expect(emitOutboundPost).not.toHaveBeenCalled();
   });
 
   it("confirming a draft emits `published`, plus the transition when confirmed as accepted", async () => {
@@ -125,11 +129,11 @@ describe("decision service → outbound posts", () => {
     db.decision.findUniqueOrThrow.mockResolvedValue({ ...draft, reviewState: "CONFIRMED" } as never);
     db.decision.update.mockResolvedValue({ ...draft, reviewState: "CONFIRMED", status: "ACCEPTED" } as never);
 
-    await confirmDraft(db, { decisionId: "draft-2", workspaceId: WORKSPACE_ID, userId: USER });
+    await confirmDraft(db, { decisionId: "draft-2", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN });
     expect(emitOutboundPost.mock.calls.map((c) => (c[1] as { event: string }).event)).toEqual(["published"]);
 
     emitOutboundPost.mockClear();
-    await confirmDraft(db, { decisionId: "draft-2", workspaceId: WORKSPACE_ID, userId: USER, status: "ACCEPTED" });
+    await confirmDraft(db, { decisionId: "draft-2", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN, status: "ACCEPTED" });
     expect(emitOutboundPost.mock.calls.map((c) => (c[1] as { event: string }).event)).toEqual([
       "published",
       "accepted",
@@ -162,7 +166,7 @@ describe("decision service → outbound posts", () => {
     db.decision.deleteMany.mockResolvedValue({ count: 1 } as never);
     db.decision.update.mockResolvedValue({ ...target, status: "ACCEPTED", supersededBy: null } as never);
 
-    const result = await confirmDraft(db, { decisionId: "draft-1", workspaceId: WORKSPACE_ID, userId: USER });
+    const result = await confirmDraft(db, { decisionId: "draft-1", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN });
 
     expect(result.id).toBe("open-1");
     expect(emitOutboundPost.mock.calls.map((c) => c[1])).toEqual([
@@ -177,7 +181,7 @@ describe("decision service → outbound posts", () => {
     db.decision.update.mockResolvedValue({ ...CONFIRMED, status: "ACCEPTED" } as never);
 
     await expect(
-      setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: USER, status: "ACCEPTED" }),
+      setStatus(db, { decisionId: "dec-1", workspaceId: WORKSPACE_ID, userId: USER, principal: HUMAN, status: "ACCEPTED" }),
     ).resolves.toMatchObject({ status: "ACCEPTED" });
   });
 });
