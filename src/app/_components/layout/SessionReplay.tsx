@@ -19,6 +19,42 @@ export function shouldRecord(pathname: string): boolean {
   );
 }
 
+/**
+ * Attributes a recording keeps, because the replay needs them to render.
+ * Text masking does not reach attributes, and rrweb records every attribute
+ * verbatim, so anything not listed here is masked: `title`, `aria-label`,
+ * `alt`, `placeholder`, `href`, `id`, `value`, `name` and every attribute
+ * nobody thought of yet. Names are compared lower-cased.
+ */
+const RENDERING_ATTRIBUTES = new Set([
+  'class', 'type', 'role', 'dir', 'lang', 'hidden', 'open', 'disabled',
+  'checked', 'selected', 'tabindex', 'width', 'height', 'colspan', 'rowspan',
+  'cols', 'rows', 'rel', 'media', 'aria-hidden', 'aria-expanded',
+  'aria-selected', 'aria-checked', 'aria-pressed', 'aria-current',
+  'aria-disabled', 'aria-orientation',
+  // SVG geometry, for icons.
+  'xmlns', 'viewbox', 'preserveaspectratio', 'd', 'fill', 'fill-rule',
+  'clip-rule', 'stroke', 'stroke-width', 'stroke-linecap', 'stroke-linejoin',
+  'opacity', 'transform', 'x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'r',
+  'rx', 'ry', 'points',
+]);
+
+/** Mantine styles on short state tokens: data-variant="filled", data-active. */
+const STYLE_TOKEN = /^(?:[a-z]+(?:-[a-z]+)*)?$/;
+
+export function maskAttribute(name: string, value: string, element?: Element): string {
+  const attr = name.toLowerCase();
+  // rrweb's own serialisation attributes (_cssText, rr_width, ...).
+  if (attr.startsWith('_') || attr.startsWith('rr_')) return value;
+  if (RENDERING_ATTRIBUTES.has(attr)) return value;
+  // Inline layout stays; an image URL (a user's upload) does not.
+  if (attr === 'style') return value.replace(/url\([^)]*\)/gi, 'url()');
+  // Stylesheets are the app's own /_next/static assets.
+  if (attr === 'href' && element?.tagName === 'LINK') return value;
+  if (attr.startsWith('data-') && value.length <= 24 && STYLE_TOKEN.test(value)) return value;
+  return value === '' ? value : '***';
+}
+
 // posthog-js is loaded on the first recorded page, so other pages never
 // download it.
 let client: Promise<PostHog> | null = null;
@@ -51,11 +87,13 @@ function initPostHog(posthog: PostHog, key: string) {
     // Recording starts only on a REPLAY_PATHS page (see the effect below).
     disable_session_recording: true,
     session_recording: {
-      // Full masking: every text node and input renders as asterisks, and
-      // images, video and canvas are replaced by same-sized placeholders, so a
-      // recording shows layout and interaction, never content.
+      // Full masking: every text node, input and content-bearing attribute
+      // renders as asterisks, and images, video and canvas are replaced by
+      // same-sized placeholders, so a recording shows layout and interaction,
+      // never content.
       maskAllInputs: true,
       maskTextSelector: '*',
+      maskAttributeFn: maskAttribute,
       blockSelector: 'img, video, canvas, picture, iframe',
       recordHeaders: false,
       recordBody: false,
