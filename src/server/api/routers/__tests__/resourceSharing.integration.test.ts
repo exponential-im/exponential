@@ -268,7 +268,6 @@ describe("Resources filed under a Project are shared with it", () => {
         createTestCaller(member.id).resource.create({
           title: "Villa",
           url: anotherVisit(resource.url!),
-        declaredUrl: resource.url!,
           declaredUrl: resource.url!,
           projectId: proj.id,
           generateEmbeddings: false,

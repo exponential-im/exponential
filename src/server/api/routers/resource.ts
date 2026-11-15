@@ -495,17 +495,32 @@ export const resourceRouter = createTRPCRouter({
       // save with no Project would be: that is how a member puts a shared
       // page on their own list. The caller's own Resource already in the
       // Project is not a second filing, so it is updated as before.
+      //
+      // An archived Resource does not hold the page's place, so a save that
+      // brings the caller's archived Resource back is a filing too: if a
+      // teammate filed the page there in the meantime, theirs stays and the
+      // caller's comes back with no Project.
+      const filingProjectId =
+        input.projectId ?? (existing?.archivedAt ? existing.projectId : null) ?? undefined;
+      const holdsThePlace =
+        existing != null && !existing.archivedAt && existing.projectId === filingProjectId;
       const alreadyInProject =
-        input.projectId && addresses && existing?.projectId !== input.projectId
+        filingProjectId && addresses && !holdsThePlace
           ? await findPageInProject(ctx.db, scope.ownerId, {
-              projectId: input.projectId,
+              projectId: filingProjectId,
               identity: addresses.identity,
             })
           : null;
       const asksForReadingList = !input.forReference && input.readStatus !== "read";
-      if (alreadyInProject && !asksForReadingList) throw alreadyInProjectError(alreadyInProject);
-      const placement = alreadyInProject
-        ? { projectId: undefined, workspaceId: input.workspaceId }
+      if (alreadyInProject && input.projectId && !asksForReadingList) {
+        throw alreadyInProjectError(alreadyInProject);
+      }
+      const placement: { projectId?: string | null; workspaceId?: string } = alreadyInProject
+        ? {
+            // The caller's own Resource leaves the Project if it was there.
+            projectId: existing?.projectId === alreadyInProject.projectId ? null : undefined,
+            workspaceId: input.workspaceId,
+          }
         : { projectId: input.projectId, workspaceId };
 
       if (existing) {

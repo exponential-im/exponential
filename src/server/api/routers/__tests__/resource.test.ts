@@ -1251,6 +1251,33 @@ describe("resource router — reading list (mocked)", () => {
       expect(out).toMatchObject({ created: false, alreadyInProject: null });
     });
 
+    it("bringing back an archived Resource whose place a teammate has since taken unfiles it, without refusing the save", async () => {
+      dbMock.resource.findFirst
+        .mockResolvedValueOnce(fakeResource({ id: "mine", projectId: "p1", archivedAt: new Date("2026-11-01T00:00:00Z") }))
+        .mockResolvedValueOnce(theirs as never);
+      dbMock.resource.update.mockResolvedValue(fakeResource({ id: "mine", projectId: null }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      // No Project named: just the page, saved again for reference.
+      const out = await caller.resource.create({ title: "Villa", url, forReference: true });
+
+      expect(dbMock.resource.update.mock.calls[0]![0].data).toMatchObject({ archivedAt: null, projectId: null });
+      expect(out).toMatchObject({ created: false, alreadyInProject: already });
+    });
+
+    it("an archived Resource comes back into its Project when nobody else has filed the page there", async () => {
+      dbMock.resource.findFirst
+        .mockResolvedValueOnce(fakeResource({ id: "mine", projectId: "p1", archivedAt: new Date("2026-11-01T00:00:00Z") }))
+        .mockResolvedValueOnce(null);
+      dbMock.resource.update.mockResolvedValue(fakeResource({ id: "mine", projectId: "p1" }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.create({ title: "Villa", url, forReference: true });
+
+      expect(dbMock.resource.update.mock.calls[0]![0].data).not.toHaveProperty("projectId");
+      expect(out.alreadyInProject).toBeNull();
+    });
+
     it("refuses a move into a Project that already lists the page, and moves nothing", async () => {
       dbMock.resource.findFirst
         .mockResolvedValueOnce(fakeResource({ id: "mine", identity: url, projectId: null }))
