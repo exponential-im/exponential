@@ -128,6 +128,13 @@ const config = {
         destination: "/features/team-weekly-review",
         permanent: true,
       },
+      // There was never capacity planning behind this page; it now covers
+      // the delivery metrics that exist.
+      {
+        source: "/features/team-capacity",
+        destination: "/features/team-metrics",
+        permanent: true,
+      },
     ];
   },
 
