@@ -1,6 +1,7 @@
 import { type Metadata } from "next";
 import { ProductTimelineClient } from "./ProductTimelineClient";
 import { FooterSection, MarketingHeader } from "~/app/_components/home";
+import { auth } from "~/server/auth";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 
@@ -12,7 +13,10 @@ export const metadata: Metadata = {
   alternates: { canonical: `${getPublicBaseUrlFromEnv()}/product-timeline` },
 };
 
-export default function ProductTimelinePage() {
+export default async function ProductTimelinePage() {
+  // A signed-in visitor gets "Open app" in the header, as on learn and blog.
+  const session = await auth();
+
   // Deliberately no `prefetch` here. Prefetching dehydrates the query as
   // *pending*; when the GitHub call fails server-side (an expired GITHUB_TOKEN
   // is the one that bit us), the hydrated client query is stranded in
@@ -22,7 +26,7 @@ export default function ProductTimelinePage() {
   // client own the fetch costs one round trip and makes failure observable.
   return (
     <div className="mkt min-h-screen bg-background-primary text-text-primary">
-      <MarketingHeader mobileNav />
+      <MarketingHeader session={session} mobileNav />
 
       <main className="py-8 md:py-12">
         <ProductTimelineClient />
