@@ -13,7 +13,7 @@ The knowledge base is where your workspace's meetings and saved resources become
 
 ## Where to find it
 
-[**Tools → Knowledge**](/go/knowledge-base) in the sidebar ([/knowledge-base](/knowledge-base)). Inside a workspace you see that workspace's content; open it outside a workspace and results span every workspace you belong to. Either way the Resources tab lists what you added yourself. A resource you file under a project is also visible to the people in that project, who can open it, read it and find it in search; one with no project is visible only to you.
+[**Tools → Knowledge**](/go/knowledge-base) in the sidebar ([/knowledge-base](/knowledge-base)). Inside a workspace you see that workspace's content; open it outside a workspace and results span every workspace you belong to. Either way the Resources tab lists what you added yourself. A resource you file under a project is also visible to the people in that project, who can open it, read it and find it in search; one with no project is visible only to you. Everything filed under a project, by anyone in it, is listed on the project's **Resources** tab.
 
 ## How to add a resource
 
@@ -73,6 +73,9 @@ No. The knowledge base only indexes meetings; edit the transcript from the meeti
 
 **Can teammates see my resources?**
 Only the ones you file under a project. Filing a resource under a project shares it with everyone in that project: they can open it, read it and find its text in search. They cannot edit, move, archive or delete it, and they never see whether you have read it. A resource with no project stays visible only to you, even inside a shared workspace.
+
+**Someone filed a page under the wrong project. Can I take it out?**
+If you can edit the project, yes: open the project's **Resources** tab and choose **Unfile** on its row. The resource goes back to the person who saved it, and only they can see it again. Nothing is deleted.
 
 **What do the three numbers at the top mean?**
 **Transcriptions** and **Resources** count what is indexed, with anything still pending shown underneath. **Total Chunks** is how many searchable segments they were split into.
