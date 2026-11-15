@@ -10,9 +10,10 @@ function formatResetDate(date: Date): string {
   return date.toLocaleDateString(undefined, { day: 'numeric', month: 'long', timeZone: 'UTC' });
 }
 
-function barColor(usedPercent: number): string | undefined {
-  if (usedPercent >= 100) return 'red';
-  if (usedPercent >= 80) return 'yellow';
+/** Yellow from 80% of the allowance, red once it is used up. */
+function barColor(warnLevel: 80 | 100 | null): string | undefined {
+  if (warnLevel === 100) return 'red';
+  if (warnLevel === 80) return 'yellow';
   return undefined;
 }
 
@@ -37,7 +38,7 @@ export function BillingSettings({ workspaceId }: { workspaceId: string }) {
       <div className="mb-2 text-[13px] font-medium text-text-primary">{label}</div>
       <Progress
         value={Math.min(status.usedPercent, 100)}
-        color={barColor(status.usedPercent)}
+        color={barColor(status.warnLevel)}
         size="lg"
         aria-label={label}
       />

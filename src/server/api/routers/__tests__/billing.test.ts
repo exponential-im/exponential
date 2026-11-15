@@ -134,6 +134,7 @@ describe("billing.getStatus", () => {
       expect(status).toEqual({
         mode: "meter",
         usedPercent: 62,
+        warnLevel: null,
         resetsAt: new Date("2026-12-01T00:00:00.000Z"),
       });
     });
@@ -153,7 +154,16 @@ describe("billing.getStatus", () => {
 
       const status = await caller(db).billing.getStatus({ workspaceId: WORKSPACE_ID });
 
-      expect(status).toMatchObject({ usedPercent: 250 });
+      expect(status).toMatchObject({ usedPercent: 250, warnLevel: 100 });
+    });
+
+    it("reports the 80% warning level from 80% of the allowance", async () => {
+      asRole(db, "owner");
+      usedThisMonth(db, FREE_ALLOWANCE_MICROS * 0.85);
+
+      const status = await caller(db).billing.getStatus({ workspaceId: WORKSPACE_ID });
+
+      expect(status).toMatchObject({ usedPercent: 85, warnLevel: 80 });
     });
 
     it("gives no cost, token count or allowance, only the share", async () => {
@@ -162,7 +172,7 @@ describe("billing.getStatus", () => {
 
       const status = await caller(db).billing.getStatus({ workspaceId: WORKSPACE_ID });
 
-      expect(Object.keys(status).sort()).toEqual(["mode", "resetsAt", "usedPercent"]);
+      expect(Object.keys(status).sort()).toEqual(["mode", "resetsAt", "usedPercent", "warnLevel"]);
     });
 
     it.each(["member", "viewer"] as const)("refuses a %s", async (role) => {

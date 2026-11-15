@@ -2,8 +2,9 @@ import { z } from "zod";
 
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { assertWorkspaceRole } from "~/server/services/access";
-import { FREE_ALLOWANCE_MICROS, resolveBillingMode } from "~/server/services/billing/config";
-import { getPeriodUsage } from "~/server/services/billing/usage";
+import { resolveBillingMode } from "~/server/services/billing/config";
+import { decideAssistantAccess, getEntitlements, usedPercent } from "~/server/services/billing/entitlements";
+import { usagePeriodEnd } from "~/server/services/billing/usage";
 
 export const billingRouter = createTRPCRouter({
   /**
@@ -23,13 +24,16 @@ export const billingRouter = createTRPCRouter({
       if (mode === "off") return { mode } as const;
 
       await assertWorkspaceRole(ctx.db, ctx.session.user.id, input.workspaceId, ["owner", "admin"]);
-      const usage = await getPeriodUsage(ctx.db, input.workspaceId);
+      const now = new Date();
+      const entitlements = await getEntitlements(ctx.db, input.workspaceId, { now });
       return {
         mode,
         /** Whole percent of the month's allowance used; above 100 once it is passed. */
-        usedPercent: Math.round((usage.usedMicros / FREE_ALLOWANCE_MICROS) * 100),
+        usedPercent: usedPercent(entitlements),
+        /** The highest warning threshold reached (80 or 100), or null below 80%. */
+        warnLevel: decideAssistantAccess(entitlements, "chat").warnLevel ?? null,
         /** When the month's count starts again. */
-        resetsAt: usage.periodEnd,
+        resetsAt: usagePeriodEnd(now),
       } as const;
     }),
 });
