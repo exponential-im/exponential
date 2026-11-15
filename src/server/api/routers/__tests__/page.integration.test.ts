@@ -903,12 +903,25 @@ describe("page router", () => {
       expect(sharing.invitees.map((i) => i.id)).toEqual([invitee.id]);
     });
 
-    it("a duplicate of an invite-only page stays invite-only, owned by the duplicator, with no invitees", async () => {
-      const { author, invitee, page } = await setup("pg-io-dup");
+    it("a viewer grant can't duplicate the page: copying needs edit access", async () => {
+      const { author, invitee, page } = await setup("pg-io-dup-viewer");
       await createTestCaller(author.id).page.invite({
         id: page.id,
         userIds: [invitee.id],
         role: "viewer",
+      });
+      await expect(createTestCaller(invitee.id).page.duplicate({ id: page.id })).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+    });
+
+    it("a duplicate of an invite-only page stays invite-only, owned by the duplicator, with no invitees", async () => {
+      const { author, invitee, page } = await setup("pg-io-dup");
+      // Editor: duplicating needs edit access on the source.
+      await createTestCaller(author.id).page.invite({
+        id: page.id,
+        userIds: [invitee.id],
+        role: "editor",
       });
       const { id } = await createTestCaller(invitee.id).page.duplicate({ id: page.id });
       const copy = await db.knowledgePage.findUniqueOrThrow({
@@ -932,10 +945,11 @@ describe("page router", () => {
         projectId: project.id,
         isInviteOnly: true,
       });
+      // Editor: duplicating needs edit access on the source.
       await createTestCaller(author.id).page.invite({
         id: page.id,
         userIds: [invitee.id],
-        role: "viewer",
+        role: "editor",
       });
       const { id } = await createTestCaller(invitee.id).page.duplicate({ id: page.id });
       const copy = await db.knowledgePage.findUniqueOrThrow({
