@@ -123,3 +123,43 @@ describe("revokeAgentWorkspace", () => {
     await expect(revokeAgentWorkspace(db, "shadow-1", "ws-1")).resolves.toBe(false);
   });
 });
+
+describe("the cascades cover an Assistant-backed agent (Agent PRD V2, D7 regression)", () => {
+  // The owner has a plain External agent and an Assistant, whose principal is
+  // an External agent too (ADR-0067). The fake honours an `assistant` filter
+  // the way Postgres would, so a cascade that started skipping Assistants
+  // would drop its shadow user from the delete and fail here.
+  const agents = [
+    { ownerId: "owner-1", shadowUserId: "shadow-plain", assistant: null },
+    { ownerId: "owner-1", shadowUserId: "shadow-assistant", assistant: { id: "asst-1" } },
+  ];
+
+  beforeEach(() => {
+    db.externalAgent.findMany.mockImplementation(((args: {
+      where: { ownerId: string; assistant?: unknown };
+    }) =>
+      Promise.resolve(
+        agents
+          .filter((a) => a.ownerId === args.where.ownerId)
+          .filter((a) => !("assistant" in args.where) || a.assistant === null)
+          .map(({ shadowUserId }) => ({ shadowUserId })),
+      )) as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 2 });
+  });
+
+  it("removing the person takes their Assistant out of that workspace", async () => {
+    await cascadeOwnerRemovedFromWorkspace(db, "owner-1", "ws-1");
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1", userId: { in: ["shadow-plain", "shadow-assistant"] } },
+    });
+  });
+
+  it("demoting the person to viewer takes their Assistant out too", async () => {
+    await cascadeOwnerRoleChanged(db, "owner-1", "ws-1", "viewer");
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1", userId: { in: ["shadow-plain", "shadow-assistant"] } },
+    });
+  });
+});

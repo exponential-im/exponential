@@ -315,6 +315,24 @@ describe("workspace.removeMember — an owner or admin removes someone's agent (
     expect(db.projectMember.deleteMany).not.toHaveBeenCalled();
   });
 
+  it("removing a person also removes their Assistant from the workspace (D7 regression)", async () => {
+    db.workspaceUser.findUnique
+      .mockResolvedValueOnce({ role: "owner" } as never)
+      .mockResolvedValueOnce({ role: "member", user: { email: null, isAgent: false } } as never);
+    db.externalAgent.findMany.mockResolvedValue([{ shadowUserId: SHADOW_ID }] as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 } as never);
+
+    await caller(db).workspace.removeMember({ workspaceId: WORKSPACE_ID, userId: INVITEE_ID });
+
+    expect(db.externalAgent.findMany).toHaveBeenCalledWith({
+      where: { ownerId: INVITEE_ID },
+      select: { shadowUserId: true },
+    });
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: WORKSPACE_ID, userId: { in: [SHADOW_ID] } },
+    });
+  });
+
   it("refuses a plain member", async () => {
     db.workspaceUser.findUnique.mockResolvedValueOnce({ role: "member" } as never);
 
