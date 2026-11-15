@@ -19,6 +19,7 @@ import { MeetingsScene } from "~/app/_components/home/scenes/MeetingsScene";
 import { Panel } from "~/app/_components/ui";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
+import { serializeJsonLd } from "~/lib/jsonLd";
 
 interface FeaturePageProps {
   params: Promise<{ slug: string }>;
@@ -111,7 +112,7 @@ export default async function FeaturePage({ params }: FeaturePageProps) {
     <div className="mkt min-h-screen bg-background-primary text-text-primary">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(structuredData) }}
       />
 
       <MarketingHeader />
@@ -156,7 +157,6 @@ export default async function FeaturePage({ params }: FeaturePageProps) {
                     alt={feature.screenshot.alt}
                     width={1280}
                     height={800}
-                    priority
                     sizes="(min-width: 1024px) 1024px, 100vw"
                     className="hidden h-auto w-full dark:block"
                   />
