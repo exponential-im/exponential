@@ -6,7 +6,7 @@ import {
 } from "../githubFeedEvent";
 import { deriveActivitySource } from "../deriveActivitySource";
 
-const repo = "positonic/exponential";
+const repo = "exponential-im/exponential";
 
 function prInput(overrides: Record<string, unknown> = {}) {
   return {

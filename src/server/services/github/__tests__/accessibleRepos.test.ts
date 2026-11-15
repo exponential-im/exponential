@@ -9,7 +9,7 @@ function githubPayload() {
       {
         id: 1,
         name: "exponential",
-        full_name: "positonic/exponential",
+        full_name: "exponential-im/exponential",
         private: false,
         owner: { login: "positonic", id: 10 },
       },
@@ -30,7 +30,7 @@ describe("normalizeAccessibleRepos", () => {
       {
         owner: "positonic",
         name: "exponential",
-        fullName: "positonic/exponential",
+        fullName: "exponential-im/exponential",
         private: false,
       },
       {

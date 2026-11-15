@@ -25,13 +25,13 @@ export const githubRouter = createTRPCRouter({
       z.object({
         page: z.number().min(1).default(1),
         perPage: z.number().min(1).max(100).default(100),
-        owner: z.string().default("positonic"),
+        owner: z.string().default("exponential-im"),
         repo: z.string().default("exponential"),
         branch: z.string().default("main"),
       }).optional(),
     )
     .query(async ({ input }) => {
-      const owner = input?.owner ?? "positonic";
+      const owner = input?.owner ?? "exponential-im";
       const repo = input?.repo ?? "exponential";
       const branch = input?.branch;
       const page = input?.page;
@@ -56,12 +56,12 @@ export const githubRouter = createTRPCRouter({
       z.object({
         page: z.number().min(1).default(1),
         perPage: z.number().min(1).max(100).default(30),
-        owner: z.string().default("positonic"),
+        owner: z.string().default("exponential-im"),
         repo: z.string().default("exponential"),
       }).optional(),
     )
     .query(async ({ input }) => {
-      const owner = input?.owner ?? "positonic";
+      const owner = input?.owner ?? "exponential-im";
       const repo = input?.repo ?? "exponential";
       const octokit = githubService.initGithubClient(
         process.env.GITHUB_TOKEN ?? "",
@@ -476,7 +476,7 @@ export const githubRouter = createTRPCRouter({
 //       });
 
 //       try {
-//         const repoOwner = "positonic";
+//         const repoOwner = "exponential-im";
 //         const repoName = "ai-todo";
         
 //         // First check if we can access the repo
