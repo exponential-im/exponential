@@ -78,8 +78,12 @@ async function focusEditor(page: Page): Promise<Locator> {
  */
 async function selectLineThenArrowEnter(page: Page, editor: Locator, text: string) {
   await page.keyboard.type(text);
-  await page.keyboard.press("End");
-  await page.keyboard.press("Shift+Home");
+  // A triple-click rather than Shift+Home: it also refocuses the editor if a
+  // cold first load re-rendered it under the typing.
+  const line = editor.locator("p").first();
+  await expect(line).toHaveText(text);
+  await line.click({ clickCount: 3 });
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(text);
   await page.getByRole("button", { name: "Underline", exact: true }).click();
   await expect(editor.locator("u")).toHaveText(text);
   await page.keyboard.press("ArrowRight");
