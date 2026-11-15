@@ -1,7 +1,8 @@
 /**
  * Unit tests for agent ticket-label resolution (cold.nebula). Mocked Prisma;
- * `setEntityTags` is mocked so these cover only the resolve + merge rules —
- * its own access and scope checks are exercised in the tag router tests.
+ * `setEntityTags` / `listForEntity` are mocked so these cover only the resolve
+ * and write rules — their access and scope checks are exercised in the tag
+ * router tests.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -10,9 +11,10 @@ import type { PrismaClient } from "@prisma/client";
 
 vi.mock("../TagAssignmentService", () => ({
   setEntityTags: vi.fn(),
+  listForEntity: vi.fn(),
 }));
 
-import { setEntityTags } from "../TagAssignmentService";
+import { listForEntity, setEntityTags } from "../TagAssignmentService";
 import {
   applyTicketLabels,
   resolveLabelRefs,
@@ -22,6 +24,7 @@ import {
 const WS = "ws-1";
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
 const setEntityTagsMock = vi.mocked(setEntityTags);
+const listForEntityMock = vi.mocked(listForEntity);
 
 function tag(id: string, slug: string, workspaceId: string | null = WS, name = slug) {
   return { id, name, slug, workspaceId };
@@ -96,6 +99,7 @@ describe("applyTicketLabels", () => {
   beforeEach(() => {
     mockReset(db);
     setEntityTagsMock.mockReset();
+    listForEntityMock.mockReset();
     setEntityTagsMock.mockImplementation(({ entityId, tagIds }) =>
       Promise.resolve({
         entityType: "ticket",
@@ -103,11 +107,17 @@ describe("applyTicketLabels", () => {
         tags: tagIds.map((id) => ({ id, name: id, slug: id })) as never,
       }),
     );
+    db.$transaction.mockResolvedValue([] as never);
   });
 
+  /** What `listForEntity` (the membership-checked read) returns. */
   function currentLabels(...ids: string[]) {
+    listForEntityMock.mockResolvedValue(ids.map((id) => ({ id, name: id, slug: id })) as never);
+  }
+  /** The ticket's rows after the write, as the final re-read sees them. */
+  function rowsAfterWrite(...ids: string[]) {
     db.ticketTag.findMany.mockResolvedValue(
-      ids.map((id) => ({ tagId: id, tag: { id, name: id, slug: id } })) as never,
+      ids.map((id) => ({ tag: { id, name: id, slug: id } })) as never,
     );
   }
 
@@ -117,35 +127,61 @@ describe("applyTicketLabels", () => {
     currentLabels("a");
     const result = await applyTicketLabels(db, { ...base, change: {} });
     expect(result).toEqual({ labels: [{ id: "a", name: "a", slug: "a" }], warnings: [] });
-    expect(setEntityTagsMock).not.toHaveBeenCalled();
-  });
-
-  it("adds to the existing labels through setEntityTags", async () => {
-    currentLabels("a");
-    db.tag.findMany.mockResolvedValue([tag("b", "b")] as never);
-
-    const result = await applyTicketLabels(db, { ...base, change: { add: ["b"] } });
-
-    expect(setEntityTagsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: "u-1", entityType: "ticket", entityId: "tk-1", tagIds: ["a", "b"] }),
+    expect(listForEntityMock).toHaveBeenCalledWith(
+      expect.objectContaining({ userId: "u-1", entityType: "ticket", entityId: "tk-1" }),
     );
-    expect(result.labels.map((l) => l.id)).toEqual(["a", "b"]);
-    expect(result.warnings).toEqual([]);
+    expect(setEntityTagsMock).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
-  it("removes labels and skips unknown add refs with a warning", async () => {
+  it("adds incrementally: createMany skipDuplicates, no replacement, no delete", async () => {
+    currentLabels("a");
+    db.tag.findMany.mockResolvedValue([tag("c", "c")] as never);
+    rowsAfterWrite("a", "c");
+
+    const result = await applyTicketLabels(db, { ...base, change: { add: ["c"] } });
+
+    expect(db.ticketTag.createMany).toHaveBeenCalledWith({
+      data: [{ ticketId: "tk-1", tagId: "c" }],
+      skipDuplicates: true,
+    });
+    expect(db.ticketTag.deleteMany).not.toHaveBeenCalled();
+    expect(setEntityTagsMock).not.toHaveBeenCalled();
+    expect(result.labels.map((l) => l.id)).toEqual(["a", "c"]);
+  });
+
+  it("an add never deletes a label it did not read (concurrent add survives)", async () => {
+    // This call read [A]; another request added B before this write lands.
+    currentLabels("a");
+    db.tag.findMany.mockResolvedValue([tag("c", "c")] as never);
+    rowsAfterWrite("a", "b", "c");
+
+    const result = await applyTicketLabels(db, { ...base, change: { add: ["c"] } });
+
+    // Nothing is deleted and nothing is replaced from the stale [A] snapshot.
+    expect(db.ticketTag.deleteMany).not.toHaveBeenCalled();
+    expect(setEntityTagsMock).not.toHaveBeenCalled();
+    expect(result.labels.map((l) => l.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("removes only the named labels, scoped to the ticket, and skips unknown add refs with a warning", async () => {
     currentLabels("a", "b");
     db.tag.findMany.mockImplementation(((args: { where: { AND: [unknown, { OR: [{ id: { in: string[] } }] }] } }) => {
       const ids = args.where.AND[1].OR[0].id.in;
       return Promise.resolve(ids.includes("b") ? [tag("b", "b")] : []);
     }) as never);
+    rowsAfterWrite("a");
 
     const result = await applyTicketLabels(db, {
       ...base,
       change: { add: ["ghost"], remove: ["b"] },
     });
 
-    expect(setEntityTagsMock).toHaveBeenCalledWith(expect.objectContaining({ tagIds: ["a"] }));
+    expect(db.ticketTag.deleteMany).toHaveBeenCalledWith({
+      where: { ticketId: "tk-1", tagId: { in: ["b"] } },
+    });
+    expect(db.ticketTag.createMany).not.toHaveBeenCalled();
+    expect(setEntityTagsMock).not.toHaveBeenCalled();
     expect(result.warnings).toHaveLength(1);
     expect(result.warnings[0]).toContain('"ghost"');
   });
@@ -157,6 +193,7 @@ describe("applyTicketLabels", () => {
     await applyTicketLabels(db, { ...base, change: { set: ["c"] } });
 
     expect(setEntityTagsMock).toHaveBeenCalledWith(expect.objectContaining({ tagIds: ["c"] }));
+    expect(db.$transaction).not.toHaveBeenCalled();
   });
 
   it("clears every label on an empty set", async () => {
@@ -172,6 +209,7 @@ describe("applyTicketLabels", () => {
     const result = await applyTicketLabels(db, { ...base, change: { set: ["c", "typo"] } });
 
     expect(setEntityTagsMock).not.toHaveBeenCalled();
+    expect(db.$transaction).not.toHaveBeenCalled();
     expect(result.labels.map((l) => l.id)).toEqual(["a", "b"]);
     expect(result.warnings[0]).toContain('"typo"');
     expect(result.warnings[0]).toContain("left unchanged");

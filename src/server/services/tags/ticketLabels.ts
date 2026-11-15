@@ -1,5 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
-import { setEntityTags } from "./TagAssignmentService";
+import { listForEntity, setEntityTags } from "./TagAssignmentService";
 
 /**
  * Label references for tickets written by agents (Mastra tools, cold.nebula).
@@ -119,12 +119,19 @@ export function hasLabelChange(change: TicketLabelChange): boolean {
 
 /**
  * Apply a label change to a ticket. The caller must already have checked the
- * user's edit access to the ticket's product; `setEntityTags` re-checks
- * workspace membership and that every tag belongs to the workspace.
+ * user's edit access to the ticket's product; `listForEntity` /
+ * `setEntityTags` re-check workspace membership, and `resolveLabelRefs` only
+ * ever returns global or workspace tags.
  *
- * A `set` with any unresolved reference leaves the labels untouched: replacing
- * with the subset that did resolve would silently drop labels the agent meant
- * to keep. Unresolved `add`/`remove` references are skipped individually.
+ * `add` / `remove` are written incrementally (createMany skipDuplicates,
+ * deleteMany scoped to the ticket), never as a full replacement built from a
+ * snapshot: two agents editing labels at once must not undo each other, so an
+ * add can never delete a label it did not read.
+ *
+ * `set` is an explicit full replacement through `setEntityTags`. A `set` with
+ * any unresolved reference leaves the labels untouched: replacing with the
+ * subset that did resolve would silently drop labels the agent meant to keep.
+ * Unresolved `add`/`remove` references are skipped individually.
  */
 export async function applyTicketLabels(
   db: PrismaClient,
@@ -138,18 +145,12 @@ export async function applyTicketLabels(
   const { userId, ticketId, workspaceId, change } = params;
   const warnings: string[] = [];
 
-  const current = await db.ticketTag.findMany({
-    where: { ticketId },
-    select: { tagId: true, tag: { select: { id: true, name: true, slug: true } } },
-    orderBy: { createdAt: "asc" },
-  });
-  const currentLabels: TicketLabel[] = current.map((row) => ({
-    id: row.tag.id,
-    name: row.tag.name,
-    slug: row.tag.slug,
-  }));
+  // Membership check + the labels as they stand.
+  const current = (
+    await listForEntity({ db, userId, entityType: "ticket", entityId: ticketId })
+  ).map(toLabel);
 
-  if (!hasLabelChange(change)) return { labels: currentLabels, warnings };
+  if (!hasLabelChange(change)) return { labels: current, warnings };
 
   const [setRefs, addRefs, removeRefs] = await Promise.all([
     change.set ? resolveLabelRefs(db, workspaceId, change.set) : null,
@@ -161,30 +162,54 @@ export async function applyTicketLabels(
     warnings.push(
       `${unresolvedWarning(setRefs.unresolved)} Labels were left unchanged.`,
     );
-    return { labels: currentLabels, warnings };
+    return { labels: current, warnings };
   }
   for (const refs of [addRefs, removeRefs]) {
     if (refs && refs.unresolved.length > 0) warnings.push(unresolvedWarning(refs.unresolved));
   }
 
-  const desired = setRefs
-    ? setRefs.tags.map((t) => t.id)
-    : currentLabels.map((t) => t.id);
-  for (const tag of addRefs?.tags ?? []) {
-    if (!desired.includes(tag.id)) desired.push(tag.id);
-  }
-  const toRemove = new Set((removeRefs?.tags ?? []).map((t) => t.id));
-  const finalIds = desired.filter((id) => !toRemove.has(id));
+  const removeIds = new Set((removeRefs?.tags ?? []).map((t) => t.id));
+  const addIds = (addRefs?.tags ?? []).map((t) => t.id).filter((id) => !removeIds.has(id));
 
-  const result = await setEntityTags({
-    db,
-    userId,
-    entityType: "ticket",
-    entityId: ticketId,
-    tagIds: finalIds,
+  if (setRefs) {
+    // Explicit replacement: the agent named the whole set.
+    const finalIds = [...new Set([...setRefs.tags.map((t) => t.id), ...addIds])].filter(
+      (id) => !removeIds.has(id),
+    );
+    const result = await setEntityTags({
+      db,
+      userId,
+      entityType: "ticket",
+      entityId: ticketId,
+      tagIds: finalIds,
+    });
+    return { labels: result.tags.map(toLabel), warnings };
+  }
+
+  if (removeIds.size === 0 && addIds.length === 0) return { labels: current, warnings };
+
+  await db.$transaction([
+    ...(removeIds.size > 0
+      ? [db.ticketTag.deleteMany({ where: { ticketId, tagId: { in: [...removeIds] } } })]
+      : []),
+    ...(addIds.length > 0
+      ? [
+          db.ticketTag.createMany({
+            data: addIds.map((tagId) => ({ ticketId, tagId })),
+            skipDuplicates: true,
+          }),
+        ]
+      : []),
+  ]);
+
+  const rows = await db.ticketTag.findMany({
+    where: { ticketId },
+    select: { tag: { select: { id: true, name: true, slug: true } } },
+    orderBy: { createdAt: "asc" },
   });
-  return {
-    labels: result.tags.map((t) => ({ id: t.id, name: t.name, slug: t.slug })),
-    warnings,
-  };
+  return { labels: rows.map((row) => toLabel(row.tag)), warnings };
+}
+
+function toLabel(tag: { id: string; name: string; slug: string }): TicketLabel {
+  return { id: tag.id, name: tag.name, slug: tag.slug };
 }
