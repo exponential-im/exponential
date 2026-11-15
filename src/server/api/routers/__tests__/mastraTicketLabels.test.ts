@@ -309,5 +309,17 @@ describe("mastra ticket labels (cold.nebula)", () => {
 
       expect(assertWorkspaceMock).toHaveBeenCalledWith(expect.anything(), USER_ID, WS, "view");
     });
+
+    it("rejects a blank productId or workspaceId before any access check or tag read", async () => {
+      // A blank productId used to fall through to the workspace branch with no
+      // workspaceId, which could match every workspace's tags.
+      const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+      for (const input of [{ productId: "" }, { productId: "  " }, { workspaceId: "" }, { productId: "", workspaceId: "" }]) {
+        await expect(caller.mastra.listLabels(input)).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      }
+      expect(loadProductMock).not.toHaveBeenCalled();
+      expect(assertWorkspaceMock).not.toHaveBeenCalled();
+      expect(dbMock.tag.findMany).not.toHaveBeenCalled();
+    });
   });
 });

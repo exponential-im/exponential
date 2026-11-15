@@ -4588,20 +4588,25 @@ export const mastraRouter = createTRPCRouter({
   // only (authenticatedTrpcCall always POSTs), like listProducts.
   listLabels: protectedProcedure
     .input(z.object({
-      productId: z.string().optional(),
-      workspaceId: z.string().optional(),
+      // Blank ids are refused here: an empty productId would otherwise fall
+      // through to the workspace branch with no workspaceId at all.
+      productId: z.string().trim().min(1).optional(),
+      workspaceId: z.string().trim().min(1).optional(),
     }).refine(
       (i) => i.productId !== undefined || i.workspaceId !== undefined,
       { message: "Pass productId or workspaceId" },
     ))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
+      const { productId, workspaceId: inputWorkspaceId } = input;
       let workspaceId: string;
-      if (input.productId) {
-        workspaceId = (await loadProductWithAccess(ctx.db, userId, input.productId, "view")).workspaceId;
-      } else {
-        workspaceId = input.workspaceId!;
+      if (productId !== undefined) {
+        workspaceId = (await loadProductWithAccess(ctx.db, userId, productId, "view")).workspaceId;
+      } else if (inputWorkspaceId !== undefined) {
+        workspaceId = inputWorkspaceId;
         await assertWorkspaceAccess(ctx.db, userId, workspaceId, "view");
+      } else {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pass productId or workspaceId" });
       }
 
       const tags = await ctx.db.tag.findMany({
