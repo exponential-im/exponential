@@ -20,6 +20,7 @@ import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import {
   capToolCallsForTurn,
   formatUserFacingStreamError,
+  maskContextEntriesForLog,
   maskTokenLike,
   redactToolArgs,
   USER_FACING_PROVIDER_UNAVAILABLE,
@@ -538,7 +539,7 @@ export async function POST(req: Request) {
     // includes SECURITY_POLICY if it handles user data.
 
     console.log(`🔗 [chat/stream] agentId=${agentId ?? "none"}, assistantId=${assistantId ?? "none"}, projectId=${projectId ?? "none"}, workspaceId=${workspaceId ?? "none"}, messages=${finalMessages.length}`);
-    console.log('📤 [chat/stream] RequestContext entries:', entries.map(([k, v]) => [k, k.includes('Token') || k.includes('token') || k.includes('JWT') || k.includes('auth') ? `${v.slice(0, 20)}...` : v]));
+    console.log('📤 [chat/stream] RequestContext entries:', maskContextEntriesForLog(entries));
     console.log('📤 [chat/stream] Messages to agent:', finalMessages.map(m => ({ role: m.role, contentLength: m.content.length, contentPreview: m.content.slice(0, 150) })));
     // Sources we control on this side. The actual prompt at Anthropic is
     // larger because Mastra layers in agent instructions (SOUL ~6K tokens),
