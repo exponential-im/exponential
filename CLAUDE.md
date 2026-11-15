@@ -695,8 +695,8 @@ outside the feature registry, because it files many thin tickets. See the **Issu
 ### Beads (`bd`) — retired
 
 beads was retired in November 2026. Its still-open issues were triaged and moved into Exponential
-tickets (each body starts "Moved from beads `exponential-xxxx`"); the bounty/payment chain is parked
-in one ticket, `micro.grove`, pending a revive-or-archive call. Don't run `bd` here. To read an old
+tickets (each body starts "Moved from beads `exponential-xxxx`"); the bounty board / crypto payments
+chain was gathered into one ticket, `micro.grove`, and archived (direction dropped). Don't run `bd` here. To read an old
 issue: `git show 930e7415:.beads/issues.jsonl | grep <id>` (the last `main` commit before removal).
 
 ## Agent skills
