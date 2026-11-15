@@ -830,8 +830,10 @@ export class TimeEntryService {
    * counted; deleting one is its confirmation-and-removal in one step).
    *
    * `agentActing` (Zoe acting for the person, ADR-0070): she may discard
-   * Proposed time, which never counted, but deleting CONFIRMED time would
-   * undo the person's confirmation with no way back, so it is FORBIDDEN.
+   * Proposed time, which never counted, and cancel a running Timer entry,
+   * which counts nothing yet (operating the Timer, like `start`/`stop`). But
+   * deleting completed CONFIRMED time would undo the person's confirmation
+   * with no way back, so it is FORBIDDEN.
    */
   async delete(input: {
     userId: string;
@@ -851,7 +853,7 @@ export class TimeEntryService {
           message: "Cannot delete another user's time entry",
         });
       }
-      if (input.agentActing) assertNotConfirmed(existing.status);
+      if (input.agentActing && existing.endedAt) assertNotConfirmed(existing.status);
 
       const dur =
         existing.endedAt && existing.status !== "PROPOSED"

@@ -418,8 +418,8 @@ export const timeEntryRouter = createTRPCRouter({
     .input(z.object({ entryId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const service = new TimeEntryService(ctx.db);
-      // Zoe may discard Proposed time; deleting CONFIRMED time is the
-      // person's call (ADR-0061, ADR-0070).
+      // Zoe may discard Proposed time or cancel a running Timer; deleting
+      // completed CONFIRMED time is the person's call (ADR-0061, ADR-0070).
       return service.delete({
         userId: ctx.userId,
         entryId: input.entryId,
