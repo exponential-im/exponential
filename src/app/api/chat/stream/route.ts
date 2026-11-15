@@ -39,7 +39,7 @@ import {
   priceTokenBreakdown,
   turnTokenBreakdown,
 } from "~/server/services/ai/cost";
-import { recordTurnUsage } from "~/server/services/billing/usage";
+import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
 import {
   assembleLoadedScope,
   loadScopeInstructions,
@@ -315,9 +315,18 @@ export async function POST(req: Request) {
       throw error;
     }
 
-    // The workspace this turn's cost is metered to. Taken from the scope load
-    // above, which verified membership, never from the request body.
-    const meteredWorkspaceId = scope.workspace?.id;
+    // The workspace this turn's cost is metered to: the one the scope load
+    // above verified membership of (never the raw request body), or, for a
+    // chat with no workspace (the global drawer, /agent), the person's
+    // Personal workspace. Resolved lazily, once, when the turn is metered, so
+    // it adds nothing to the path that streams the reply. Null on an install
+    // that does not meter.
+    let meteredWorkspace: Promise<string | null> | undefined;
+    const resolveMeteredWorkspace = () =>
+      (meteredWorkspace ??= resolveMeteredWorkspaceId(db, {
+        workspaceId: scope.workspace?.id,
+        userId: session.user.id,
+      }));
 
     let workspaceInfo: { slug: string; name: string; type: string; description: string | null } | null = null;
     if (workspaceId) {
@@ -633,16 +642,16 @@ export async function POST(req: Request) {
     // the Sonnet retry (same key, same outcome) and change the user line.
     let agentErrorKind: ProviderErrorKind | undefined;
     const firstToolErrorMessages: string[] = [];
-    // The turn's usage is written to the ledger once the stream has finished.
-    // `after()` keeps the function alive until that write lands, so metering
-    // never holds the response open and is not lost when the platform
-    // freezes the function at the end of the stream.
-    let usageWrite: Promise<unknown> = Promise.resolve();
-    let releaseUsageWrite: () => void = () => undefined;
-    const usageWriteSettled = new Promise<void>((resolve) => {
-      releaseUsageWrite = resolve;
+    // The turn's usage is written to the ledger once the stream has finished
+    // (one write per model attempt). `after()` keeps the function alive until
+    // every write lands, so metering never holds the response open and is not
+    // lost when the platform freezes the function at the end of the stream.
+    const usageWrites: Promise<unknown>[] = [];
+    let releaseUsageWrites: () => void = () => undefined;
+    const usageWritesSettled = new Promise<void>((resolve) => {
+      releaseUsageWrites = resolve;
     });
-    after(() => usageWriteSettled);
+    after(() => usageWritesSettled);
     const textStream = new ReadableStream({
       async start(controller) {
         // Timer-based heartbeat: emit U+200B every HEARTBEAT_MS regardless
@@ -679,21 +688,20 @@ export async function POST(req: Request) {
         const stepUsages: unknown[] = [];
         let responseModelId: string | undefined;
 
-        // Record what the turn cost (a no-op unless this install meters), at
-        // most once. Never throws. `refId` is the AiInteractionHistory row,
-        // when it saved.
-        let turnMetered = false;
-        const meterTurn = (refId?: string): Promise<unknown> => {
-          if (turnMetered || !meteredWorkspaceId) return Promise.resolve();
-          turnMetered = true;
-          return recordTurnUsage(db, {
-            workspaceId: meteredWorkspaceId,
-            source: "CHAT",
-            modelId: responseModelId,
-            turnUsage,
-            stepUsages: [...stepUsages],
-            refId,
-          });
+        // Record what the current model attempt cost (a no-op unless this
+        // install meters), at most once per attempt. Never throws. `refId` is
+        // the AiInteractionHistory row, when there is one. The attempt's usage
+        // is captured here and now: a retry resets it straight afterwards.
+        let attemptMetered = false;
+        const meterAttempt = (refId?: string): Promise<unknown> => {
+          if (attemptMetered) return Promise.resolve();
+          attemptMetered = true;
+          const attempt = { modelId: responseModelId, turnUsage, stepUsages: [...stepUsages] };
+          return resolveMeteredWorkspace().then((workspaceId) =>
+            workspaceId
+              ? recordTurnUsage(db, { workspaceId, source: "CHAT", ...attempt, refId })
+              : undefined,
+          );
         };
 
         const emit = (snippet: string) => {
@@ -974,6 +982,10 @@ export async function POST(req: Request) {
                     firstToolErrorMessages: [...firstToolErrorMessages],
                   },
                 );
+                // The discarded attempt was still paid for: meter it before
+                // its usage is reset for the retry.
+                usageWrites.push(meterAttempt());
+                attemptMetered = false;
                 chunkCount = 0;
                 textChunkCount = 0;
                 nonTextChunkTypes.clear();
@@ -1138,7 +1150,7 @@ export async function POST(req: Request) {
               console.error("Failed to save AI history:", err);
               return undefined;
             });
-          usageWrite = logPromise.then(meterTurn);
+          usageWrites.push(logPromise.then(meterAttempt));
 
           const interactionId = await Promise.race([
             logPromise,
@@ -1183,7 +1195,7 @@ export async function POST(req: Request) {
             },
           });
           // The steps that finished before the failure were still billed.
-          if (!turnMetered) usageWrite = meterTurn();
+          usageWrites.push(meterAttempt());
           // Persist the failed turn so stream failures are queryable in the DB,
           // not just the server console. hadError=true keeps these rows out of
           // success analytics (the onFinish path above uses the same flag). No
@@ -1237,7 +1249,7 @@ export async function POST(req: Request) {
           controller.error(err);
         } finally {
           clearInterval(heartbeat);
-          void usageWrite.finally(releaseUsageWrite);
+          void Promise.allSettled(usageWrites).then(releaseUsageWrites);
         }
       },
     });

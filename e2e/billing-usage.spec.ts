@@ -9,6 +9,10 @@
  * fresh input, a cache read, a cache write and output, so the recorded cost
  * proves each class was priced once at its own rate.
  *
+ * Also covered: a chat with no workspace is metered to the person's Personal
+ * workspace, and a fast-tier attempt that came back empty and was retried on
+ * the full model is metered too (both attempts were paid for).
+ *
  * The stub port is shared with agent-run.spec.ts; both run in the
  * `chromium-mastra-stub` project, one file at a time.
  *
@@ -32,7 +36,8 @@ const fixture = loadFixture();
 const FIRST_PAINT_TIMEOUT = 60_000;
 const billingUrl = `/w/${fixture.workspaceSlug}/settings?section=billing`;
 
-const STUB_MODEL_ID = "claude-haiku-4-5-20251001";
+const HAIKU_MODEL_ID = "claude-haiku-4-5-20251001";
+const SONNET_MODEL_ID = "claude-sonnet-4-5-20250929";
 /** One model step, in the shape Mastra reports it: `inputTokens` is the whole prompt. */
 const STEP_USAGE = {
   inputTokens: 674_000,
@@ -50,20 +55,33 @@ const STEP_USAGE = {
  *   30,000 × $1 + 500,000 × $0.10 + 144,000 × $1.25 + 20,000 × $5, per million
  *   = $0.03 + $0.05 + $0.18 + $0.10 = $0.36
  */
-const EXPECTED_COST_MICROS = 360_000;
-const EXPECTED_PERCENT = Math.round((EXPECTED_COST_MICROS / FREE_ALLOWANCE_MICROS) * 100);
+const HAIKU_COST_MICROS = 360_000;
+/** Sonnet 4.5 is $3 in / $15 out: the same step costs $0.09 + $0.15 + $0.54 + $0.30 = $1.08. */
+const SONNET_COST_MICROS = 1_080_000;
+const EXPECTED_PERCENT = Math.round((HAIKU_COST_MICROS / FREE_ALLOWANCE_MICROS) * 100);
 
 const sse = (chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`;
 
 let db: PrismaClient;
 let workspaceId: string;
+let personalWorkspaceId: string;
 let stub: http.Server;
 const streamedAgents: string[] = [];
+/** When true, the fast-tier agent answers with no text, which makes the app retry on the full model. */
+let fastTierAnswersEmpty = false;
 
 async function clearLedger() {
-  await db.usageEvent.deleteMany({ where: { workspaceId } });
-  await db.workspaceUsagePeriod.deleteMany({ where: { workspaceId } });
+  const where = { workspaceId: { in: [workspaceId, personalWorkspaceId] } };
+  await db.usageEvent.deleteMany({ where });
+  await db.workspaceUsagePeriod.deleteMany({ where });
 }
+
+const ledgerEvents = (inWorkspaceId: string) =>
+  db.usageEvent.findMany({
+    where: { workspaceId: inWorkspaceId },
+    orderBy: { createdAt: "asc" },
+    select: { source: true, modelId: true, costMicros: true, onOwnKey: true, refId: true },
+  });
 
 test.beforeAll(async () => {
   const { PrismaClient: Client } = await import("@prisma/client");
@@ -73,7 +91,11 @@ test.beforeAll(async () => {
     select: { id: true },
   });
   workspaceId = workspace.id;
-  await clearLedger();
+  const personal = await db.workspace.findUniqueOrThrow({
+    where: { slug: fixture.personalWorkspaceSlug },
+    select: { id: true },
+  });
+  personalWorkspaceId = personal.id;
 
   stub = http.createServer((req, res) => {
     req.resume();
@@ -87,15 +109,18 @@ test.beforeAll(async () => {
         return;
       }
       streamedAgents.push(agent);
+      const isFastTier = agent.endsWith("Haiku");
       res.setHeader("content-type", "text/event-stream");
-      res.write(sse({ type: "text-delta", payload: { text: "Three things are due today." } }));
+      if (!(isFastTier && fastTierAnswersEmpty)) {
+        res.write(sse({ type: "text-delta", payload: { text: "Three things are due today." } }));
+      }
       res.write(
         sse({
           type: "step-finish",
           payload: {
             stepResult: { reason: "stop" },
             output: { usage: STEP_USAGE },
-            metadata: { modelId: STUB_MODEL_ID },
+            metadata: { modelId: isFastTier ? HAIKU_MODEL_ID : SONNET_MODEL_ID },
           },
         }),
       );
@@ -106,6 +131,12 @@ test.beforeAll(async () => {
     });
   });
   await new Promise<void>((resolve) => stub.listen(E2E_MASTRA_STUB_PORT, "127.0.0.1", resolve));
+});
+
+test.beforeEach(async () => {
+  streamedAgents.length = 0;
+  fastTierAnswersEmpty = false;
+  await clearLedger();
 });
 
 test.afterAll(async () => {
@@ -134,17 +165,12 @@ test("a chat turn is metered to its workspace and moves the owner's usage bar", 
   expect(streamedAgents).toEqual(["zoeAgentHaiku"]);
 
   // The ledger write happens after the stream closes: one event, priced once per class.
-  const events = () =>
-    db.usageEvent.findMany({
-      where: { workspaceId },
-      select: { source: true, modelId: true, costMicros: true, onOwnKey: true, refId: true },
-    });
-  await expect.poll(async () => (await events()).length, { timeout: 15_000 }).toBe(1);
-  const [event] = await events();
+  await expect.poll(async () => (await ledgerEvents(workspaceId)).length, { timeout: 15_000 }).toBe(1);
+  const [event] = await ledgerEvents(workspaceId);
   expect(event).toMatchObject({
     source: "CHAT",
-    modelId: STUB_MODEL_ID,
-    costMicros: EXPECTED_COST_MICROS,
+    modelId: HAIKU_MODEL_ID,
+    costMicros: HAIKU_COST_MICROS,
     onOwnKey: false,
   });
   // It points at the turn's AiInteractionHistory row.
@@ -163,4 +189,51 @@ test("a chat turn is metered to its workspace and moves the owner's usage bar", 
     String(EXPECTED_PERCENT),
   );
   await page.screenshot({ path: test.info().outputPath("billing-usage-bar.png") });
+});
+
+test("a chat with no workspace is metered to the person's Personal workspace", async ({ request }) => {
+  // The global chat drawer and /agent send no workspace.
+  const turn = await request.post("/api/chat/stream", {
+    data: { agentId: "zoeAgentHaiku", messages: [{ role: "user", content: "What is due today?" }] },
+    timeout: FIRST_PAINT_TIMEOUT,
+  });
+  expect(turn.ok()).toBe(true);
+
+  await expect.poll(async () => (await ledgerEvents(personalWorkspaceId)).length, { timeout: 15_000 }).toBe(1);
+  expect((await ledgerEvents(personalWorkspaceId))[0]).toMatchObject({
+    source: "CHAT",
+    modelId: HAIKU_MODEL_ID,
+    costMicros: HAIKU_COST_MICROS,
+  });
+  expect(await ledgerEvents(workspaceId)).toEqual([]);
+});
+
+test("a fast-tier attempt that came back empty is metered as well as its retry", async ({ request }) => {
+  fastTierAnswersEmpty = true;
+
+  const turn = await request.post("/api/chat/stream", {
+    data: {
+      agentId: "zoeAgentHaiku",
+      workspaceId,
+      messages: [{ role: "user", content: "What is due today?" }],
+    },
+    timeout: FIRST_PAINT_TIMEOUT,
+  });
+  expect(turn.ok()).toBe(true);
+  // The empty fast-tier reply was retried on the full model, which answered.
+  expect(await turn.text()).toContain("Three things are due today.");
+  expect(streamedAgents).toEqual(["zoeAgentHaiku", "zoeAgent"]);
+
+  // Both attempts were paid for, so both are in the ledger, each at its own model's rate.
+  await expect.poll(async () => (await ledgerEvents(workspaceId)).length, { timeout: 15_000 }).toBe(2);
+  const events = await ledgerEvents(workspaceId);
+  expect(events.map((event) => ({ modelId: event.modelId, costMicros: event.costMicros })).sort((a, b) => a.costMicros - b.costMicros)).toEqual([
+    { modelId: HAIKU_MODEL_ID, costMicros: HAIKU_COST_MICROS },
+    { modelId: SONNET_MODEL_ID, costMicros: SONNET_COST_MICROS },
+  ]);
+  // Only the attempt that answered has an AiInteractionHistory row to point at.
+  expect(events.filter((event) => event.refId !== null)).toHaveLength(1);
+
+  const period = await db.workspaceUsagePeriod.findFirst({ where: { workspaceId }, select: { costMicros: true } });
+  expect(period?.costMicros).toBe(HAIKU_COST_MICROS + SONNET_COST_MICROS);
 });
