@@ -114,6 +114,7 @@ async function flushAfter(): Promise<void> {
 }
 
 import { createMockCaller } from "~/test/trpc-helpers";
+import { alreadyInProjectFromError } from "~/server/services/resources/alreadyInProject";
 import {
   readTransition,
   deriveContent,
@@ -1159,6 +1160,120 @@ describe("resource router — reading list (mocked)", () => {
         where: { sourceType: "resource", sourceId: "mine" },
         data: { projectId: "p1", workspaceId: "w1" },
       });
+    });
+  });
+
+  describe("a page is filed once per Project (keen.quill)", () => {
+    const url = "https://www.airbnb.com/rooms/53368445";
+    const theirs = { id: "theirs", title: "Villa", user: { id: "teammate", name: "James" } };
+    const already = { resourceId: "theirs", title: "Villa", projectId: "p1", owner: { id: "teammate", name: "James" } };
+
+    beforeEach(() => {
+      dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+      dbMock.workspaceUser.count.mockResolvedValue(1);
+      dbMock.project.findUnique.mockResolvedValue({
+        createdById: callerId,
+        teamId: null,
+        workspaceId: "w1",
+        isPublic: false,
+        isRestricted: false,
+      } as never);
+    });
+
+    /** The caller has no Resource for the page; a teammate's is filed under p1. */
+    function teammateFiledIt() {
+      dbMock.resource.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(theirs as never);
+    }
+
+    it("refuses a save for reference, naming the Resource and who saved it, matched by identity", async () => {
+      teammateFiledIt();
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const error = await caller.resource
+        .create({ title: "Villa", url: `${url}?check_in=2027-03-01&utm_source=mail`, declaredUrl: url, projectId: "p1", forReference: true })
+        .then(() => null, (thrown: unknown) => thrown);
+
+      expect(error).toMatchObject({ code: "CONFLICT", message: "Already in this project, saved by James" });
+      expect(alreadyInProjectFromError(error)).toEqual(already);
+      expect(dbMock.resource.findFirst.mock.calls[1]![0]!.where).toMatchObject({
+        AND: [expect.anything(), { identity: url, archivedAt: null, userId: { not: callerId } }],
+      });
+      expect(dbMock.resource.create).not.toHaveBeenCalled();
+      expect(dbMock.resource.update).not.toHaveBeenCalled();
+    });
+
+    it("an explicit read request is a save for reference too", async () => {
+      teammateFiledIt();
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await expect(
+        caller.resource.create({ title: "Villa", url, projectId: "p1", readStatus: "read" }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    });
+
+    it("with the Reading list requested, saves the caller's own Resource with no Project and reports the one already there", async () => {
+      teammateFiledIt();
+      dbMock.resource.create.mockResolvedValue(fakeResource({ id: "mine", projectId: null }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.create({ title: "Villa", url, projectId: "p1", workspaceId: "w1" });
+
+      const data = dbMock.resource.create.mock.calls[0]![0].data;
+      expect(data).toMatchObject({ workspaceId: "w1", readStatus: "to_read", userId: callerId });
+      expect(data.projectId).toBeUndefined();
+      expect(out).toMatchObject({ created: true, alreadyInProject: already });
+    });
+
+    it("leaves the caller's own Resource where it is filed when the Reading list is requested", async () => {
+      dbMock.resource.findFirst
+        .mockResolvedValueOnce(fakeResource({ id: "mine", projectId: "elsewhere", workspaceId: "w9", readStatus: "read" }))
+        .mockResolvedValueOnce(theirs as never);
+      dbMock.resource.update.mockResolvedValue(fakeResource({ id: "mine", projectId: "elsewhere", workspaceId: "w9" }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.create({ title: "Villa", url, projectId: "p1", workspaceId: "w1" });
+
+      const data = dbMock.resource.update.mock.calls[0]![0].data;
+      expect(data).not.toHaveProperty("projectId");
+      expect(data).not.toHaveProperty("workspaceId");
+      expect(data).toMatchObject({ readStatus: "to_read" });
+      expect(out).toMatchObject({ created: false, alreadyInProject: already });
+    });
+
+    it("does not look for a second filing when the caller's own Resource is already in the Project", async () => {
+      dbMock.resource.findFirst.mockResolvedValueOnce(fakeResource({ id: "mine", projectId: "p1" }));
+      dbMock.resource.update.mockResolvedValue(fakeResource({ id: "mine", projectId: "p1" }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.create({ title: "Villa", url, projectId: "p1", forReference: true });
+
+      expect(dbMock.resource.findFirst).toHaveBeenCalledTimes(1);
+      expect(out).toMatchObject({ created: false, alreadyInProject: null });
+    });
+
+    it("refuses a move into a Project that already lists the page, and moves nothing", async () => {
+      dbMock.resource.findFirst
+        .mockResolvedValueOnce(fakeResource({ id: "mine", identity: url, projectId: null }))
+        .mockResolvedValueOnce(theirs as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const error = await caller.resource
+        .update({ id: "mine", projectId: "p1" })
+        .then(() => null, (thrown: unknown) => thrown);
+
+      expect(error).toMatchObject({ code: "CONFLICT" });
+      expect(alreadyInProjectFromError(error)).toEqual(already);
+      expect(dbMock.resource.update).not.toHaveBeenCalled();
+    });
+
+    it("a save with no Project never asks", async () => {
+      dbMock.resource.create.mockResolvedValue(fakeResource({ id: "mine" }));
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.create({ title: "Villa", url, forReference: true });
+
+      expect(dbMock.resource.findFirst).toHaveBeenCalledTimes(1);
+      expect(out.alreadyInProject).toBeNull();
     });
   });
 

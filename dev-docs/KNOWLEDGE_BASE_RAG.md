@@ -250,6 +250,13 @@ the address of the latest save. A client that can see the page may pass `declare
 `og:url` or canonical link); it is used for matching only, and ignored unless it names the same
 host and path as `url`.
 
+A Project lists a page once. Saving a page under a Project where someone else's Resource with
+the same identity is already filed files nothing there: a save for reference is refused with
+`CONFLICT` and `error.data.alreadyInProject` (`{ resourceId, title, projectId, owner }`), and a
+save that asks for the Reading list succeeds with the caller's own Resource, no Project, and the
+same object as `alreadyInProject` in the response. `resource.update` refuses such a move the
+same way.
+
 A page that is not an article (a listing, a search, a dashboard) can be saved with `pageText`
 in place of `rawContent`. It is stored apart from the body, cut at 100,000 characters, indexed
 when `generateEmbeddings` is on, and never returned by `resource.get`, so no reader renders it.

@@ -16,6 +16,11 @@ import { resolvePrincipal, type PrincipalContext } from "~/server/services/acces
 import { triggerVideoArticle } from "~/server/services/youtubeSummary/triggerVideoArticle";
 import { isVideoArticle } from "~/lib/resources/reader";
 import { resourceAddresses } from "~/lib/resources/identity";
+import {
+  findPageInProject,
+  ResourceAlreadyInProjectError,
+  type AlreadyInProject,
+} from "~/server/services/resources/alreadyInProject";
 import { youtubeVideoId } from "~/utils/youtube";
 
 const contentTypeEnum = z.enum([
@@ -356,6 +361,12 @@ const SAVED_ROW_OMIT = { pageText: true } as const;
 /** Entries per page of `resource.identities`. */
 export const IDENTITIES_PAGE_SIZE = 1000;
 
+/** The refusal for filing a page under a Project that already lists it. */
+function alreadyInProjectError(alreadyInProject: AlreadyInProject): TRPCError {
+  const cause = new ResourceAlreadyInProjectError(alreadyInProject);
+  return new TRPCError({ code: "CONFLICT", message: cause.message, cause });
+}
+
 /**
  * Keep a Resource's index entries where the Resource is. A chunk carries a
  * copy of its source's workspace and Project, which the Knowledge search
@@ -476,6 +487,26 @@ export const resourceRouter = createTRPCRouter({
           })
         : null;
 
+      // A Project lists a page once (ADR-0082). If someone else already filed
+      // this page under the Project, nothing new is filed there. A save for
+      // reference is refused, naming their Resource. A save that asks for the
+      // Reading list still gives the caller their own Resource, saved as a
+      // save with no Project would be: that is how a member puts a shared
+      // page on their own list. The caller's own Resource already in the
+      // Project is not a second filing, so it is updated as before.
+      const alreadyInProject =
+        input.projectId && addresses && existing?.projectId !== input.projectId
+          ? await findPageInProject(ctx.db, scope.ownerId, {
+              projectId: input.projectId,
+              identity: addresses.identity,
+            })
+          : null;
+      const asksForReadingList = !input.forReference && input.readStatus !== "read";
+      if (alreadyInProject && !asksForReadingList) throw alreadyInProjectError(alreadyInProject);
+      const placement = alreadyInProject
+        ? { projectId: undefined, workspaceId: input.workspaceId }
+        : { projectId: input.projectId, workspaceId };
+
       if (existing) {
         // A video's article is the body. Saving its page again (the extension
         // captures one) must not replace it with a scrape of the watch page.
@@ -521,9 +552,13 @@ export const resourceRouter = createTRPCRouter({
             // Project's workspace. One that names only a workspace moves a
             // Resource that is not filed, and leaves a filed one with its
             // Project.
-            ...(input.projectId !== undefined
-              ? { projectId: input.projectId, ...(workspaceId !== undefined && { workspaceId }) }
-              : workspaceId !== undefined && !existing.projectId && { workspaceId }),
+            ...(placement.projectId !== undefined
+              ? {
+                  projectId: placement.projectId,
+                  ...(placement.workspaceId !== undefined && { workspaceId: placement.workspaceId }),
+                }
+              : placement.workspaceId !== undefined &&
+                !existing.projectId && { workspaceId: placement.workspaceId }),
           },
         });
 
@@ -539,7 +574,7 @@ export const resourceRouter = createTRPCRouter({
           context: "re-save",
         });
 
-        return { resource, created: false };
+        return { resource, created: false, alreadyInProject };
       }
 
       const resource = await ctx.db.resource.create({
@@ -560,8 +595,7 @@ export const resourceRouter = createTRPCRouter({
           tags: input.tags,
           userId: scope.ownerId,
           createdByAgentId: scope.agentId,
-          projectId: input.projectId,
-          workspaceId,
+          ...placement,
           ...saveReadState(input, null),
         },
       });
@@ -571,7 +605,7 @@ export const resourceRouter = createTRPCRouter({
         context: "create",
       });
 
-      return { resource, created: true };
+      return { resource, created: true, alreadyInProject };
     }),
 
   // Get a single resource by ID
@@ -831,6 +865,15 @@ export const resourceRouter = createTRPCRouter({
         projectId && changesPlacement ? await projectWorkspaceId(ctx.db, projectId) : null;
       if (filedWorkspaceId && scope.workspaceIds && !scope.workspaceIds.includes(filedWorkspaceId)) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Workspace not found or access denied" });
+      }
+
+      // A move obeys the same rule as a save: a Project lists a page once.
+      if (input.projectId && input.projectId !== existing.projectId && existing.identity) {
+        const alreadyInProject = await findPageInProject(ctx.db, scope.ownerId, {
+          projectId: input.projectId,
+          identity: existing.identity,
+        });
+        if (alreadyInProject) throw alreadyInProjectError(alreadyInProject);
       }
 
       const { id, regenerateEmbeddings, readStatus, ...updateData } = input;

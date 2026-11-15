@@ -18,6 +18,7 @@ import {
   createWorkspace,
 } from "~/test/factories";
 import { KnowledgeService } from "~/server/services/KnowledgeService";
+import { alreadyInProjectFromError } from "~/server/services/resources/alreadyInProject";
 
 // `resource.create` schedules its slow work with `after()`, which needs a
 // request scope. Nothing here indexes on save, so the callback is dropped.
@@ -241,6 +242,136 @@ describe("Resources filed under a Project are shared with it", () => {
 
     expect((await caller.resource.list({ projectId: proj.id })).resources.map((r) => r.id)).toEqual([resource.id]);
     expect(await searchHits(member.id, ws.id)).toEqual([resource.id]);
+  });
+
+  describe("a page is filed once per Project (keen.quill)", () => {
+    /**
+     * The page the owner filed in `setup`, as another visit to it: other dates
+     * and a tracking parameter. The page declares its own address, which is
+     * what makes the two visits one page.
+     */
+    const anotherVisit = (url: string) => `${url}?check_in=2027-03-01&utm_source=mail`;
+
+    async function refusal(attempt: Promise<unknown>) {
+      const error = await attempt.then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+      expect(error).toMatchObject({ code: "CONFLICT" });
+      return alreadyInProjectFromError(error);
+    }
+
+    it("a save for reference into a Project that already lists the page files nothing and names the Resource and its owner", async () => {
+      const { owner, member, proj, resource } = await setup();
+
+      const already = await refusal(
+        createTestCaller(member.id).resource.create({
+          title: "Villa",
+          url: anotherVisit(resource.url!),
+        declaredUrl: resource.url!,
+          declaredUrl: resource.url!,
+          projectId: proj.id,
+          generateEmbeddings: false,
+          forReference: true,
+        }),
+      );
+
+      expect(already).toEqual({
+        resourceId: resource.id,
+        title: "Villa in Lanzarote",
+        projectId: proj.id,
+        owner: { id: owner.id, name: "Owner" },
+      });
+      expect(await db.resource.count({ where: { projectId: proj.id } })).toBe(1);
+      expect(await db.resource.count({ where: { userId: member.id } })).toBe(0);
+    });
+
+    it("with the Reading list requested, the caller gets their own queued Resource with no Project", async () => {
+      const { member, ws, proj, resource } = await setup();
+
+      const out = await createTestCaller(member.id).resource.create({
+        title: "Villa",
+        url: anotherVisit(resource.url!),
+        declaredUrl: resource.url!,
+        projectId: proj.id,
+        workspaceId: ws.id,
+        generateEmbeddings: false,
+        readStatus: "to_read",
+      });
+
+      expect(out.created).toBe(true);
+      expect(out.alreadyInProject).toMatchObject({ resourceId: resource.id, owner: { name: "Owner" } });
+      expect(out.resource).toMatchObject({
+        userId: member.id,
+        projectId: null,
+        workspaceId: ws.id,
+        readStatus: "to_read",
+        identity: resource.identity,
+      });
+      expect(await db.resource.count({ where: { projectId: proj.id } })).toBe(1);
+    });
+
+    it("moving a Resource into a Project that already lists the page is refused the same way", async () => {
+      const { owner, member, ws, proj, resource } = await setup();
+      const caller = createTestCaller(member.id);
+      const { resource: mine } = await caller.resource.create({
+        title: "Villa",
+        url: anotherVisit(resource.url!),
+        declaredUrl: resource.url!,
+        workspaceId: ws.id,
+        generateEmbeddings: false,
+      });
+
+      const already = await refusal(caller.resource.update({ id: mine.id, projectId: proj.id }));
+
+      expect(already).toMatchObject({ resourceId: resource.id, owner: { id: owner.id } });
+      expect((await db.resource.findUniqueOrThrow({ where: { id: mine.id } })).projectId).toBeNull();
+    });
+
+    it("saving a page into a Project where only the caller's own Resource exists updates it as before", async () => {
+      const { owner, proj, resource } = await setup();
+
+      const out = await createTestCaller(owner.id).resource.create({
+        title: "Villa",
+        url: anotherVisit(resource.url!),
+        declaredUrl: resource.url!,
+        projectId: proj.id,
+        generateEmbeddings: false,
+        forReference: true,
+      });
+
+      expect(out).toMatchObject({ created: false, alreadyInProject: null, resource: { id: resource.id } });
+      expect(out.resource.url).toBe(`${resource.url}?check_in=2027-03-01`);
+    });
+
+    it("an archived Resource, or one whose owner has left, no longer holds the page's place", async () => {
+      const { owner, member, proj, resource } = await setup();
+      await createTestCaller(owner.id).resource.archive({ id: resource.id });
+
+      const out = await createTestCaller(member.id).resource.create({
+        title: "Villa",
+        url: resource.url!,
+        projectId: proj.id,
+        generateEmbeddings: false,
+        forReference: true,
+      });
+
+      expect(out).toMatchObject({ created: true, alreadyInProject: null, resource: { projectId: proj.id } });
+    });
+
+    it("a different page on the same site is filed normally", async () => {
+      const { member, proj } = await setup();
+
+      const out = await createTestCaller(member.id).resource.create({
+        title: "Another villa",
+        url: `https://example.com/rooms/${randomUUID()}`,
+        projectId: proj.id,
+        generateEmbeddings: false,
+        forReference: true,
+      });
+
+      expect(out).toMatchObject({ created: true, alreadyInProject: null, resource: { projectId: proj.id } });
+    });
   });
 
   it("moving a Resource into a Project in another workspace takes its index entries with it", async () => {
