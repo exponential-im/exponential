@@ -169,6 +169,7 @@ describe("matrixGateway router (mocked)", () => {
     it("passes mxid, the person's Assistant and their default workspace to the gateway", async () => {
       dbMock.assistant.findFirst.mockResolvedValue({ id: "asst-1", name: "Zoe" } as never);
       dbMock.user.findUnique.mockResolvedValue({ defaultWorkspaceId: "ws-1" } as never);
+      dbMock.workspace.findFirst.mockResolvedValue({ id: "ws-1" } as never);
       fetchMock.mockResolvedValue(
         okJson({
           pairingCode: "A3F1B2",

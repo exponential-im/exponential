@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { buildWorkspaceAccessWhere } from "~/server/services/access/resolvers/workspaceResolver";
 import { findPersonalWorkspaceId } from "./personalWorkspace";
 import { resolveAssistantForUser } from "./resolveAssistant";
 
@@ -10,8 +11,10 @@ import { resolveAssistantForUser } from "./resolveAssistant";
  * The workspace used to be `Assistant.workspaceId`. The gateways type it as
  * optional, but it is load-bearing: the agent's knowledge tools throw "No
  * workspace in context" without it, so it is never null when the person has
- * any workspace. The person's default workspace, else their Personal
- * workspace (which onboarding guarantees), else any workspace they belong to.
+ * any workspace. The person's default workspace — only while they can still
+ * access it (removing a member leaves `defaultWorkspaceId` stale) — else their
+ * Personal workspace (which onboarding guarantees), else any workspace they
+ * belong to.
  */
 export async function resolveGatewayPairing(
   db: PrismaClient,
@@ -32,7 +35,13 @@ async function resolvePairingWorkspace(db: PrismaClient, userId: string): Promis
     where: { id: userId },
     select: { defaultWorkspaceId: true },
   });
-  if (user?.defaultWorkspaceId) return user.defaultWorkspaceId;
+  if (user?.defaultWorkspaceId) {
+    const accessible = await db.workspace.findFirst({
+      where: { id: user.defaultWorkspaceId, ...buildWorkspaceAccessWhere(userId) },
+      select: { id: true },
+    });
+    if (accessible) return accessible.id;
+  }
 
   const personalId = await findPersonalWorkspaceId(db, userId);
   if (personalId) return personalId;
