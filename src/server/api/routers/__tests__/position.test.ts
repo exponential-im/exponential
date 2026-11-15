@@ -69,7 +69,12 @@ vi.mock("~/server/db", () => {
   return { db: proxy };
 });
 
+vi.mock("~/server/services/notifications/emit/emitNotification", () => ({
+  emitNotification: vi.fn().mockResolvedValue([]),
+}));
+
 import { createMockCaller } from "~/test/trpc-helpers";
+import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
 
 const USER_ID = "user-1";
 const WORKSPACE_ID = "ws-1";
@@ -171,6 +176,27 @@ describe("position.create", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
 
     expectNothingWritten(db);
+  });
+
+  it("notifies for the holders a new Position starts with (Agent PRD D9)", async () => {
+    arrangeCaller(db, "owner");
+    vi.mocked(emitNotification).mockClear();
+    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria", userId: "aria" }] as never);
+    db.position.create.mockResolvedValue(createdPosition as never);
+
+    await caller(db).position.create({
+      workspaceId: WORKSPACE_ID,
+      title: "Chief of Staff",
+      remit: "Runs the weekly review",
+      holderUserIds: ["aria"],
+    });
+
+    expect(emitNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        category: "position_assigned",
+        subject: { positionId: POSITION_ID, addedHolderUserIds: ["aria"] },
+      }),
+    );
   });
 
   it("a holder who is not a member of the workspace → NOT_FOUND, without naming the id", async () => {
@@ -288,7 +314,8 @@ describe("position.update", () => {
   it("admin replaces the holder set with the row edit in one transaction", async () => {
     arrangeCaller(db, "admin");
     db.$transaction.mockImplementation(((cb: (tx: unknown) => unknown) => cb(db)) as never);
-    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria" }] as never);
+    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria", userId: "aria" }] as never);
+    db.positionHolder.findMany.mockResolvedValue([] as never);
     db.positionHolder.deleteMany.mockResolvedValue({ count: 1 } as never);
     db.positionHolder.createMany.mockResolvedValue({ count: 1 } as never);
 
@@ -300,9 +327,12 @@ describe("position.update", () => {
     });
 
     expect(db.$transaction).toHaveBeenCalledTimes(1);
-    expect(db.positionHolder.deleteMany).toHaveBeenCalledWith({ where: { positionId: POSITION_ID } });
+    expect(db.positionHolder.deleteMany).toHaveBeenCalledWith({
+      where: { positionId: POSITION_ID, workspaceUserId: { notIn: ["wu-aria"] } },
+    });
     expect(db.positionHolder.createMany).toHaveBeenCalledWith({
       data: [{ positionId: POSITION_ID, workspaceUserId: "wu-aria" }],
+      skipDuplicates: true,
     });
     expect(db.position.update.mock.calls[0]?.[0]).toMatchObject({ data: { title: "Travel lead" } });
     expect(result).toMatchObject({ id: POSITION_ID });
@@ -326,7 +356,8 @@ describe("position.update", () => {
   it("a holder removed from the workspace mid-write → NOT_FOUND, not a 500", async () => {
     arrangeCaller(db, "owner");
     db.$transaction.mockImplementation(((cb: (tx: unknown) => unknown) => cb(db)) as never);
-    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria" }] as never);
+    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria", userId: "aria" }] as never);
+    db.positionHolder.findMany.mockResolvedValue([] as never);
     db.positionHolder.deleteMany.mockResolvedValue({ count: 0 } as never);
     db.positionHolder.createMany.mockRejectedValue(
       Object.assign(new Error("FK"), { code: "P2003", meta: { field_name: "PositionHolder_workspaceUserId_fkey" } }),
@@ -427,11 +458,16 @@ describe("position.setHolders", () => {
     db.positionHolder.deleteMany.mockResolvedValue({ count: 1 } as never);
     db.positionHolder.createMany.mockResolvedValue({ count: 2 } as never);
     db.position.findUniqueOrThrow.mockResolvedValue(createdPosition as never);
+    db.positionHolder.findMany.mockResolvedValue([] as never);
+    vi.mocked(emitNotification).mockClear();
   });
 
   it("admin replaces the holder set in one transaction", async () => {
     arrangeCaller(db, "admin");
-    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria" }, { id: "wu-andi" }] as never);
+    db.workspaceUser.findMany.mockResolvedValue([
+      { id: "wu-aria", userId: "aria" },
+      { id: "wu-andi", userId: "andi" },
+    ] as never);
 
     const result = await caller(db).position.setHolders({
       workspaceId: WORKSPACE_ID,
@@ -440,14 +476,57 @@ describe("position.setHolders", () => {
     });
 
     expect(db.$transaction).toHaveBeenCalledTimes(1);
-    expect(db.positionHolder.deleteMany).toHaveBeenCalledWith({ where: { positionId: POSITION_ID } });
+    expect(db.positionHolder.deleteMany).toHaveBeenCalledWith({
+      where: { positionId: POSITION_ID, workspaceUserId: { notIn: ["wu-aria", "wu-andi"] } },
+    });
     expect(db.positionHolder.createMany).toHaveBeenCalledWith({
       data: [
         { positionId: POSITION_ID, workspaceUserId: "wu-aria" },
         { positionId: POSITION_ID, workspaceUserId: "wu-andi" },
       ],
+      skipDuplicates: true,
     });
     expect(result).toMatchObject({ id: POSITION_ID, holders: [{ userId: "aria" }] });
+  });
+
+  it("notifies once for the holders this write added, never for unchanged ones (Agent PRD D9)", async () => {
+    arrangeCaller(db, "admin");
+    db.workspaceUser.findMany.mockResolvedValue([
+      { id: "wu-aria", userId: "aria" },
+      { id: "wu-andi", userId: "andi" },
+    ] as never);
+    // Andi already held it; Aria is new.
+    db.positionHolder.findMany.mockResolvedValue([{ workspaceUserId: "wu-andi" }] as never);
+
+    await caller(db).position.setHolders({
+      workspaceId: WORKSPACE_ID,
+      positionId: POSITION_ID,
+      userIds: ["aria", "andi"],
+    });
+
+    expect(db.positionHolder.createMany).toHaveBeenCalledWith({
+      data: [{ positionId: POSITION_ID, workspaceUserId: "wu-aria" }],
+      skipDuplicates: true,
+    });
+    expect(emitNotification).toHaveBeenCalledTimes(1);
+    expect(emitNotification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorUserId: USER_ID,
+        category: "position_assigned",
+        subject: { positionId: POSITION_ID, addedHolderUserIds: ["aria"] },
+      }),
+    );
+  });
+
+  it("re-saving an unchanged holder set writes no holder and notifies no one", async () => {
+    arrangeCaller(db, "admin");
+    db.workspaceUser.findMany.mockResolvedValue([{ id: "wu-aria", userId: "aria" }] as never);
+    db.positionHolder.findMany.mockResolvedValue([{ workspaceUserId: "wu-aria" }] as never);
+
+    await caller(db).position.setHolders({ workspaceId: WORKSPACE_ID, positionId: POSITION_ID, userIds: ["aria"] });
+
+    expect(db.positionHolder.createMany).not.toHaveBeenCalled();
+    expect(emitNotification).not.toHaveBeenCalled();
   });
 
   it("an empty set leaves the Position vacant without a createMany", async () => {
@@ -793,6 +872,7 @@ describe("position.importMany", () => {
     it("creates new titles, updates matches and only adds holders, all in one transaction", async () => {
       arrangeCaller(db, "owner");
       arrangeTxMembers(["andi"]);
+      vi.mocked(emitNotification).mockClear();
 
       const result = await caller(db).position.importMany({ workspaceId: WORKSPACE_ID, dryRun: false, positions: rows });
 
@@ -837,6 +917,13 @@ describe("position.importMany", () => {
       expect(db.position.create).not.toHaveBeenCalled();
       expect(db.position.update).not.toHaveBeenCalled();
       expect(db.positionHolder.createMany).not.toHaveBeenCalled();
+
+      // The holders each Position gained notify (Agent PRD D9): Andi on both,
+      // Aria (unchanged on the match) on neither.
+      expect(vi.mocked(emitNotification).mock.calls.map(([call]) => call.subject)).toEqual([
+        { positionId: POSITION_ID, addedHolderUserIds: ["andi"] },
+        { positionId: "pos-new", addedHolderUserIds: ["andi"] },
+      ]);
     });
 
     it("re-importing holders who already hold the Position adds no rows", async () => {
