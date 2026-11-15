@@ -904,6 +904,24 @@ describe("resource router — reading list (mocked)", () => {
       expect(dbMock.resource.findMany.mock.calls[1]![0]!.where).not.toHaveProperty("readStatus");
     });
 
+    it("pages without losing the row at a page boundary", async () => {
+      const all = Array.from({ length: 5 }, (_, i) => fakeResource({ id: `r${i}` }));
+      dbMock.resource.findMany.mockImplementation(((args: { take: number; skip?: number; cursor?: { id: string } }) => {
+        const start = args.cursor ? all.findIndex((row) => row.id === args.cursor!.id) + (args.skip ?? 0) : 0;
+        return Promise.resolve(all.slice(start, start + args.take));
+      }) as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const first = await caller.resource.list({ limit: 2 });
+      const second = await caller.resource.list({ limit: 2, cursor: first.nextCursor });
+      const third = await caller.resource.list({ limit: 2, cursor: second.nextCursor });
+
+      expect([first, second, third].flatMap((page) => page.resources.map((r) => r.id))).toEqual([
+        "r0", "r1", "r2", "r3", "r4",
+      ]);
+      expect(third.nextCursor).toBeUndefined();
+    });
+
     it("returns readStatus and readAt on every row", async () => {
       dbMock.resource.findMany.mockResolvedValue([fakeResource()]);
       const caller = createMockCaller({ userId: callerId, db: dbMock });
@@ -912,6 +930,98 @@ describe("resource router — reading list (mocked)", () => {
 
       const select = dbMock.resource.findMany.mock.calls[0]![0]!.select!;
       expect(select).toMatchObject({ readStatus: true, readAt: true });
+    });
+  });
+
+  describe("identities (sly.breeze)", () => {
+    const entry = (overrides: Record<string, unknown> = {}) => ({
+      id: "r1",
+      identity: "https://example.com/post",
+      title: "A link",
+      workspaceId: "w1",
+      readStatus: "to_read",
+      project: { id: "p1", name: "Travel" },
+      user: { id: callerId, name: "Caller" },
+      ...overrides,
+    });
+
+    it("returns one entry per unarchived Resource with an identity, for the caller only", async () => {
+      dbMock.resource.findMany.mockResolvedValue([entry()] as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.identities();
+
+      const args = dbMock.resource.findMany.mock.calls[0]![0]!;
+      expect(args.where).toEqual({ userId: callerId, archivedAt: null, identity: { not: null } });
+      expect(args.orderBy).toEqual({ id: "asc" });
+      expect(out.items).toEqual([
+        {
+          id: "r1",
+          identity: "https://example.com/post",
+          title: "A link",
+          workspaceId: "w1",
+          project: { id: "p1", name: "Travel" },
+          owner: { id: callerId, name: "Caller" },
+          isMine: true,
+          readStatus: "to_read",
+        },
+      ]);
+      expect(out.nextCursor).toBeUndefined();
+    });
+
+    it("never returns anyone else's read state", async () => {
+      dbMock.resource.findMany.mockResolvedValue([
+        entry({ id: "theirs", readStatus: "reading", user: { id: "teammate", name: "Teammate" } }),
+      ] as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const out = await caller.resource.identities();
+
+      expect(out.items[0]).toMatchObject({
+        isMine: false,
+        readStatus: null,
+        owner: { id: "teammate", name: "Teammate" },
+      });
+    });
+
+    it("accepts no URL, identity or page content", async () => {
+      dbMock.resource.findMany.mockResolvedValue([] as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      await caller.resource.identities({
+        limit: 10,
+        // Unknown keys are stripped, never used: nothing here can narrow the read to a page.
+        ...({ url: "https://example.com/post", identity: "https://example.com/post", title: "A link" } as object),
+      });
+
+      expect(dbMock.resource.findMany.mock.calls[0]![0]!.where).toEqual({
+        userId: callerId,
+        archivedAt: null,
+        identity: { not: null },
+      });
+    });
+
+    it("hands an account with 5,000 Resources the complete list through the cursor", async () => {
+      const all = Array.from({ length: 5000 }, (_, i) => entry({ id: `r${String(i).padStart(4, "0")}` }));
+      dbMock.resource.findMany.mockImplementation(((args: { take: number; skip?: number; cursor?: { id: string } }) => {
+        const start = args.cursor ? all.findIndex((row) => row.id === args.cursor!.id) + (args.skip ?? 0) : 0;
+        return Promise.resolve(all.slice(start, start + args.take));
+      }) as never);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await caller.resource.identities(cursor ? { cursor } : undefined);
+        seen.push(...page.items.map((item) => item.id));
+        cursor = page.nextCursor;
+        pages += 1;
+      } while (cursor);
+
+      expect(seen).toHaveLength(5000);
+      expect(new Set(seen).size).toBe(5000);
+      expect(pages).toBe(5);
     });
   });
 
@@ -1061,6 +1171,31 @@ describe("resource router — agent works on its owner's list (mocked)", () => {
       AND: [{ OR: [{ workspaceId: "w1" }, { workspaceId: null }] }],
       readStatus: { in: ["to_read", "reading"] },
     });
+  });
+
+  it("fetches the identities of the owner's Resources in delegated workspaces only", async () => {
+    dbMock.resource.findMany.mockResolvedValue([
+      {
+        id: "r1",
+        identity: "https://example.com/post",
+        title: "A link",
+        workspaceId: "w1",
+        readStatus: "to_read",
+        project: null,
+        user: { id: OWNER_ID, name: "Owner" },
+      },
+    ] as never);
+
+    const out = await agentCaller().resource.identities();
+
+    expect(dbMock.resource.findMany.mock.calls[0]![0]!.where).toEqual({
+      userId: OWNER_ID,
+      workspaceId: { in: ["w1"] },
+      archivedAt: null,
+      identity: { not: null },
+    });
+    // The list is the owner's, so its entries are "mine" to the agent keeping it.
+    expect(out.items[0]).toMatchObject({ isMine: true, readStatus: "to_read" });
   });
 
   it("marks read only on the owner's rows it can reach", async () => {

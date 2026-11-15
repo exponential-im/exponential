@@ -286,6 +286,9 @@ function assertAgentCanPlace(scope: ResourceScope, workspaceId: string | null | 
   }
 }
 
+/** Entries per page of `resource.identities`. */
+export const IDENTITIES_PAGE_SIZE = 1000;
+
 const resourceProcedure = protectedProcedure.use(async ({ ctx, next }) =>
   next({ ctx: { scope: await resolveResourceScope(ctx) } }),
 );
@@ -496,6 +499,58 @@ export const resourceRouter = createTRPCRouter({
       return { resource, chunkCount };
     }),
 
+  // The identities of the Resources the caller can see, so a client can say
+  // "this page is already saved" by matching in the browser. It takes no URL,
+  // identity or page content on purpose: the Chrome extension must not tell
+  // the server which pages its user visits (its ADR 0001, "a page reaches the
+  // server only when it is saved"). Do not add a lookup-by-URL beside it.
+  //
+  // One entry per unarchived Resource that has an identity, which is every
+  // one saved from a URL; a pasted note has no page to match. Read state is
+  // the owner's alone, so it is returned only on the caller's own entries.
+  // Paged by id so a few thousand Resources arrive complete: follow
+  // `nextCursor` until it is absent.
+  identities: resourceProcedure
+    .input(
+      z
+        .object({
+          limit: z.number().min(1).max(IDENTITIES_PAGE_SIZE).default(IDENTITIES_PAGE_SIZE),
+          cursor: z.string().optional(),
+        })
+        .optional(),
+    )
+    .query(async ({ ctx, input }) => {
+      const { scope } = ctx;
+      const limit = input?.limit ?? IDENTITIES_PAGE_SIZE;
+
+      const rows = await ctx.db.resource.findMany({
+        where: { ...scopedRows(scope), archivedAt: null, identity: { not: null } },
+        take: limit + 1,
+        ...(input?.cursor && { cursor: { id: input.cursor }, skip: 1 }),
+        orderBy: { id: "asc" },
+        select: {
+          id: true,
+          identity: true,
+          title: true,
+          workspaceId: true,
+          readStatus: true,
+          project: { select: { id: true, name: true } },
+          user: { select: { id: true, name: true } },
+        },
+      });
+
+      // The cursor is the last entry handed out: the next page skips it.
+      const hasMore = rows.length > limit;
+      if (hasMore) rows.pop();
+      const nextCursor = hasMore ? rows[rows.length - 1]?.id : undefined;
+      const items = rows.map(({ user, readStatus, ...row }) => {
+        const isMine = user.id === scope.ownerId;
+        return { ...row, owner: user, isMine, readStatus: isMine ? readStatus : null };
+      });
+
+      return { items, nextCursor };
+    }),
+
   // List resources with filters
   list: resourceProcedure
     .input(
@@ -572,10 +627,13 @@ export const resourceRouter = createTRPCRouter({
         select: resourceListSelect,
       });
 
+      // The cursor is the last row handed out, because the next page skips
+      // its cursor row. (It used to be the first row held back, which the
+      // next page then skipped: one row lost at every page boundary.)
       let nextCursor: string | undefined;
       if (resources.length > input.limit) {
-        const nextItem = resources.pop();
-        nextCursor = nextItem?.id;
+        resources.pop();
+        nextCursor = resources[resources.length - 1]?.id;
       }
 
       return { resources, nextCursor };
