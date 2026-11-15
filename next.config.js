@@ -93,6 +93,16 @@ const config = {
     webpackMemoryOptimizations: true,
     cpus: 2,
   },
+  // The sitemap renders per request and reads the Markdown under content/ at
+  // runtime. Tracing missed content/learn, so production served a sitemap
+  // without a single /learn article. Ship all of content/ with the route.
+  // Keys are matched against the entry's normalised path, which is
+  // /app/sitemap.xml or /app/sitemap depending on how Next names the metadata
+  // route; "/sitemap*" matches both (and no other route), so the include
+  // cannot silently miss.
+  outputFileTracingIncludes: {
+    "/sitemap*": ["./content/**/*"],
+  },
   turbopack: {
     resolveAlias: {
       "markdown-it": "markdown-it/dist/index.cjs.js",
@@ -119,6 +129,17 @@ const config = {
         destination: "/features/team-weekly-review",
         permanent: true,
       },
+      // There was never capacity planning behind this page; it now covers
+      // the delivery metrics that exist.
+      {
+        source: "/features/team-capacity",
+        destination: "/features/team-metrics",
+        permanent: true,
+      },
+      // The public bounty board was retired (Nov 2026). Its pages and blog post
+      // were indexed, so send visitors somewhere useful instead of a 404.
+      { source: "/explore/:path*", destination: "/", permanent: true },
+      { source: "/blog/bounty-board-machine-readable", destination: "/blog", permanent: true },
     ];
   },
 
