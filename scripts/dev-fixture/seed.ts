@@ -557,7 +557,17 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       });
     });
   }
-  await ensureAssistant(user.id, FIXTURE.assistantName);
+  const fixtureAssistant = await ensureAssistant(user.id, FIXTURE.assistantName);
+  // Not a member of the second workspace on any run, so the Members page there
+  // offers "Add my Assistant" (Agent PRD V2) and the spec that clicks it starts
+  // from the same state every time.
+  const fixtureAssistantPrincipal = await db.assistant.findUniqueOrThrow({
+    where: { id: fixtureAssistant.id },
+    select: { externalAgent: { select: { shadowUserId: true } } },
+  });
+  await db.workspaceUser.deleteMany({
+    where: { userId: fixtureAssistantPrincipal.externalAgent.shadowUserId, workspaceId: otherWorkspace.id },
+  });
   const colleagueAssistant = await ensureAssistant(colleague.id, FIXTURE.colleagueAssistantName);
   // The agent's own description (on its ExternalAgent row, not per workspace)
   // is what the workspace Edit Role modal shows for an agent member.
