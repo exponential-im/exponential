@@ -36,7 +36,6 @@ export default async function robots(): Promise<MetadataRoute.Robots> {
           '/signin',
           '/api/',
           '/admin/',
-          '/_next/',
         ],
       },
     ],
