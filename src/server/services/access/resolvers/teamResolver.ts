@@ -5,6 +5,7 @@
  * Single source of truth for "does this user belong to this team?"
  */
 
+import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
 import type { TeamMembership, TeamRole } from "../types";
 
@@ -26,6 +27,32 @@ export async function getTeamMembership(
     role: membership.role as TeamRole,
     teamId: membership.teamId,
   };
+}
+
+/**
+ * Assert that the user belongs to the team, at any role, throwing `FORBIDDEN`
+ * otherwise. Returns the membership.
+ *
+ * For a write that names a team by id without being a team procedure, where
+ * the `requireTeamMembership` middleware does not fit because the id is
+ * optional: `project.create` filing a new project under a team. Every team
+ * member may edit the team's resources (`TEAM_PERMISSION_MAP.edit`), so
+ * membership is the whole test. A team that does not exist answers the same
+ * as one the user is not in.
+ */
+export async function assertTeamMembership(
+  db: PrismaClient,
+  userId: string,
+  teamId: string,
+): Promise<TeamMembership> {
+  const membership = await getTeamMembership(db, userId, teamId);
+  if (!membership) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "You are not a member of this team.",
+    });
+  }
+  return membership;
 }
 
 /** Get all teams a user belongs to */

@@ -15,7 +15,9 @@ import type { PrismaClient } from "@prisma/client";
 
 import {
   assertCanEditGoal,
+  assertCanEditGoals,
   assertCanEditKeyResult,
+  assertCanEditKeyResults,
 } from "../resolvers/goalResolver";
 
 const userId = "user-1";
@@ -147,6 +149,94 @@ describe("goal and key result write access", () => {
 
     it("answers a missing key result with NOT_FOUND", async () => {
       expect(await verdict(assertCanEditKeyResult(db, userId, null))).toBe("NOT_FOUND");
+    });
+  });
+});
+
+describe("the batch forms, for a write that links to rows by id", () => {
+  // `project.create` names goals and key results by id (ticket calm.daisy).
+  let db: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    db = mockDeep<PrismaClient>();
+    mockReset(db);
+    db.teamUser.findFirst.mockResolvedValue(null as never);
+    // A member of ws-1, nothing anywhere else.
+    db.workspaceUser.findUnique.mockImplementation(((args: {
+      where: { userId_workspaceId: { workspaceId: string } };
+    }) =>
+      Promise.resolve(
+        args.where.userId_workspaceId.workspaceId === workspaceId
+          ? { role: "member", workspaceId }
+          : null,
+      )) as never);
+  });
+
+  const goalRow = (id: number, inWorkspaceId: string | null, ownerId = "someone-else") => ({
+    id,
+    userId: ownerId,
+    driUserId: null,
+    workspaceId: inWorkspaceId,
+  });
+  const keyResultRow = (id: string, inWorkspaceId: string | null, ownerId = "someone-else") => ({
+    id,
+    userId: ownerId,
+    workspaceId: inWorkspaceId,
+  });
+
+  describe("assertCanEditGoals", () => {
+    it("allows an empty list without a query", async () => {
+      expect(await verdict(assertCanEditGoals(db, userId, []))).toBe("allowed");
+      expect(db.goal.findMany).not.toHaveBeenCalled();
+    });
+
+    it("allows goals the user can change, in one lookup", async () => {
+      db.goal.findMany.mockResolvedValue([goalRow(1, workspaceId), goalRow(2, null, userId)] as never);
+
+      expect(await verdict(assertCanEditGoals(db, userId, [1, 2, 2]))).toBe("allowed");
+      expect(db.goal.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    it("refuses the set when one goal is out of reach", async () => {
+      db.goal.findMany.mockResolvedValue([goalRow(1, workspaceId), goalRow(2, "ws-other")] as never);
+
+      expect(await verdict(assertCanEditGoals(db, userId, [1, 2]))).toBe("NOT_FOUND");
+    });
+
+    it("refuses an id with no row, and an id that is not a number, the same way", async () => {
+      db.goal.findMany.mockResolvedValue([] as never);
+
+      expect(await verdict(assertCanEditGoals(db, userId, [404]))).toBe("NOT_FOUND");
+      expect(await verdict(assertCanEditGoals(db, userId, [Number.NaN]))).toBe("NOT_FOUND");
+    });
+  });
+
+  describe("assertCanEditKeyResults", () => {
+    it("allows an empty list without a query", async () => {
+      expect(await verdict(assertCanEditKeyResults(db, userId, []))).toBe("allowed");
+      expect(db.keyResult.findMany).not.toHaveBeenCalled();
+    });
+
+    it("allows key results the user can change", async () => {
+      db.keyResult.findMany.mockResolvedValue([
+        keyResultRow("kr-1", workspaceId),
+        keyResultRow("kr-2", null, userId),
+      ] as never);
+
+      expect(await verdict(assertCanEditKeyResults(db, userId, ["kr-1", "kr-2"]))).toBe("allowed");
+    });
+
+    it("refuses the set when one key result is out of reach, or does not exist", async () => {
+      db.keyResult.findMany.mockResolvedValue([keyResultRow("kr-1", workspaceId)] as never);
+
+      expect(await verdict(assertCanEditKeyResults(db, userId, ["kr-1", "kr-404"]))).toBe("NOT_FOUND");
+
+      db.keyResult.findMany.mockResolvedValue([
+        keyResultRow("kr-1", workspaceId),
+        keyResultRow("kr-2", "ws-other"),
+      ] as never);
+
+      expect(await verdict(assertCanEditKeyResults(db, userId, ["kr-1", "kr-2"]))).toBe("NOT_FOUND");
     });
   });
 });

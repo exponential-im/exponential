@@ -14,6 +14,10 @@ import {
   isWorkspaceGuest,
   getWorkspaceMembership,
   assertWorkspaceWriteRole,
+  assertTeamMembership,
+  assertAssignableDri,
+  assertCanEditGoals,
+  assertCanEditKeyResults,
   AccessControlService,
   projectAccessDeniedError,
 } from "~/server/services/access";
@@ -316,6 +320,26 @@ export const projectRouter = createTRPCRouter({
         );
       }
 
+      // The other ids the input names were written as given, so a caller
+      // could file a project under a team they are not in, name anyone its
+      // DRI (and read that person's name and email back), and link it to
+      // goals and key results they cannot change. All of it is checked before
+      // the first write, so a refusal leaves nothing behind.
+      const userId = ctx.session.user.id;
+      if (input.teamId) {
+        await assertTeamMembership(ctx.db, userId, input.teamId);
+      }
+      await assertAssignableDri(
+        ctx.db,
+        userId,
+        input.workspaceId ?? null,
+        input.driId,
+      );
+      // Parsed once, so the ids that are checked are the ids that are linked.
+      const goalIds = (input.goalIds ?? []).map((id) => Number(id));
+      await assertCanEditGoals(ctx.db, userId, goalIds);
+      await assertCanEditKeyResults(ctx.db, userId, input.keyResultIds ?? []);
+
       // Generate a unique slug
       const baseSlug = slugify(input.name);
       let slug = baseSlug;
@@ -352,13 +376,13 @@ export const projectRouter = createTRPCRouter({
       });
 
       // Connect relations if provided
-      if (input.goalIds?.length || input.lifeDomainIds?.length) {
+      if (goalIds.length || input.lifeDomainIds?.length) {
         await ctx.db.project.update({
           where: { id: project.id },
           data: {
-            ...(input.goalIds?.length && {
+            ...(goalIds.length && {
               goals: {
-                connect: input.goalIds.map(id => ({ id: parseInt(id) })),
+                connect: goalIds.map((id) => ({ id })),
               },
             }),
             ...(input.lifeDomainIds?.length && {

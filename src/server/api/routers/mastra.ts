@@ -24,7 +24,7 @@ import { getKnowledgeService } from "~/server/services/KnowledgeService";
 import { generateAgentJWT, generateJWT } from "~/server/utils/jwt";
 import { capToolCallsForTurn, redactToolArgs } from "~/server/utils/redactToolArgs";
 import { resolveAgentActionSource } from "~/server/utils/actionSource";
-import { resolvePrincipal } from "~/server/services/access/principal";
+import { isGatewayCredential, resolvePrincipal } from "~/server/services/access/principal";
 import { actionWriteDeps, applyActionUpdate, createAction } from "~/server/services/actions";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
@@ -3160,11 +3160,20 @@ export const mastraRouter = createTRPCRouter({
     }),
 
   // ADR-0023: the gateway pushes ONE finished channel summary tagged only with
-  // (provider, externalId). Authenticated by the agent JWT (resolves to a user
-  // in the tRPC context) so only the trusted gateway can write summaries. The
-  // routing (workspace/project), drop-if-unlinked, and dedup-by-window logic
-  // all live in ingestChannelSummary — this endpoint is a thin shell. The
-  // event's owner is the link's creator, not the JWT user.
+  // (provider, externalId). The routing (workspace/project), drop-if-unlinked,
+  // and dedup-by-window logic all live in ingestChannelSummary — this endpoint
+  // is a thin shell. The event's owner is the link's creator, not the JWT user.
+  //
+  // Only a chat gateway may call it. ingestChannelSummary routes by the link
+  // alone and never looks at the caller: the summary lands in the link's
+  // workspace feed, under its creator's name, whoever sent it. So as a plain
+  // protectedProcedure this let any signed-in user who knew a linked channel
+  // id write text into that workspace's feed, or overwrite a window's
+  // summary. The gateway's own JWT is the gate (isGatewayCredential): it is
+  // minted server-side and handed only to the gateway, never to a browser.
+  // The user it names is whoever connected the gateway, and is not checked
+  // against the link's workspace: per the ADR the gateway is the trusted
+  // party and the link decides where a conversation's summary goes.
   recordChannelSummary: protectedProcedure
     .input(z.object({
       provider: z.string().min(1),
@@ -3176,6 +3185,12 @@ export const mastraRouter = createTRPCRouter({
       messageCount: z.number().int().nonnegative(),
     }))
     .mutation(async ({ ctx, input }) => {
+      if (!isGatewayCredential(ctx.tokenType)) {
+        throw new TRPCError({
+          code: 'FORBIDDEN',
+          message: 'Only a chat gateway can record channel summaries',
+        });
+      }
       return ingestChannelSummary(ctx.db, input);
     }),
 
@@ -4253,6 +4268,13 @@ export const mastraRouter = createTRPCRouter({
       await assertCanEditKeyResult(ctx.db, userId, keyResult, {
         notFound: 'Key result not found or access denied',
       });
+
+      // And to the project, as the human okr.unlinkProject requires (ADR-0016:
+      // the Assistant's path is never wider than the person's).
+      const projectAccess = await getProjectAccess(ctx.db, userId, input.projectId);
+      if (!canEditProject(projectAccess)) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: "You don't have permission to unlink this project" });
+      }
 
       await ctx.db.keyResultProject.deleteMany({
         where: {

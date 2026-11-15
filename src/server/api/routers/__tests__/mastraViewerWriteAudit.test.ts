@@ -311,6 +311,9 @@ describe("mastra.unlinkProjectFromKeyResult role gate (mocked)", () => {
   roleGateCases({
     arrange: (db) => {
       stubKeyResult(db, colleagueId);
+      // The project side is checked too now (calm.daisy): a member can edit
+      // this one, so the key result still decides each case here.
+      stubProject(db);
       db.keyResultProject.deleteMany.mockResolvedValue({ count: 1 } as never);
     },
     act: (caller) =>

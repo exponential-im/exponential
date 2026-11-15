@@ -14,6 +14,7 @@ import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
 import {
+  assertAssignableDri,
   assertAssignableUser,
   canAssignToUnscopedAction,
   toAssignableUser,
@@ -227,5 +228,53 @@ describe("an Assistant is assignable only where it works (Agent PRD V2, D7 regre
     await expect(
       canAssignToUnscopedAction(db, CALLER_ID, WORKSPACE_ID, ASSISTANT_SHADOW_ID),
     ).resolves.toBe(true);
+  });
+});
+
+describe("assertAssignableDri", () => {
+  // The DRI of a project or goal the caller is creating (ticket calm.daisy).
+  let db: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    db = mockDeep<PrismaClient>();
+    mockReset(db);
+    db.teamUser.findFirst.mockResolvedValue(null);
+  });
+
+  const code = async (p: Promise<void>) => {
+    try {
+      await p;
+      return "allowed";
+    } catch (e) {
+      return e instanceof TRPCError ? e.code : "NOT_TRPC";
+    }
+  };
+
+  it("allows no DRI, and the caller naming themself, without a lookup", async () => {
+    expect(await code(assertAssignableDri(db, CALLER_ID, WORKSPACE_ID, null))).toBe("allowed");
+    expect(await code(assertAssignableDri(db, CALLER_ID, WORKSPACE_ID, undefined))).toBe("allowed");
+    expect(await code(assertAssignableDri(db, CALLER_ID, WORKSPACE_ID, CALLER_ID))).toBe("allowed");
+    expect(await code(assertAssignableDri(db, CALLER_ID, null, CALLER_ID))).toBe("allowed");
+    expect(db.workspaceUser.findUnique).not.toHaveBeenCalled();
+  });
+
+  it("allows a member of the row's workspace", async () => {
+    stubDirectMembers(db, [MEMBER_ID]);
+
+    expect(await code(assertAssignableDri(db, CALLER_ID, WORKSPACE_ID, MEMBER_ID))).toBe("allowed");
+  });
+
+  it("refuses someone outside the row's workspace with NOT_FOUND, never FORBIDDEN", async () => {
+    stubDirectMembers(db, [MEMBER_ID]);
+
+    expect(await code(assertAssignableDri(db, CALLER_ID, WORKSPACE_ID, OUTSIDER_ID))).toBe("NOT_FOUND");
+  });
+
+  it("refuses anyone but the caller on a row with no workspace", async () => {
+    // Even someone who shares a workspace with the caller: the row is not in it.
+    stubDirectMembers(db, [CALLER_ID, MEMBER_ID]);
+
+    expect(await code(assertAssignableDri(db, CALLER_ID, null, MEMBER_ID))).toBe("NOT_FOUND");
+    expect(db.workspaceUser.findUnique).not.toHaveBeenCalled();
   });
 });

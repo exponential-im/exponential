@@ -80,12 +80,17 @@ export {
   buildWorkspaceWriteWhere,
   buildWorkspaceVisibilityWhere,
 } from "./resolvers/workspaceResolver";
-export { getTeamMembership, getUserTeams } from "./resolvers/teamResolver";
+export {
+  getTeamMembership,
+  assertTeamMembership,
+  getUserTeams,
+} from "./resolvers/teamResolver";
 export {
   getProjectAccess,
   hasProjectAccess,
   isProjectInsider,
   canEditProject,
+  assertCanEditProjects,
   canManageProjectMembers,
   buildProjectAccessWhere,
   buildProjectInsiderWhere,
@@ -145,7 +150,9 @@ export type {
 
 export {
   assertCanEditGoal,
+  assertCanEditGoals,
   assertCanEditKeyResult,
+  assertCanEditKeyResults,
 } from "./resolvers/goalResolver";
 export type {
   GoalWriteSubject,
@@ -159,5 +166,6 @@ export type { WorkspaceScopedRefs } from "./workspaceRefs";
 // Assignability guards (assigneeId / ActionAssignee foreign keys to User)
 export {
   assertAssignableUser,
+  assertAssignableDri,
   canAssignToUnscopedAction,
 } from "./assignability";

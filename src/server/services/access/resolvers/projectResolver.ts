@@ -15,6 +15,7 @@
  * `isPublic` overrides restriction for view (public is public).
  */
 
+import { TRPCError } from "@trpc/server";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import type {
   ProjectAccess,
@@ -177,6 +178,30 @@ export function canEditProject(access: ProjectAccess): boolean {
     return canEditWorkspaceContent(access.workspaceRole ?? null);
   }
   return false;
+}
+
+/**
+ * Assert the user can edit every project in `projectIds`, throwing `FORBIDDEN`
+ * with `message` otherwise.
+ *
+ * For a write on something else that names projects by id: linking a project
+ * to a goal or a key result, or removing that link. The link shows up on the
+ * project, so it needs the same access as editing it. A project that does not
+ * exist resolves to no access, so the answer does not say which ids are real.
+ */
+export async function assertCanEditProjects(
+  db: PrismaClient,
+  userId: string,
+  projectIds: string[],
+  message: string,
+): Promise<void> {
+  const ids = [...new Set(projectIds)];
+  const accesses = await Promise.all(
+    ids.map((projectId) => getProjectAccess(db, userId, projectId)),
+  );
+  if (!accesses.every(canEditProject)) {
+    throw new TRPCError({ code: "FORBIDDEN", message });
+  }
 }
 
 /** Check if user can manage members (add/remove/role) on a project */

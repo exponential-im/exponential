@@ -1,10 +1,12 @@
-import type { Prisma } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { type Context } from "~/server/auth/types";
 import {
   getWorkspaceMembership,
   assertWorkspaceWriteRole,
 } from "~/server/services/access/resolvers/workspaceResolver";
 import { assertCanEditGoal } from "~/server/services/access/resolvers/goalResolver";
+import { assertCanEditProjects } from "~/server/services/access/resolvers/projectResolver";
+import { assertAssignableDri } from "~/server/services/access/assignability";
 import { resolveGoalProgress, isManualProgress } from "~/server/services/goalProgress";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 
@@ -265,6 +267,8 @@ export async function createGoal({ ctx, input }: { ctx: Context, input: GoalInpu
     await assertCanPlaceGoalInWorkspace({ ctx, workspaceId: input.workspaceId });
   }
 
+  await assertGoalCreateRefs(ctx.db, ctx.session.user.id, input);
+
   const goal = await ctx.db.goal.create({
     data: {
       title: input.title,
@@ -308,6 +312,36 @@ export async function createGoal({ ctx, input }: { ctx: Context, input: GoalInpu
   }
 
   return goal;
+}
+
+/**
+ * Assert the caller may name this DRI and this project on a goal they are
+ * creating. Both ids used to be written as given.
+ *
+ * - `driUserId`: a goal's DRI can read and change it, and their name comes
+ *   back on the goal. In a workspace the DRI must belong to it; a personal
+ *   goal's DRI is the caller (`assertAssignableDri`).
+ * - `projectId`: the link shows on the project, so the caller must be able to
+ *   edit it, as `okr.linkProject` requires when it links one to a key result.
+ *
+ * Shared by the two create paths (this service and the inline one in
+ * `goal.createGoal`) so they cannot drift. Call it after the workspace check:
+ * it assumes the caller may already write a goal into `workspaceId`.
+ */
+export async function assertGoalCreateRefs(
+  db: PrismaClient,
+  userId: string,
+  refs: { workspaceId?: string | null; driUserId?: string | null; projectId?: string | null },
+): Promise<void> {
+  await assertAssignableDri(db, userId, refs.workspaceId ?? null, refs.driUserId);
+  if (refs.projectId) {
+    await assertCanEditProjects(
+      db,
+      userId,
+      [refs.projectId],
+      "You don't have permission to link this project",
+    );
+  }
 }
 
 /**

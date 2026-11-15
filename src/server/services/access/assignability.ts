@@ -71,6 +71,42 @@ export async function assertAssignableUser(
 }
 
 /**
+ * Throw unless `driId` may be named the DRI of a project or goal the caller
+ * is creating in `workspaceId` (null for a row with no workspace).
+ *
+ * Same hole as `assigneeId`: the row's `include` returns the DRI's name, and
+ * for a project their email, so an unchecked id reads a stranger's identity
+ * back. A goal's DRI can also edit it, so on a goal the id is a grant too.
+ *
+ * - Naming yourself is always allowed, and so is naming nobody.
+ * - In a workspace, the DRI must belong to it ({@link assertAssignableUser}).
+ *   That is what the pickers offer: the workspace's own members.
+ * - With no workspace there is no roster to check against, so only the caller
+ *   qualifies. Nobody else could open a personal project they were named on.
+ *
+ * `callerId` must already be allowed to write the row; this only decides who
+ * they may name on it.
+ */
+export async function assertAssignableDri(
+  db: PrismaClient,
+  callerId: string,
+  workspaceId: string | null,
+  driId: string | null | undefined,
+): Promise<void> {
+  if (!driId || driId === callerId) return;
+
+  if (workspaceId) {
+    await assertAssignableUser(db, workspaceId, driId, "DRI");
+    return;
+  }
+
+  throw new TRPCError({
+    code: "NOT_FOUND",
+    message: "DRI not found: without a workspace, only you can be the DRI",
+  });
+}
+
+/**
  * May `candidateId` be assigned to an action that has neither a project nor a
  * team?
  *

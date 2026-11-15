@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
-import { resolvePrincipal, type PrincipalContext } from "../principal";
+import { isGatewayCredential, resolvePrincipal, type PrincipalContext } from "../principal";
 
 const PERSON = "user-person";
 const SHADOW = "user-shadow";
@@ -159,5 +159,28 @@ describe("resolvePrincipal", () => {
     await expect(
       resolvePrincipal({ db, session: null, tokenType: undefined }),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+  });
+});
+
+describe("isGatewayCredential", () => {
+  // The gate on `mastra.recordChannelSummary` (ticket calm.daisy).
+  it.each(["whatsapp-gateway", "telegram-gateway", "matrix-gateway"])(
+    "accepts the %s token",
+    (tokenType) => {
+      expect(isGatewayCredential(tokenType)).toBe(true);
+    },
+  );
+
+  it.each([
+    undefined, // a cookie session
+    "api-token",
+    "device-token",
+    "extension-token",
+    "agent-key",
+    "agent-context",
+    "voice-session",
+    "made-up-gateway",
+  ])("refuses %s", (tokenType) => {
+    expect(isGatewayCredential(tokenType)).toBe(false);
   });
 });
