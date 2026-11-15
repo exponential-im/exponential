@@ -30,6 +30,7 @@ describe("buildCreateActionPayload", () => {
       assigneeIds: ["u2"],
       sprintListId: "s1",
     });
+    expect(createInput.safeParse(payload).success).toBe(true);
   });
 
   it("omits cleared attachments and unset fields rather than sending null or empty", () => {
