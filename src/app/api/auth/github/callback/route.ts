@@ -6,6 +6,10 @@ import { githubIntegrationService } from "~/server/services/github-integration";
 import { isGithubAppConfigured } from "~/server/services/github/connectionState";
 import { App } from "octokit";
 import { z } from "zod";
+import {
+  workspaceGithubSettingsPath,
+  type GithubInstallResult,
+} from "~/lib/github/installResult";
 
 const callbackSchema = z.object({
   installation_id: z.string(),
@@ -23,6 +27,40 @@ const BASE_URL = process.env.NEXTAUTH_URL || "http://localhost:3000";
 // In-memory store to track processed installation IDs (for development/demo)
 // In production, use Redis or database to track processed installations
 const processedInstallations = new Set<string>();
+
+/**
+ * Where to send someone whose install was started from a workspace: back to
+ * that workspace's GitHub section, saying how it went. Null when the state
+ * names no workspace (the legacy project flow) or one the caller is not a
+ * member of, so nobody is redirected into a workspace they cannot open.
+ */
+async function workspaceReturnUrl(
+  state: string | null | undefined,
+  userId: string,
+  result?: GithubInstallResult,
+): Promise<string | null> {
+  if (!state) return null;
+  let workspaceId: unknown;
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(state, "base64").toString());
+    workspaceId = (parsed as { workspaceId?: unknown } | null)?.workspaceId;
+  } catch {
+    return null;
+  }
+  if (typeof workspaceId !== "string" || !workspaceId) return null;
+
+  const membership = await db.workspaceUser.findFirst({
+    where: { workspaceId, userId },
+    select: { workspace: { select: { slug: true } } },
+  });
+  if (!membership) return null;
+  return `${BASE_URL}${workspaceGithubSettingsPath(membership.workspace.slug, result)}`;
+}
+
+/** The account integrations page shows `?error=` as a notification. */
+function accountErrorUrl(message: string): string {
+  return `${BASE_URL}/settings/integrations?error=${encodeURIComponent(message)}`;
+}
 
 export async function GET(request: NextRequest) {
   const isDev = process.env.NODE_ENV !== "production";
@@ -61,7 +99,11 @@ export async function GET(request: NextRequest) {
     // installation token. Degrade gracefully instead of throwing a 500.
     if (!isGithubAppConfigured()) {
       return NextResponse.redirect(
-        `${BASE_URL}/integrations?error=github_not_configured`,
+        (await workspaceReturnUrl(
+          url.searchParams.get("state"),
+          session.user.id,
+          "failed",
+        )) ?? accountErrorUrl("GitHub isn't set up on this deployment yet"),
       );
     }
 
@@ -77,23 +119,27 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const validatedParams = callbackSchema.parse(params);
-
-    // Handle installation error
-    if (validatedParams.error) {
-      const errorMessage =
-        validatedParams.error_description || validatedParams.error;
+    // GitHub reports a refused or failed install as `error`, usually with no
+    // installation_id, so this is checked before the schema requires one.
+    if (params.error) {
       return NextResponse.redirect(
-        `${BASE_URL}/settings/integrations/github?error=${encodeURIComponent(errorMessage)}`,
+        (await workspaceReturnUrl(params.state, session.user.id, "failed")) ??
+          accountErrorUrl(params.error_description ?? params.error),
       );
     }
+
+    const validatedParams = callbackSchema.parse(params);
 
     const { installation_id, state } = validatedParams;
 
     // Check if this installation has already been processed
     if (processedInstallations.has(installation_id)) {
-      // Determine redirect URL based on state
-      let redirectUrl = `${BASE_URL}/settings/integrations`;
+      // Determine redirect URL based on state. A repeat hit for a workspace
+      // install goes back to that workspace, with no result: the first hit
+      // reports it.
+      let redirectUrl =
+        (await workspaceReturnUrl(state, session.user.id)) ??
+        `${BASE_URL}/settings/integrations`;
       if (state) {
         try {
           const stateData = JSON.parse(Buffer.from(state, "base64").toString());
@@ -181,9 +227,7 @@ export async function GET(request: NextRequest) {
       });
       if (!membership) {
         return NextResponse.redirect(
-          `${BASE_URL}/integrations?error=${encodeURIComponent(
-            "Not a member of the target workspace",
-          )}`,
+          accountErrorUrl("Not a member of the target workspace"),
         );
       }
 
@@ -205,7 +249,10 @@ export async function GET(request: NextRequest) {
       // carries no workspace, so it showed the default workspace's repositories
       // instead of the one that was just connected.
       return NextResponse.redirect(
-        `${BASE_URL}/w/${membership.workspace.slug}/settings?section=integrations&github_connected=true`,
+        `${BASE_URL}${workspaceGithubSettingsPath(
+          membership.workspace.slug,
+          validatedParams.setup_action === "update" ? "updated" : "connected",
+        )}`,
       );
     }
 
@@ -283,10 +330,29 @@ export async function GET(request: NextRequest) {
       processedInstallations.delete(installation_id);
     }
 
+    // A workspace install goes back to its workspace with a fixed "failed"
+    // notice; the detail stays in the log above. Looking the workspace up can
+    // itself fail (the session or the database may be what broke), and then the
+    // account page is the fallback.
+    try {
+      const session = await auth();
+      const workspaceUrl = session?.user?.id
+        ? await workspaceReturnUrl(
+            url.searchParams.get("state"),
+            session.user.id,
+            "failed",
+          )
+        : null;
+      if (workspaceUrl) return NextResponse.redirect(workspaceUrl);
+    } catch (lookupError) {
+      console.error(
+        `[GitHub Callback ${requestId}] Could not resolve the workspace to return to:`,
+        lookupError,
+      );
+    }
+
     const errorMessage =
       error instanceof Error ? error.message : "OAuth callback failed";
-    return NextResponse.redirect(
-      `${BASE_URL}/settings/integrations/github?error=${encodeURIComponent(errorMessage)}`,
-    );
+    return NextResponse.redirect(accountErrorUrl(errorMessage));
   }
 }
