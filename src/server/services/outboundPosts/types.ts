@@ -89,8 +89,9 @@ export type OutboundDestination =
 export interface RoomPoster {
   provider: string;
   /**
-   * Deliver one message. `txnId` is deterministic per (post, attempt), so a provider
-   * that deduplicates on it (Matrix) turns a retried send into the same event.
+   * Deliver one message. `txnId` is stable per post across every attempt — never
+   * per attempt — so a provider that deduplicates on it (Matrix) turns a retried
+   * send into the same event instead of a second message.
    */
   send(
     destination: { link: ChannelLink; workspaceId: string },

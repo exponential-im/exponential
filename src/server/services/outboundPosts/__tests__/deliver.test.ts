@@ -350,4 +350,18 @@ describe("kickOutboundPosts", () => {
     await expect(kickOutboundPosts(db, ["post-1", "post-1"], deps())).resolves.toBeUndefined();
     expect(poster.send).toHaveBeenCalledTimes(2);
   });
+
+  it("reports a claim that throws instead of dropping it silently", async () => {
+    db.outboundPost.updateMany
+      .mockRejectedValueOnce(new Error("db hiccup"))
+      .mockResolvedValue({ count: 1 });
+
+    await expect(kickOutboundPosts(db, ["post-bad", "post-1"], deps())).resolves.toBeUndefined();
+
+    expect(reportHandledError).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ area: "outbound-post-kick", context: { postId: "post-bad" } }),
+    );
+    expect(poster.send).toHaveBeenCalledTimes(1);
+  });
 });

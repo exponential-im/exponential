@@ -10,9 +10,10 @@
  * the PUT and the status write) is returned by the homeserver as the *same* event on the
  * next attempt rather than posted twice. Matrix has no un-send; this is the guard.
  *
- * Nothing here throws: every outcome, expected or not, is written to the row and
- * reported, and the caller gets a discriminated result. One bad post can never stall
- * the rows behind it in a sweep.
+ * Once a row is claimed nothing throws: every outcome, expected or not, is written to
+ * the row and reported, and the caller gets a discriminated result. Only the claim
+ * itself can reject (a database error before any row is owned); the kick and the sweep
+ * both catch and report that, so one bad post never stalls the rows behind it.
  */
 
 import type { PrismaClient } from "@prisma/client";
@@ -275,7 +276,20 @@ export async function kickOutboundPosts(
   postIds: readonly string[],
   deps: DeliverDeps = {},
 ): Promise<void> {
-  await Promise.allSettled(postIds.map((id) => deliverOutboundPost(db, id, deps)));
+  const results = await Promise.allSettled(
+    postIds.map((id) => deliverOutboundPost(db, id, deps)),
+  );
+  // `deliverOutboundPost` records its own failures on the row; the one thing that can
+  // still reject is the claim itself (a database error before any row is owned). The
+  // sweep will deliver the post later, but the error must not vanish.
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      reportHandledError(result.reason, {
+        area: "outbound-post-kick",
+        context: { postId: postIds[index] ?? "" },
+      });
+    }
+  });
 }
 
 /**
