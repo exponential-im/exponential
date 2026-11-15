@@ -4,6 +4,7 @@ import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
 import { after } from "next/server";
 import { getKnowledgeService } from "~/server/services/KnowledgeService";
+import { requireAi } from "~/server/services/ai/requireAi";
 import { htmlToMarkdown } from "~/lib/content/contentFormat";
 import {
   getProjectAccess,
@@ -136,6 +137,31 @@ export function resaveReadStatus(
 ): ReadStatus {
   if (requested === "to_read" && current === "reading") return "reading";
   return requested;
+}
+
+/**
+ * The read-state patch a save applies. A save **for reference** files the
+ * page without touching the Reading list: a new Resource starts `read`, so it
+ * never joins the queue, and one already saved keeps the read state and
+ * `readAt` it has (`{}`), whatever they are. That is not the same as asking
+ * for `read`, which would pull a queued page out of the list and mark a
+ * mid-read one finished. Every other save lands on the requested state, by
+ * the re-save rule above when the Resource exists.
+ */
+export function saveReadState(
+  input: { forReference: boolean; readStatus: ReadStatus },
+  existing: { readStatus: string; readAt: Date | null } | null,
+): { readStatus: ReadStatus; readAt: Date | null } | Record<string, never> {
+  if (existing) {
+    if (input.forReference) return {};
+    return readTransition(
+      resaveReadStatus(input.readStatus, existing.readStatus),
+      existing.readStatus,
+      existing.readAt,
+    );
+  }
+  const readStatus = input.forReference ? "read" : input.readStatus;
+  return { readStatus, readAt: readStatus === "read" ? new Date() : null };
 }
 
 /** The select every list-style endpoint returns for a Resource row. */
@@ -272,6 +298,9 @@ export const resourceRouter = createTRPCRouter({
         // Defaults to "to_read" so a quick-saved link lands in the Reading
         // list; callers saving finished reference material pass "read".
         readStatus: readStatusEnum.default("to_read"),
+        // Filed for reference, not to read: the save leaves the Reading list
+        // alone and `readStatus` is ignored. See `saveReadState`.
+        forReference: z.boolean().default(false),
       })
     )
     .mutation(async ({ ctx, input }) => {
@@ -306,8 +335,9 @@ export const resourceRouter = createTRPCRouter({
       // link does not, and must not blank out a body saved earlier.
       const hasBody = Boolean(content ?? input.rawContent);
 
-      // Dedupe by URL (D-0027): a URL the caller already saved is brought
-      // back to the queue and refreshed, never duplicated. An agent only
+      // Dedupe by URL (D-0027): a URL the caller already saved is refreshed,
+      // never duplicated, and brought back to the queue unless the save is
+      // for reference. An agent only
       // matches rows in its scope, so a re-save never reveals or moves a row
       // its owner keeps outside the delegated workspaces.
       const existing = input.url
@@ -320,11 +350,7 @@ export const resourceRouter = createTRPCRouter({
         // A video's article is the body. Saving its page again (the extension
         // captures one) must not replace it with a scrape of the watch page.
         const replacesBody = hasBody && !isVideoArticle(existing);
-        const read = readTransition(
-          resaveReadStatus(input.readStatus, existing.readStatus),
-          existing.readStatus,
-          existing.readAt,
-        );
+        const read = saveReadState(input, existing);
         const resource = await ctx.db.resource.update({
           where: { id: existing.id },
           data: {
@@ -376,8 +402,7 @@ export const resourceRouter = createTRPCRouter({
           createdByAgentId: scope.agentId,
           projectId: input.projectId,
           workspaceId: input.workspaceId,
-          readStatus: input.readStatus,
-          readAt: input.readStatus === "read" ? new Date() : null,
+          ...saveReadState(input, null),
         },
       });
 
@@ -682,6 +707,7 @@ export const resourceRouter = createTRPCRouter({
         });
       }
 
+      requireAi("openai", "Knowledge indexing");
       const knowledgeService = getKnowledgeService(ctx.db);
       const chunkCount = await knowledgeService.embedResource(resource.id);
 

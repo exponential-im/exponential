@@ -1,10 +1,10 @@
 import { z } from "zod";
+import { after } from "next/server";
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
 import {
   createTRPCRouter,
   humanOnlyProcedure,
-  isAgentActorToken,
   protectedProcedure,
 } from "~/server/api/trpc";
 import {
@@ -35,8 +35,10 @@ import {
   updateDecision,
 } from "~/server/services/decisions/decisionService";
 import { formatDecisionLabel, parseDecisionLabel } from "~/lib/decision-label";
+import { resolvePrincipal } from "~/server/services/access/principal";
 import { buildAdrDraft } from "~/server/services/decisions/renderAdrMarkdown";
 import { settleDraftReviewNotification } from "~/server/services/decisions/settleDraftReviewNotification";
+import { kickOutboundPostsForSubject } from "~/server/services/outboundPosts/deliver";
 import { TranscriptionProcessingService } from "~/server/services/TranscriptionProcessingService";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { parseTranscript, type TranscriptTurn } from "~/lib/transcript";
@@ -50,8 +52,11 @@ import type { DecisionEvidenceTurn } from "~/lib/decision-evidence";
  *   through the same service seam (ADR-0016). The `adr` router stays
  *   human-only and read-only; nothing here touches ADR content.
  * - an agent may propose, never publish: a decision created by an agent
- *   principal or with `source: AGENT` is born a draft, and `confirmDraft` is
- *   human-only, so a person always stands behind a confirmed decision.
+ *   principal (`resolvePrincipal`: an agent, or Zoe/a gateway acting for a
+ *   person) or with `source: AGENT` is born a draft, and `confirmDraft` is
+ *   human-only, so a person always stands behind a confirmed decision. Nor
+ *   may an agent move a confirmed decision's status or rewrite what it says
+ *   (`setStatus`, `updateDecision`; record integrity, ADR-0071).
  * - reads gate at workspace `view` (viewers may read what the resolver lets
  *   them see); writes gate at workspace `edit` plus the per-row resolver
  *   check (meeting edit access for meeting-linked rows).
@@ -160,24 +165,6 @@ async function assertLinkableActions(
     });
   }
   return rows.map((row) => row.id);
-}
-
-/**
- * Whether the caller is an agent principal — an External agent's key, or a
- * shadow user (`User.isAgent`) behind a JWT. The same test
- * `humanOnlyProcedure` applies, without the throw.
- */
-async function isAgentPrincipal(
-  db: PrismaClient,
-  userId: string,
-  tokenType: string | undefined,
-): Promise<boolean> {
-  if (tokenType === "agent-key") return true;
-  const principal = await db.user.findUnique({
-    where: { id: userId },
-    select: { isAgent: true },
-  });
-  return principal?.isAgent === true;
 }
 
 /** Throwing wrapper around the decision resolver for one row. */
@@ -314,6 +301,25 @@ async function settleDraftReviewAfter(
       area: "decision.settleDraftReviewNotification",
       context: { transcriptionSessionId: subject.transcriptionSession.id },
     });
+  }
+}
+
+/**
+ * Deliver whatever the service just enqueued for a decision (ADR-0075), once the
+ * response is on its way. `after()` needs a request scope and throws outside one
+ * (the `action.assign` precedent); the fallback runs the kick fire-and-forget so a
+ * caller without a request scope still delivers. Delivery records its own outcome
+ * on each row, so nothing here can fail the mutation.
+ */
+function kickDecisionPosts(db: PrismaClient, decisionId: string): void {
+  const run = () =>
+    kickOutboundPostsForSubject(db, { kind: "decision", subjectId: decisionId }).catch(
+      () => undefined,
+    );
+  try {
+    after(run);
+  } catch {
+    void run();
   }
 }
 
@@ -520,9 +526,11 @@ export const decisionRouter = createTRPCRouter({
     }),
 
   /**
-   * Log a confirmed decision — by hand from the Decision Log or a meeting
-   * page, or by Zoe (source AGENT). Meeting-linked decisions need edit
-   * access to the meeting; the label comes from the workspace sequence.
+   * Log a decision — confirmed when a person logs it by hand from the
+   * Decision Log or a meeting page; a draft labelled AGENT when an agent
+   * principal logs it, Zoe acting for a person included (decided by the
+   * credential, not by `source`). Meeting-linked decisions need edit access
+   * to the meeting; the label comes from the workspace sequence.
    */
   create: protectedProcedure
     .input(
@@ -622,24 +630,24 @@ export const decisionRouter = createTRPCRouter({
         ctx.session.user.id,
         input.actionIds ?? [],
       );
-      const creatorIsAgent = await isAgentPrincipal(
-        ctx.db,
-        ctx.session.user.id,
-        ctx.tokenType,
-      );
       const decision = await createDecision(ctx.db, {
         ...input,
         actionIds,
         evidence,
         createdById: ctx.session.user.id,
-        // An agent proposes; a person confirms (`confirmDraft`).
-        asDraft: creatorIsAgent || input.source === "AGENT",
-        creatorIsAgent,
+        // An agent proposes; a person confirms (`confirmDraft`). Zoe acting
+        // for a person is drafted by her credential, not by `source`.
+        principal: await resolvePrincipal(ctx),
       });
+      // A draft enqueued nothing; a confirmed create may have.
+      if (decision.reviewState === "CONFIRMED") kickDecisionPosts(ctx.db, decision.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
     }),
 
-  /** Edit content and scope. Status changes go through `setStatus`. */
+  /**
+   * Edit content and scope. Status changes go through `setStatus`. An agent
+   * principal may not rewrite what a confirmed decision says.
+   */
   update: protectedProcedure
     .input(
       z.object({
@@ -665,6 +673,8 @@ export const decisionRouter = createTRPCRouter({
         decisionId: subject.id,
         workspaceId,
         userId: ctx.session.user.id,
+        // Agents may not rewrite a confirmed decision (record integrity).
+        principal: await resolvePrincipal(ctx),
         patch,
       });
       return { ...decision, label: formatDecisionLabel(decision.number) };
@@ -791,7 +801,8 @@ export const decisionRouter = createTRPCRouter({
 
   /**
    * Lifecycle transition. SUPERSEDED requires `supersededById`, which must
-   * be a decision the caller may read in the same workspace.
+   * be a decision the caller may read in the same workspace. A person's act:
+   * agent principals, Zoe included, are refused by the service.
    */
   setStatus: protectedProcedure
     .input(
@@ -823,10 +834,11 @@ export const decisionRouter = createTRPCRouter({
         userId: ctx.session.user.id,
         status: input.status,
         supersededById,
-        // Accepting makes a person the decider — only through their own
-        // login, never Zoe or an agent acting for them.
-        actorIsAgent: isAgentActorToken(ctx.tokenType),
+        // Only a person moves a confirmed decision (record integrity), and
+        // accepting makes them the decider. Agents, Zoe included, are refused.
+        principal: await resolvePrincipal(ctx),
       });
+      kickDecisionPosts(ctx.db, decision.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
     }),
 
@@ -837,7 +849,7 @@ export const decisionRouter = createTRPCRouter({
    * accepted"); on an already-confirmed row only that status change applies.
    * A person accepting through their own login becomes the decider when no
    * person is one yet. Zoe and the gateways never get here: their tokens are
-   * agent-acting (`isAgentActorToken`), which `humanOnlyProcedure` refuses.
+   * agent credentials (`resolvePrincipal`), which `humanOnlyProcedure` refuses.
    */
   confirmDraft: humanOnlyProcedure
     .input(
@@ -862,10 +874,46 @@ export const decisionRouter = createTRPCRouter({
         workspaceId: input.workspaceId,
         userId: ctx.session.user.id,
         status: input.status,
-        actorIsAgent: isAgentActorToken(ctx.tokenType),
+        principal: await resolvePrincipal(ctx),
       });
       await settleDraftReviewAfter(ctx.db, subject);
+      // A plain confirm emits for the confirmed row; a resolution draft emits for its
+      // target, which is what the service returns. Kick both ids when they differ so
+      // neither depends on a later act (the sweep would catch it, but not promptly).
+      kickDecisionPosts(ctx.db, decision.id);
+      if (decision.id !== subject.id) kickDecisionPosts(ctx.db, subject.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
+    }),
+
+  /**
+   * Where this decision has been posted (ADR-0075): the "Posted to #leadership · 2m
+   * ago" line. Gated on viewing the decision itself, so a restricted project's room
+   * is not revealed to someone who cannot see the decision. Never a credential.
+   */
+  outboundPosts: protectedProcedure
+    .input(z.object({ workspaceId: z.string(), decisionId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
+      await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "view");
+      const rows = await ctx.db.outboundPost.findMany({
+        where: { workspaceId: input.workspaceId, kind: "decision", subjectId: subject.id },
+        select: {
+          id: true,
+          event: true,
+          provider: true,
+          externalId: true,
+          status: true,
+          sentAt: true,
+          createdAt: true,
+          channelLink: { select: { displayName: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return rows.map(({ channelLink, ...row }) => ({
+        ...row,
+        roomName: channelLink?.displayName ?? row.externalId,
+      }));
     }),
 
   /** Reject a draft. Confirmed decisions are deprecated, never rejected. */

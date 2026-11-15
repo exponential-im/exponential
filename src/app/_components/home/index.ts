@@ -1,17 +1,16 @@
 export { GradientShader } from "./GradientShader";
 export { HeroSection } from "./HeroSection";
-export { FactsSection } from "./FactsSection";
 export { FeaturesMenu } from "./FeaturesMenu";
 export { ResourcesMenu } from "./ResourcesMenu";
-export { ProblemStatementSection } from "./ProblemStatementSection";
-export { SolutionIntroSection } from "./SolutionIntroSection";
-export { ProductDemoSection } from "./ProductDemoSection";
-export { HowItWorksSection } from "./HowItWorksSection";
-export { KeyFeaturesSection } from "./KeyFeaturesSection";
-export { PersonaSection } from "./PersonaSection";
+export { ProofStrip } from "./ProofStrip";
+export { PillarsSection } from "./PillarsSection";
+export { FeatureTabsSection } from "./FeatureTabsSection";
+export { AgentAccessSection } from "./AgentAccessSection";
+export { SelfHostSection } from "./SelfHostSection";
 export { PricingSection } from "./PricingSection";
 export { FinalCTASection } from "./FinalCTASection";
 export { FooterSection } from "./FooterSection";
+export { MarketingHeader } from "./MarketingHeader";
 
 // Shared components
 export { SectionContainer } from "./shared/SectionContainer";
