@@ -223,14 +223,50 @@ describe("mastra ticket labels (cold.nebula)", () => {
       );
     });
 
-    it("writes nothing when the caller lacks edit access", async () => {
+    it("writes nothing when the caller can see the product but lacks edit access", async () => {
       dbMock.ticket.findUnique.mockResolvedValue({ id: "tk-1", productId: PRODUCT.id } as never);
-      loadProductMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+      // Can see (view passes), can't edit: a plain FORBIDDEN is fine, it reveals nothing new.
+      loadProductMock.mockImplementation((async (_db: unknown, _u: string, _p: string, level: string) => {
+        if (level === "edit") throw new TRPCError({ code: "FORBIDDEN" });
+        return PRODUCT;
+      }) as never);
       const caller = createMockCaller({ userId: USER_ID, db: dbMock });
 
       await expect(
         caller.mastra.updateTicket({ ticketId: "tk-1", title: "x", addLabels: ["bug"] }),
       ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(ticketUpdate).not.toHaveBeenCalled();
+      expect(applyLabelsMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects an empty ticketId instead of updating an arbitrary ticket", async () => {
+      const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+      for (const ticketId of ["", "   "]) {
+        await expect(
+          caller.mastra.updateTicket({ ticketId, addLabels: ["bug"] }),
+        ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      }
+      expect(dbMock.ticket.findFirst).not.toHaveBeenCalled();
+      expect(dbMock.ticket.findUnique).not.toHaveBeenCalled();
+      expect(applyLabelsMock).not.toHaveBeenCalled();
+    });
+
+    it("answers NOT_FOUND, not FORBIDDEN, for a ticket in a product the caller can't see", async () => {
+      // A ticket that exists where the caller has no access looks exactly
+      // like one that doesn't exist, so ids can't be probed.
+      loadProductMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+      dbMock.ticket.findUnique.mockResolvedValue({ id: "tk-1", productId: PRODUCT.id } as never);
+      const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+
+      await expect(
+        caller.mastra.updateTicket({ ticketId: "tk-1", title: "x" }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND", message: "Ticket not found" });
+
+      // By product + number, the product is checked before any ticket lookup.
+      await expect(
+        caller.mastra.updateTicket({ productId: PRODUCT.id, ticketNumber: 7, title: "x" }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND", message: "Ticket not found" });
+      expect(dbMock.ticket.findFirst).not.toHaveBeenCalled();
       expect(ticketUpdate).not.toHaveBeenCalled();
       expect(applyLabelsMock).not.toHaveBeenCalled();
     });

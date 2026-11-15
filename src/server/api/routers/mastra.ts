@@ -4487,8 +4487,10 @@ export const mastraRouter = createTRPCRouter({
   // slugs or names.
   updateTicket: protectedProcedure
     .input(z.object({
-      ticketId: z.string().optional(),
-      productId: z.string().optional(),
+      // Non-empty: an empty id must be a BAD_REQUEST, never "no id" (which
+      // would fall through to the number lookup with no filter).
+      ticketId: z.string().trim().min(1).optional(),
+      productId: z.string().trim().min(1).optional(),
       ticketNumber: z.number().int().positive().optional(),
       title: z.string().min(1).max(300).optional(),
       body: z.string().optional(),
@@ -4515,14 +4517,35 @@ export const mastraRouter = createTRPCRouter({
         ...fields
       } = input;
 
-      const found = ticketId
-        ? await ctx.db.ticket.findUnique({ where: { id: ticketId }, select: { id: true, productId: true } })
-        : await ctx.db.ticket.findFirst({
-            where: { productId: productId!, number: ticketNumber! },
-            select: { id: true, productId: true },
-          });
-      if (!found) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
+      // One answer for "doesn't exist" and "exists where you can't see it",
+      // so this can't be used to probe tickets in other workspaces. Someone
+      // who can see the product but not edit it gets FORBIDDEN below instead.
+      const ticketNotFound = () => new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
+      const canSeeProduct = async (id: string): Promise<boolean> => {
+        try {
+          await loadProductWithAccess(ctx.db, userId, id, "view");
+          return true;
+        } catch (error) {
+          if (error instanceof TRPCError && (error.code === "FORBIDDEN" || error.code === "NOT_FOUND")) {
+            return false;
+          }
+          throw error;
+        }
+      };
+
+      let found: { id: string; productId: string } | null;
+      if (ticketId !== undefined) {
+        found = await ctx.db.ticket.findUnique({ where: { id: ticketId }, select: { id: true, productId: true } });
+        if (!found || !(await canSeeProduct(found.productId))) throw ticketNotFound();
+      } else {
+        // The refinement guarantees both are set on this branch.
+        if (productId === undefined || ticketNumber === undefined) throw ticketNotFound();
+        if (!(await canSeeProduct(productId))) throw ticketNotFound();
+        found = await ctx.db.ticket.findFirst({
+          where: { productId, number: ticketNumber },
+          select: { id: true, productId: true },
+        });
+        if (!found) throw ticketNotFound();
       }
 
       console.log(`🎫 [tRPC updateTicket] RECEIVED: ticketId=${found.id}, fields=${Object.keys(fields).join(",") || "none"}, labels=${setLabels ? "set" : ""}${addLabels ? "+add" : ""}${removeLabels ? "+remove" : ""}, userId=${userId}`);
