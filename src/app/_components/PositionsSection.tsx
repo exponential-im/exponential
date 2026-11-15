@@ -24,6 +24,7 @@ import { api } from "~/trpc/react";
 import { SettingsSection } from "~/app/_components/settings/SettingsShell";
 import { MarkdownInput } from "~/app/_components/shared/MarkdownInput";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { Pill } from "~/app/_components/ui";
 
 /** A workspace member as `workspace.getBySlug` returns it — humans and agents alike. */
 export interface PositionsSectionMember {
@@ -91,6 +92,9 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
   const [editing, setEditing] = useState<PositionRow | null>(null);
 
   const positions = data?.positions ?? [];
+  // Vacancy is presentation, not a column (Agent PRD D9): a Position with no
+  // holders — often because its only holder's person left the workspace.
+  const vacantCount = positions.filter((position) => position.holders.length === 0).length;
   // A holder edits the Remit only from `member` up (ADR-0068 §4); a viewer is
   // read-only even as a holder, so do not offer an edit the server refuses.
   const holderMayEdit = userRole === "owner" || userRole === "admin" || userRole === "member";
@@ -197,7 +201,7 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
       <SettingsSection
         icon={IconBriefcase}
         title="Positions"
-        count={positions.length}
+        count={vacantCount > 0 ? `${positions.length} · ${vacantCount} vacant` : positions.length}
         description="Who does what here. Zoe routes new work to whoever holds the matching Position; a Position never changes what a member may do."
         action={
           canManage && (
@@ -278,7 +282,13 @@ export function PositionsSection({ workspaceId, canManage, members }: PositionsS
                     </div>
                     <Group gap={4} wrap="nowrap" className="shrink-0">
                       {position.holders.length === 0 ? (
-                        <Text size="xs" className="text-text-muted">Vacant</Text>
+                        <Tooltip label="Nobody holds this Position, so Zoe has no one to route its work to.">
+                          <span className="inline-flex">
+                            <Pill tone="warning" size="xs" data-testid="position-vacant">
+                              Vacant
+                            </Pill>
+                          </span>
+                        </Tooltip>
                       ) : (
                         <Avatar.Group spacing="xs">
                           {position.holders.map((holder) => (
