@@ -13,6 +13,7 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { priceTokenBreakdown, toCostMicros, turnTokenBreakdown } from "~/server/services/ai/cost";
+import { findPersonalWorkspaceId } from "~/server/services/assistant/personalWorkspace";
 import { isMeteringOn, resolveBillingMode, type BillingEnv } from "./config";
 
 export const USAGE_SOURCES = ["CHAT", "AGENT_RUN", "VOICE", "DIRECT"] as const;
@@ -164,6 +165,34 @@ function reportUnpricedModel(turn: TurnUsage): void {
       }),
     )
     .catch(() => undefined);
+}
+
+/**
+ * The workspace an Assistant turn is metered to: the one it ran in, or, for a
+ * turn with no workspace (the global chat drawer, `/agent`, a direct call),
+ * the person's Personal workspace, which every onboarded person has.
+ *
+ * `workspaceId` must already be verified as one the person belongs to; never
+ * pass a value straight from a request body. Null on an install that does
+ * not meter (without touching the database), and for a person with no
+ * Personal workspace yet.
+ */
+export async function resolveMeteredWorkspaceId(
+  db: Parameters<typeof findPersonalWorkspaceId>[0],
+  turn: { workspaceId?: string | null; userId: string },
+  options: Pick<MeteringOptions, "env"> = {},
+): Promise<string | null> {
+  if (!isMeteringOn(resolveBillingMode(options.env ?? process.env))) return null;
+  if (turn.workspaceId) return turn.workspaceId;
+  try {
+    return await findPersonalWorkspaceId(db, turn.userId);
+  } catch (error) {
+    console.error("[billing] Could not resolve the Personal workspace to meter to", {
+      userId: turn.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 /** The workspace's hosted-key spend so far in the calendar month containing `now`. */

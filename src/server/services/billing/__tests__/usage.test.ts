@@ -18,6 +18,7 @@ import {
   getPeriodUsage,
   recordTurnUsage,
   recordUsage,
+  resolveMeteredWorkspaceId,
   usagePeriodEnd,
   usagePeriodStart,
   type UsageDb,
@@ -310,5 +311,53 @@ describe("recordTurnUsage", () => {
       area: "billing-metering",
       context: { modelId: "some-new-model", source: "AGENT_RUN" },
     });
+  });
+});
+
+describe("which workspace a turn is metered to", () => {
+  /** A database holding (or not) the person's Personal workspace. */
+  function withPersonalWorkspace(id: string | null) {
+    const findFirst = vi.fn(async () => (id ? { id } : null));
+    return { db: { workspace: { findFirst } } as never, findFirst };
+  }
+
+  it("is the workspace the turn ran in", async () => {
+    const { db, findFirst } = withPersonalWorkspace("personal-1");
+
+    const workspaceId = await resolveMeteredWorkspaceId(db, { workspaceId: "ws-team", userId: "user-1" }, { env: METER });
+
+    expect(workspaceId).toBe("ws-team");
+    expect(findFirst).not.toHaveBeenCalled();
+  });
+
+  it("is the person's Personal workspace when the turn has none", async () => {
+    const { db, findFirst } = withPersonalWorkspace("personal-1");
+
+    const workspaceId = await resolveMeteredWorkspaceId(db, { workspaceId: null, userId: "user-1" }, { env: METER });
+
+    expect(workspaceId).toBe("personal-1");
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { type: "personal", ownerId: "user-1" } }),
+    );
+  });
+
+  it("is nowhere for a person with no Personal workspace yet", async () => {
+    const { db } = withPersonalWorkspace(null);
+
+    expect(await resolveMeteredWorkspaceId(db, { userId: "user-1" }, { env: METER })).toBeNull();
+  });
+
+  it("is nowhere, without a lookup, on an install that does not meter", async () => {
+    const { db, findFirst } = withPersonalWorkspace("personal-1");
+
+    expect(await resolveMeteredWorkspaceId(db, { workspaceId: "ws-team", userId: "user-1" }, { env: OFF })).toBeNull();
+    expect(await resolveMeteredWorkspaceId(db, { userId: "user-1" }, { env: OFF })).toBeNull();
+    expect(findFirst).not.toHaveBeenCalled();
+  });
+
+  it("is nowhere, rather than an error, when the lookup fails", async () => {
+    const db = { workspace: { findFirst: vi.fn().mockRejectedValue(new Error("connection lost")) } } as never;
+
+    expect(await resolveMeteredWorkspaceId(db, { userId: "user-1" }, { env: METER })).toBeNull();
   });
 });

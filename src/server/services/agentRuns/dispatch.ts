@@ -4,6 +4,7 @@ import { generateJWT } from "~/server/utils/jwt";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { assembleLoadedScope, loadScopeInstructions } from "~/server/services/agentGuidance";
+import { readGenerateUsage } from "~/server/services/billing/mastraUsage";
 import { recordTurnUsage } from "~/server/services/billing/usage";
 import { onRunFinished } from "./finish";
 
@@ -47,17 +48,9 @@ const RUN_AGENT_FALLBACK_MODEL_ID = "claude-sonnet-4-5";
 /** What the Mastra `generate` endpoint returns that we read (defensively). */
 interface GenerateOutput {
   text?: string;
-  steps?: Array<{ toolCalls?: unknown[]; usage?: unknown; response?: { modelId?: unknown } }>;
+  steps?: Array<{ toolCalls?: unknown[] }>;
   toolCalls?: unknown[];
   usage?: unknown;
-  response?: { modelId?: unknown };
-}
-
-/** The model that answered, as Mastra reports it on the result or its last step. */
-export function runModelId(output: GenerateOutput): string {
-  const steps = Array.isArray(output.steps) ? output.steps : [];
-  const reported = output.response?.modelId ?? steps[steps.length - 1]?.response?.modelId;
-  return typeof reported === "string" && reported.length > 0 ? reported : RUN_AGENT_FALLBACK_MODEL_ID;
 }
 
 /** Pick up to `BATCH_SIZE` QUEUED MASTRA runs and execute each, oldest first. */
@@ -355,12 +348,13 @@ async function runOne(
   // `AgentRun` has no workspace of its own: it is the action's (as finish.ts).
   const meteredWorkspaceId = run.action.workspaceId ?? run.action.project?.workspaceId;
   if (meteredWorkspaceId) {
+    const used = readGenerateUsage(output);
     await recordTurnUsage(db, {
       workspaceId: meteredWorkspaceId,
       source: "AGENT_RUN",
-      modelId: runModelId(output),
-      turnUsage: output.usage,
-      stepUsages: Array.isArray(output.steps) ? output.steps.map((step) => step.usage) : [],
+      modelId: used.modelId ?? RUN_AGENT_FALLBACK_MODEL_ID,
+      turnUsage: used.turnUsage,
+      stepUsages: used.stepUsages,
       refId: run.id,
     });
   }
