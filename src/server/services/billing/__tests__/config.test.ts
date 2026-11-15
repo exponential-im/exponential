@@ -1,7 +1,8 @@
 /**
  * `BILLING_MODE` is the one switch that turns metering and limits on. A
  * self-hosted install sets nothing and must resolve to "off"; a typo must
- * never switch limits on.
+ * never switch limits on. The accepted values are the same three exact words
+ * `src/env.js` validates, so the two never disagree about what is valid.
  */
 
 import { describe, expect, it } from "vitest";
@@ -13,14 +14,18 @@ describe("resolveBillingMode", () => {
     expect(resolveBillingMode({ BILLING_MODE: "" })).toBe("off");
   });
 
-  it("reads meter and enforce, ignoring case and surrounding spaces", () => {
+  it("reads the three modes", () => {
+    expect(resolveBillingMode({ BILLING_MODE: "off" })).toBe("off");
     expect(resolveBillingMode({ BILLING_MODE: "meter" })).toBe("meter");
-    expect(resolveBillingMode({ BILLING_MODE: " Enforce " })).toBe("enforce");
+    expect(resolveBillingMode({ BILLING_MODE: "enforce" })).toBe("enforce");
   });
 
-  it("treats a value it does not know as off, never as a limit", () => {
+  it("treats anything else as off, never as a limit", () => {
     expect(resolveBillingMode({ BILLING_MODE: "enforced" })).toBe("off");
     expect(resolveBillingMode({ BILLING_MODE: "true" })).toBe("off");
+    // The same strictness as env validation: no case or whitespace tolerance.
+    expect(resolveBillingMode({ BILLING_MODE: "Enforce" })).toBe("off");
+    expect(resolveBillingMode({ BILLING_MODE: " meter" })).toBe("off");
   });
 });
 

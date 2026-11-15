@@ -60,6 +60,9 @@ export const env = createEnv({
     // Whether this install meters and limits Assistant use
     // (src/server/services/billing/config.ts). Unset means "off": no usage
     // ledger, no Billing tab, no limits, which is how a self-hosted install runs.
+    // Strict on purpose: a misspelt value should fail the deploy, not quietly
+    // leave metering off. The resolver accepts the same three words and
+    // nothing else, for the builds that skip this validation.
     BILLING_MODE: z.enum(["off", "meter", "enforce"]).optional(),
     MICROSOFT_ENTRA_ID_CLIENT_ID: z.string().optional(),
     MICROSOFT_ENTRA_ID_CLIENT_SECRET: z.string().optional(),

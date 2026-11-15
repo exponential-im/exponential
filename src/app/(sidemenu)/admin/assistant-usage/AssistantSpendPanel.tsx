@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Select, SimpleGrid, Skeleton, Table, Text, Title } from "@mantine/core";
 import { api } from "~/trpc/react";
 import { Panel } from "~/app/_components/ui";
@@ -19,11 +19,7 @@ function monthKey(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-/**
- * This month and the five before it, newest first. The locale is fixed: these
- * labels are rendered on the server too, and the server's default locale is
- * not the browser's, which would make the two renders disagree.
- */
+/** This month and the five before it, newest first. */
 function recentMonths(now: Date): Array<{ value: string; label: string }> {
   return Array.from({ length: MONTHS_LISTED }, (_, back) => {
     const month = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - back, 1));
@@ -65,8 +61,13 @@ function Stat({ title, value, detail }: { title: string; value: string; detail?:
  * allowance and reconciling the ledger against the provider's invoice.
  */
 export function AssistantSpendPanel() {
-  const months = useMemo(() => recentMonths(new Date()), []);
-  const [month, setMonth] = useState(months[0]!.value);
+  // The month list depends on the clock, so it is built after mount: the
+  // server render and the browser's first render then always agree (they
+  // could differ either side of a month boundary). Until a month is picked,
+  // the query asks for the current month, which the server works out.
+  const [months, setMonths] = useState<Array<{ value: string; label: string }>>([]);
+  const [month, setMonth] = useState<string>();
+  useEffect(() => setMonths(recentMonths(new Date())), []);
   const { data, isLoading } = api.admin.getAssistantSpend.useQuery({ month });
 
   if (data?.mode === "off") {
@@ -99,7 +100,7 @@ export function AssistantSpendPanel() {
         <Select
           aria-label="Month"
           data={months}
-          value={month}
+          value={month ?? months[0]?.value ?? null}
           onChange={(value) => value && setMonth(value)}
           allowDeselect={false}
           w={200}

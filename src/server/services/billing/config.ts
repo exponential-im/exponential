@@ -10,8 +10,12 @@
  *     Nothing is ever blocked or downgraded.
  *   - `enforce`: the allowance is applied (the launch-day setting).
  *
- * An unset, empty or misspelt value resolves to `off`, so a typo can never
- * switch limits on.
+ * The value must be one of those three words exactly. Where env validation
+ * runs (`src/env.js`: the Vercel build, `next dev`), anything else stops the
+ * app from starting, so a typo fails the deploy instead of quietly leaving
+ * metering off. Where it is skipped (`SKIP_ENV_VALIDATION`, as in tests and
+ * some builds), an unset, empty or unrecognised value resolves to `off` here.
+ * Either way a typo can never switch limits on.
  *
  * Pure, and imports nothing, so client components can import its types. Same
  * shape as `src/server/services/ai/capabilities.ts`.
@@ -25,8 +29,7 @@ export type BillingMode = (typeof BILLING_MODES)[number];
 export type BillingEnv = Partial<Record<string, string | undefined>>;
 
 export function resolveBillingMode(env: BillingEnv): BillingMode {
-  const raw = env.BILLING_MODE?.trim().toLowerCase();
-  return BILLING_MODES.find((mode) => mode === raw) ?? "off";
+  return BILLING_MODES.find((mode) => mode === env.BILLING_MODE) ?? "off";
 }
 
 /** True when usage is recorded (`meter` and `enforce`). */
