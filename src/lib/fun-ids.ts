@@ -218,6 +218,9 @@ export interface TicketIdQuery {
  * are all tolerated; word order is too, because people remember the two words
  * of a fun id but not which came first.
  */
+/** The largest value `Ticket.number` (a Postgres `integer`) can hold. */
+export const MAX_TICKET_NUMBER = 2_147_483_647;
+
 export function parseTicketIdQuery(query: string): TicketIdQuery {
   const q = query.trim().toLowerCase().replace(/^#/, "").trim();
   const result: TicketIdQuery = { shortIds: [], number: null, linearPrefix: null };
@@ -226,7 +229,10 @@ export function parseTicketIdQuery(query: string): TicketIdQuery {
   const numberMatch = /^(?:([a-z][a-z0-9]*)-)?(\d+)$/.exec(q);
   if (numberMatch) {
     const parsed = parseInt(numberMatch[2]!, 10);
-    if (parsed > 0) {
+    // `Ticket.number` is a 32-bit Int: a larger number can't name a ticket,
+    // and passing it to Prisma would throw and fail the whole search. Leave it
+    // as plain text.
+    if (parsed > 0 && parsed <= MAX_TICKET_NUMBER) {
       result.number = parsed;
       result.linearPrefix = numberMatch[1]?.toUpperCase() ?? null;
     }

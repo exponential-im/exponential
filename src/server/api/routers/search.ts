@@ -249,7 +249,7 @@ async function searchTickets({ db, userId, q, workspaceId, limit }: SearchArgs):
   const tickets = await searchTicketsIdFirst({
     query: q,
     limit,
-    find: (match, take) =>
+    find: (match, take, skip = 0) =>
       db.ticket.findMany({
         where: { AND: [accessWhere, match] },
         select: {
@@ -268,6 +268,7 @@ async function searchTickets({ db, userId, q, workspaceId, limit }: SearchArgs):
         },
         orderBy: { updatedAt: "desc" },
         take,
+        ...(skip > 0 ? { skip } : {}),
       }),
     productName: (t) => t.product.name,
   });

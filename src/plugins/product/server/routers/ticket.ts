@@ -1277,11 +1277,12 @@ export const ticketRouter = createTRPCRouter({
         productId: input.productId,
         ...(input.excludeTicketId ? { id: { not: input.excludeTicketId } } : {}),
       };
-      const find = (match: Prisma.TicketWhereInput, take: number) =>
+      const find = (match: Prisma.TicketWhereInput, take: number, skip = 0) =>
         ctx.db.ticket.findMany({
           where: { AND: [scope, match] },
           orderBy: [{ updatedAt: "desc" }],
           take,
+          ...(skip > 0 ? { skip } : {}),
           select: DEP_TICKET_SELECT,
         });
 

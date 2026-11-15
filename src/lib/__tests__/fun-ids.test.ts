@@ -112,6 +112,13 @@ describe("ticketUrlId", () => {
 });
 
 describe("parseTicketIdQuery", () => {
+  it("only reads a number that fits Ticket.number (a 32-bit Int) as a ticket number", () => {
+    expect(parseTicketIdQuery("2147483647").number).toBe(2147483647);
+    expect(parseTicketIdQuery("2147483648").number).toBeNull();
+    expect(parseTicketIdQuery("E-99999999999").number).toBeNull();
+    expect(parseTicketIdQuery("#2147483648").number).toBeNull();
+  });
+
   it("reads an exact fun shortId in both word orders", () => {
     expect(parseTicketIdQuery("snappy.thunder")).toEqual({
       shortIds: ["snappy.thunder", "thunder.snappy"],

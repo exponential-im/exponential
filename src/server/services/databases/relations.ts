@@ -499,11 +499,12 @@ export async function searchRelationTargets(
       }));
     }
     case "TICKET": {
-      const find = (match: Prisma.TicketWhereInput, take: number) =>
+      const find = (match: Prisma.TicketWhereInput, take: number, skip = 0) =>
         db.ticket.findMany({
           where: { product: { workspaceId }, ...match },
           orderBy: { updatedAt: "desc" },
           take,
+          ...(skip > 0 ? { skip } : {}),
           select: {
             id: true,
             title: true,

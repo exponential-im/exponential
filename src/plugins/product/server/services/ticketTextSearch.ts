@@ -34,9 +34,10 @@ export interface TicketTextSearchOptions<T extends IdentifiableTicket> {
   limit: number;
   /**
    * Run one `ticket.findMany` with `match` AND-ed into the caller's own access
-   * scope, taking at most `take` rows.
+   * scope, taking at most `take` rows after skipping `skip` (default 0), in a
+   * stable order (most recently updated first).
    */
-  find: (match: Prisma.TicketWhereInput, take: number) => Promise<T[]>;
+  find: (match: Prisma.TicketWhereInput, take: number, skip?: number) => Promise<T[]>;
   /**
    * The ticket's product name, needed only to honour a Linear-style prefix
    * (`EXP-42`). Without it, prefixed queries match no ticket exactly.
@@ -45,10 +46,15 @@ export interface TicketTextSearchOptions<T extends IdentifiableTicket> {
 }
 
 /**
- * How many number matches to fetch before the Linear-prefix filter runs: a
- * cross-product search for `EXP-42` sees ticket 42 of every product first.
+ * A cross-product search for `EXP-42` matches ticket 42 of every product the
+ * caller can see, and only the product prefix tells them apart, which the
+ * database can't filter on. So number matches are fetched a page at a time
+ * and prefix-filtered, until enough exact matches are found or the candidates
+ * run out, rather than one page cut off before the right product's ticket.
  */
-const PREFIXED_ID_FETCH = 50;
+const PREFIXED_ID_PAGE = 50;
+/** Upper bound on pages for one prefixed query (1,000 candidates). */
+const PREFIXED_ID_MAX_PAGES = 20;
 
 export async function searchTicketsIdFirst<T extends IdentifiableTicket>({
   query,
@@ -69,14 +75,22 @@ export async function searchTicketsIdFirst<T extends IdentifiableTicket>({
     ],
   };
 
-  const [idRows, textRows] = await Promise.all([
-    idClauses.length > 0
-      ? find({ OR: idClauses }, idQuery.linearPrefix ? PREFIXED_ID_FETCH : limit)
-      : Promise.resolve([] as T[]),
-    find(textMatch, limit),
-  ]);
+  const isExact = (t: T) => isTicketIdMatch(t, idQuery, productName?.(t));
 
-  const exact = idRows.filter((t) => isTicketIdMatch(t, idQuery, productName?.(t)));
+  const findExact = async (): Promise<T[]> => {
+    if (idClauses.length === 0) return [];
+    const idMatch: Prisma.TicketWhereInput = { OR: idClauses };
+    if (!idQuery.linearPrefix) return (await find(idMatch, limit)).filter(isExact);
+    const found: T[] = [];
+    for (let page = 0; page < PREFIXED_ID_MAX_PAGES && found.length < limit; page++) {
+      const rows = await find(idMatch, PREFIXED_ID_PAGE, page * PREFIXED_ID_PAGE);
+      found.push(...rows.filter(isExact));
+      if (rows.length < PREFIXED_ID_PAGE) break;
+    }
+    return found;
+  };
+
+  const [exact, textRows] = await Promise.all([findExact(), find(textMatch, limit)]);
   const seen = new Set(exact.map((t) => t.id));
   return [...exact, ...textRows.filter((t) => !seen.has(t.id))].slice(0, limit);
 }

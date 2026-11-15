@@ -35,8 +35,8 @@ function matches(row: Row, where: Prisma.TicketWhereInput): boolean {
 }
 
 function fakeFind(rows: Row[]) {
-  return vi.fn((match: Prisma.TicketWhereInput, take: number) =>
-    Promise.resolve(rows.filter((r) => matches(r, match)).slice(0, take)),
+  return vi.fn((match: Prisma.TicketWhereInput, take: number, skip = 0) =>
+    Promise.resolve(rows.filter((r) => matches(r, match)).slice(skip, skip + take)),
   );
 }
 
@@ -91,6 +91,41 @@ describe("searchTicketsIdFirst", () => {
       productName: (t) => t.product,
     });
     expect(res.map((t) => t.id)).toEqual(["other42"]);
+  });
+
+  it("finds a prefixed id behind more than a page of other products' same-numbered tickets", async () => {
+    // 120 other products ("Other Product" -> OP) each have a ticket 42, all
+    // more recently updated than Exponential's (E). One page of 50 would end
+    // before it; the search keeps paging until the prefix matches.
+    const crowded = [
+      ...Array.from({ length: 120 }, (_, i) => row(`op${i}`, `Other ${i}`, null, 42, "Other Product")),
+      row("e42", "Ours", null, 42, "Exponential"),
+    ];
+    const find = fakeFind(crowded);
+    const res = await searchTicketsIdFirst({ query: "E-42", limit: 5, find, productName: (t) => t.product });
+    expect(res[0]?.id).toBe("e42");
+  });
+
+  it("stops paging on a short page, and never pages past the cap", async () => {
+    const few = [row("a", "A", null, 7, "Other Product"), row("b", "B", null, 7, "Other Product")];
+    const findFew = fakeFind(few);
+    await searchTicketsIdFirst({ query: "E-7", limit: 5, find: findFew, productName: (t) => t.product });
+    // One id page (short, so it stops) plus the text query.
+    expect(findFew).toHaveBeenCalledTimes(2);
+
+    const many = Array.from({ length: 5000 }, (_, i) => row(`m${i}`, `M ${i}`, null, 7, "Other Product"));
+    const findMany = fakeFind(many);
+    await searchTicketsIdFirst({ query: "E-7", limit: 5, find: findMany, productName: (t) => t.product });
+    // 20 id pages at most, plus the text query.
+    expect(findMany).toHaveBeenCalledTimes(21);
+  });
+
+  it("treats a number too big for Ticket.number as text, so the search still answers", async () => {
+    const find = fakeFind(rows);
+    const res = await searchTicketsIdFirst({ query: "E-2147483648", limit: 5, find, productName: (t) => t.product });
+    // No exact-id query ran (it would overflow the Int column); only the text query.
+    expect(find).toHaveBeenCalledTimes(1);
+    expect(res).toEqual([]);
   });
 
   it("does not list the named ticket twice", async () => {
