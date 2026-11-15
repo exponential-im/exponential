@@ -49,8 +49,12 @@ export function HandleField({ handle }: HandleFieldProps) {
       });
     },
     onError: (error) => {
+      // A refusal always carries its own wording; an empty message is some
+      // other failure, which gets the general one.
       const message =
-        error.message || 'Could not save your handle. Please try again.';
+        error.message.length > 0
+          ? error.message
+          : 'Could not save your handle. Please try again.';
       // Saving shows the refusal under the field; removing has no field open.
       if (isEditing) setServerError(message);
       else notifications.show({ title: 'Error', message, color: 'red' });
