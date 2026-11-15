@@ -13,6 +13,10 @@
  * workspace, and a fast-tier attempt that came back empty and was retried on
  * the full model is metered too (both attempts were paid for).
  *
+ * And the workspace's own Anthropic key (bring-your-own-key): the Billing tab
+ * offers the form, and shows a saved key by its last four characters only.
+ * Saving one calls Anthropic, so that path is covered by unit tests, not here.
+ *
  * The stub port is shared with agent-run.spec.ts; both run in the
  * `chromium-mastra-stub` project, one file at a time.
  *
@@ -74,6 +78,7 @@ async function clearLedger() {
   const where = { workspaceId: { in: [workspaceId, personalWorkspaceId] } };
   await db.usageEvent.deleteMany({ where });
   await db.workspaceUsagePeriod.deleteMany({ where });
+  await db.integration.deleteMany({ where: { workspaceId, type: "model_key" } });
 }
 
 const ledgerEvents = (inWorkspaceId: string) =>
@@ -237,3 +242,32 @@ test("a fast-tier attempt that came back empty is metered as well as its retry",
   const period = await db.workspaceUsagePeriod.findFirst({ where: { workspaceId }, select: { costMicros: true } });
   expect(Number(period?.costMicros)).toBe(HAIKU_COST_MICROS + SONNET_COST_MICROS);
 });
+
+test("the Billing tab offers the key form and shows a saved key by its last four characters", async ({ page }) => {
+  await page.goto(billingUrl);
+  await expect(page.getByText("Your own Anthropic key")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+  await expect(page.getByLabel("Anthropic API key")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Check and save" })).toBeDisabled();
+
+  // A key saved earlier: only what the server may show again is stored in the clear.
+  await db.integration.create({
+    data: {
+      name: "Anthropic API key",
+      type: "model_key",
+      provider: "anthropic",
+      workspaceId,
+      providerConfig: { last4: "7Q4x", status: "valid", checkedAt: new Date().toISOString() },
+      credentials: { create: { key: "ciphertext-the-page-never-reads", keyType: "API_KEY", isEncrypted: true } },
+    },
+  });
+
+  await page.reload();
+  await expect(page.getByText("Ends in 7Q4x")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+  await expect(page.getByText("Working", { exact: true })).toBeVisible();
+  // The form is put away until the owner asks to replace the key.
+  await expect(page.getByLabel("Anthropic API key")).toHaveCount(0);
+  await page.getByRole("button", { name: "Replace" }).click();
+  await expect(page.getByLabel("Anthropic API key")).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath("billing-model-key.png") });
+});
+

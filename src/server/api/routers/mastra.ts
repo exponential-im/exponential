@@ -16,6 +16,9 @@ import { isAiConfigured, requireAi, requireMastraUrl } from "~/server/services/a
 import { priceTokenBreakdown, turnTokenBreakdown } from "~/server/services/ai/cost";
 import { readGenerateUsage } from "~/server/services/billing/mastraUsage";
 import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
+import { isMeteringOn, resolveBillingMode } from "~/server/services/billing/config";
+import { getWorkingModelKey } from "~/server/services/billing/modelKey";
+import { isMastraServerRequest } from "~/server/utils/mastraServerAuth";
 import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { TRPCError } from "@trpc/server";
 // import { mastraClient } from "~/lib/mastra";
@@ -711,6 +714,38 @@ export const mastraRouter = createTRPCRouter({
         const { text: safeText } = sanitizeAIOutput(text);
         return { response: safeText, agentName: agentId };
       }
+    }),
+
+  /**
+   * The workspace's own Anthropic API key, for the Mastra server and nobody
+   * else (bring-your-own-key). Mastra asks once per workspace and caches the
+   * answer briefly; the key never travels in a request context.
+   *
+   * Two checks, both required:
+   *  - the caller is the Mastra server: it presents `MASTRA_SERVER_API_KEY`
+   *    on the `x-mastra-server-key` header. The agent JWT alone is not enough,
+   *    since that token is also handed to the agent's tools.
+   *  - the user the JWT is for belongs to the workspace, so a workspace id
+   *    forwarded from an unsigned request context cannot fetch another
+   *    workspace's key.
+   *
+   * Answers `{ key: null }` when the workspace has no working key, when the
+   * user is not a member, and on an install that does not meter: Mastra then
+   * uses the hosted key, and the answer does not reveal which case it was.
+   * A mutation so that it is POST-only and never cached.
+   */
+  getModelKey: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (!isMastraServerRequest(ctx.headers)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the Mastra server may read a model key" });
+      }
+      if (!isMeteringOn(resolveBillingMode(process.env))) return { key: null };
+
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!membership) return { key: null };
+
+      return { key: await getWorkingModelKey(ctx.db, input.workspaceId) };
     }),
 
   // API Key Generation for Mastra Agents and Webhooks (32 characters)
