@@ -12,8 +12,8 @@ import { PRODUCT_NAME } from "~/lib/brand";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 import {
   COMPARISON,
-  DESIGN_PARTNER_EMAIL,
-  DESIGN_PARTNER_HREF,
+  SUPPORT_EMAIL,
+  ENTERPRISE_CONTACT_HREF,
   FAQ,
   PLANS,
   PRICING_RULES,
@@ -94,7 +94,7 @@ export default async function PricingPage() {
                 SSO, an audit log, a private managed deployment or help moving
                 off Jira or Linear: tell us what your company needs.
               </p>
-              <CTAButton href={DESIGN_PARTNER_HREF} variant="text" className="shrink-0">
+              <CTAButton href={ENTERPRISE_CONTACT_HREF} variant="text" className="shrink-0">
                 Talk to us
               </CTAButton>
             </Panel>
@@ -166,8 +166,8 @@ export default async function PricingPage() {
                 <h2 className="mkt-h2 mb-4">Questions</h2>
                 <p className="mkt-body">
                   Anything else? Email{" "}
-                  <a href={`mailto:${DESIGN_PARTNER_EMAIL}`} className="mkt-link">
-                    {DESIGN_PARTNER_EMAIL}
+                  <a href={`mailto:${SUPPORT_EMAIL}`} className="mkt-link">
+                    {SUPPORT_EMAIL}
                   </a>
                   .
                 </p>
