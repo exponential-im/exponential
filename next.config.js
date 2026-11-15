@@ -95,8 +95,12 @@ const config = {
   // The sitemap renders per request and reads the Markdown under content/ at
   // runtime. Tracing missed content/learn, so production served a sitemap
   // without a single /learn article. Ship all of content/ with the route.
+  // Keys are matched against the entry's normalised path, which is
+  // /app/sitemap.xml or /app/sitemap depending on how Next names the metadata
+  // route; "/sitemap*" matches both (and no other route), so the include
+  // cannot silently miss.
   outputFileTracingIncludes: {
-    "/sitemap.xml": ["./content/**/*"],
+    "/sitemap*": ["./content/**/*"],
   },
   turbopack: {
     resolveAlias: {
