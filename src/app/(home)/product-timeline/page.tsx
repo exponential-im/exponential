@@ -1,5 +1,6 @@
 import { type Metadata } from "next";
 import { ProductTimelineClient } from "./ProductTimelineClient";
+import { FooterSection, MarketingHeader } from "~/app/_components/home";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 
@@ -19,5 +20,15 @@ export default function ProductTimelinePage() {
   // retried. That renders as a silent empty timeline that no error state can
   // catch, because from the client's point of view nothing failed. Letting the
   // client own the fetch costs one round trip and makes failure observable.
-  return <ProductTimelineClient />;
+  return (
+    <div className="mkt min-h-screen bg-background-primary text-text-primary">
+      <MarketingHeader mobileNav />
+
+      <main className="py-8 md:py-12">
+        <ProductTimelineClient />
+      </main>
+
+      <FooterSection />
+    </div>
+  );
 }
