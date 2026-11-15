@@ -6,6 +6,8 @@ import { blankToNull } from "~/server/utils/blankToNull";
 import type { PrismaClient } from "@prisma/client";
 import { findGatewayAssistant } from "~/server/services/assistant/gatewayAssistant";
 import { ensureAssistantForUser } from "~/server/services/assistant/ensureAssistant";
+import { findPersonalWorkspaceId } from "~/server/services/assistant/personalWorkspace";
+import { canDelegateFromRole } from "~/lib/agentDelegation";
 import { activeAssistantQuery, resolveAssistantForUser } from "~/server/services/assistant/resolveAssistant";
 import { renameAssistantPrincipal } from "~/server/services/assistant/principal";
 import { retireAssistant } from "~/server/services/assistant/retire";
@@ -78,23 +80,23 @@ export const assistantRouter = createTRPCRouter({
    * Personalise the calling user's Assistant for the first time — the
    * "persona save" first need (ADR-0072). A person has at most one Assistant,
    * so this refuses when they already have one: edit it with `update`.
+   *
+   * No workspace: the Assistant is the person's, not a workspace's. Its row
+   * and its first membership go in their Personal workspace, where an
+   * Assistant is always a member; any other workspace it joins only when they
+   * add it.
    */
   create: humanOnlyProcedure
     .input(
       z.object({
-        workspaceId: z.string(),
         name: z.string().min(1).max(50),
         emoji: z.string().max(10).optional(),
         personality: z.string().min(1).max(10000),
         instructions: z.string().max(10000).optional(),
         userContext: z.string().max(5000).optional(),
-        /** Ignored: a person's only Assistant is always their default (ADR-0072). */
-        isDefault: z.boolean().optional().default(false),
       })
     )
-    .use(requireWorkspaceMembership("edit"))
     .mutation(async ({ input, ctx }) => {
-      const { workspaceId, isDefault: _isDefault, ...persona } = input;
       const userId = ctx.session.user.id;
 
       const existing = await resolveAssistantForUser(ctx.db, userId);
@@ -105,13 +107,26 @@ export const assistantRouter = createTRPCRouter({
         });
       }
 
+      const personalWorkspaceId = await findPersonalWorkspaceId(ctx.db, userId);
+      if (!personalWorkspaceId) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Your Personal workspace isn't set up yet. Open any workspace, then try again.",
+        });
+      }
+      // Delegation invariant (ADR-0049): the membership row only where the
+      // person holds a delegating role — in their own Personal workspace,
+      // always, but the allowlist is the rule, not the assumption.
+      const membership = await ctx.db.workspaceUser.findUnique({
+        where: { userId_workspaceId: { userId, workspaceId: personalWorkspaceId } },
+        select: { role: true },
+      });
+
       // An Assistant is a principal (ADR-0067), created in one transaction.
-      // `requireWorkspaceMembership("edit")` above already guarantees the
-      // owner is a non-viewer member, which is the delegation-invariant
-      // precondition for the membership row.
       const { assistant } = await ensureAssistantForUser(ctx.db, userId, {
-        workspaceId,
-        ...persona,
+        workspaceId: personalWorkspaceId,
+        grantMembership: canDelegateFromRole(membership?.role),
+        ...input,
       });
       return assistant;
     }),

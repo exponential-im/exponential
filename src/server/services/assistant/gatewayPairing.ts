@@ -1,4 +1,5 @@
 import type { PrismaClient } from "@prisma/client";
+import { findPersonalWorkspaceId } from "./personalWorkspace";
 import { resolveAssistantForUser } from "./resolveAssistant";
 
 /**
@@ -33,11 +34,8 @@ async function resolvePairingWorkspace(db: PrismaClient, userId: string): Promis
   });
   if (user?.defaultWorkspaceId) return user.defaultWorkspaceId;
 
-  const personal = await db.workspace.findFirst({
-    where: { type: "personal", ownerId: userId },
-    select: { id: true },
-  });
-  if (personal) return personal.id;
+  const personalId = await findPersonalWorkspaceId(db, userId);
+  if (personalId) return personalId;
 
   const membership = await db.workspaceUser.findFirst({
     where: { userId },

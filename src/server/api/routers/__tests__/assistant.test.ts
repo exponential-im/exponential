@@ -273,10 +273,8 @@ describe("assistant router — per-user default scoping", () => {
 
     await expect(
       caller.assistant.create({
-        workspaceId: WORKSPACE_ID,
         name: "Aria",
         personality: "Warm, direct.",
-        isDefault: true,
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
 
