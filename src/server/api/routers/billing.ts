@@ -43,10 +43,8 @@ export const billingRouter = createTRPCRouter({
 
       await assertWorkspaceRole(ctx.db, ctx.session.user.id, input.workspaceId, ["owner", "admin"]);
       const now = new Date();
-      const [entitlements, modelKey] = await Promise.all([
-        getEntitlements(ctx.db, input.workspaceId, { now }),
-        getModelKeyStatus(ctx.db, input.workspaceId),
-      ]);
+      const modelKey = await getModelKeyStatus(ctx.db, input.workspaceId);
+      const entitlements = await getEntitlements(ctx.db, input.workspaceId, { now, modelKey });
       return {
         mode,
         /** Whole percent of the month's allowance used; above 100 once it is passed. */

@@ -65,6 +65,8 @@ const SONNET_COST_MICROS = 1_080_000;
 const EXPECTED_PERCENT = Math.round((HAIKU_COST_MICROS / FREE_ALLOWANCE_MICROS) * 100);
 
 const sse = (chunk: unknown) => `data: ${JSON.stringify(chunk)}\n\n`;
+/** How Mastra marks a model call it made on the workspace's own key. */
+const ownKeyStamp = () => (ranOnOwnKey ? { providerMetadata: { ownKey: { used: true } } } : {});
 
 let db: PrismaClient;
 let workspaceId: string;
@@ -73,6 +75,8 @@ let stub: http.Server;
 const streamedAgents: string[] = [];
 /** When true, the fast-tier agent answers with no text, which makes the app retry on the full model. */
 let fastTierAnswersEmpty = false;
+/** When true, the stub reports its model calls as made on the workspace's own Anthropic key. */
+let ranOnOwnKey = false;
 
 async function clearLedger() {
   const where = { workspaceId: { in: [workspaceId, personalWorkspaceId] } };
@@ -125,12 +129,15 @@ test.beforeAll(async () => {
           payload: {
             stepResult: { reason: "stop" },
             output: { usage: STEP_USAGE },
-            metadata: { modelId: isFastTier ? HAIKU_MODEL_ID : SONNET_MODEL_ID },
+            metadata: { modelId: isFastTier ? HAIKU_MODEL_ID : SONNET_MODEL_ID, ...ownKeyStamp() },
           },
         }),
       );
       res.write(
-        sse({ type: "finish", payload: { stepResult: { reason: "stop" }, output: { usage: STEP_USAGE } } }),
+        sse({
+          type: "finish",
+          payload: { stepResult: { reason: "stop" }, output: { usage: STEP_USAGE }, metadata: ownKeyStamp() },
+        }),
       );
       res.end("data: [DONE]\n\n");
     });
@@ -141,6 +148,7 @@ test.beforeAll(async () => {
 test.beforeEach(async () => {
   streamedAgents.length = 0;
   fastTierAnswersEmpty = false;
+  ranOnOwnKey = false;
   await clearLedger();
 });
 
@@ -241,6 +249,32 @@ test("a fast-tier attempt that came back empty is metered as well as its retry",
 
   const period = await db.workspaceUsagePeriod.findFirst({ where: { workspaceId }, select: { costMicros: true } });
   expect(Number(period?.costMicros)).toBe(HAIKU_COST_MICROS + SONNET_COST_MICROS);
+});
+
+test("a turn on the workspace's own key is recorded but does not move the usage bar", async ({ page, request }) => {
+  ranOnOwnKey = true;
+
+  const turn = await request.post("/api/chat/stream", {
+    data: {
+      agentId: "zoeAgentHaiku",
+      workspaceId,
+      messages: [{ role: "user", content: "What is due today?" }],
+    },
+    timeout: FIRST_PAINT_TIMEOUT,
+  });
+  expect(turn.ok()).toBe(true);
+
+  // It is in the ledger, at its real cost, marked as the workspace's own key.
+  await expect.poll(async () => (await ledgerEvents(workspaceId)).length, { timeout: 15_000 }).toBe(1);
+  expect((await ledgerEvents(workspaceId))[0]).toMatchObject({
+    source: "CHAT",
+    costMicros: HAIKU_COST_MICROS,
+    onOwnKey: true,
+  });
+  // The month's counter was never touched, so the bar stays empty.
+  expect(await db.workspaceUsagePeriod.count({ where: { workspaceId } })).toBe(0);
+  await page.goto(billingUrl);
+  await expect(page.getByText("0% of this month's assistant use")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
 });
 
 test("the Billing tab offers the key form and shows a saved key by its last four characters", async ({ page }) => {

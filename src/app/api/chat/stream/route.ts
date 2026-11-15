@@ -40,6 +40,7 @@ import {
   turnTokenBreakdown,
 } from "~/server/services/ai/cost";
 import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
+import { readUsedOwnKey } from "~/server/services/billing/mastraUsage";
 import {
   assembleLoadedScope,
   loadScopeInstructions,
@@ -687,6 +688,10 @@ export async function POST(req: Request) {
         let turnUsage: unknown;
         const stepUsages: unknown[] = [];
         let responseModelId: string | undefined;
+        // Whether Mastra ran the attempt on the workspace's own Anthropic key,
+        // as the latest step (and finally the `finish` chunk) reports it. Such
+        // a turn is recorded but never counted against the allowance.
+        let attemptOnOwnKey = false;
 
         // Record what the current model attempt cost (a no-op unless this
         // install meters), at most once per attempt. Never throws. `refId` is
@@ -696,7 +701,12 @@ export async function POST(req: Request) {
         const meterAttempt = (refId?: string): Promise<unknown> => {
           if (attemptMetered) return Promise.resolve();
           attemptMetered = true;
-          const attempt = { modelId: responseModelId, turnUsage, stepUsages: [...stepUsages] };
+          const attempt = {
+            modelId: responseModelId,
+            turnUsage,
+            stepUsages: [...stepUsages],
+            onOwnKey: attemptOnOwnKey,
+          };
           return resolveMeteredWorkspace().then((workspaceId) =>
             workspaceId
               ? recordTurnUsage(db, { workspaceId, source: "CHAT", ...attempt, refId })
@@ -793,6 +803,7 @@ export async function POST(req: Request) {
                 );
               } else if (chunk.type === "finish") {
                 turnUsage = readUnknown(readUnknown(chunk.payload, 'output'), 'usage');
+                attemptOnOwnKey = readUsedOwnKey(chunk.payload);
                 const fr = readString(chunk.payload, 'finishReason');
                 if (fr) lastStepFinishReason = fr;
               } else if (chunk.type === "tool-call") {
@@ -927,6 +938,7 @@ export async function POST(req: Request) {
                 if (modelId) responseModelId = modelId;
                 const stepUsage = readUnknown(readUnknown(chunk.payload, 'output'), 'usage');
                 if (stepUsage !== undefined) stepUsages.push(stepUsage);
+                attemptOnOwnKey = readUsedOwnKey(chunk.payload);
               } else if (chunk.type === "text-start") {
                 // Model text blocks stream as raw markdown deltas; blocks
                 // separated by tool calls (or step boundaries) would
@@ -1000,6 +1012,7 @@ export async function POST(req: Request) {
                 agentErrorKind = undefined;
                 turnUsage = undefined;
                 stepUsages.length = 0;
+                attemptOnOwnKey = false;
                 responseModelId = undefined;
                 activeAgentId = sonnetId;
                 agent = client.getAgent(activeAgentId);
