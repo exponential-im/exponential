@@ -36,7 +36,7 @@ You need [Node.js](https://nodejs.org) 18 or later.
    ```
 
    `--scope user` makes the server available in every project; leave it out to add it to the current project only.
-4. Check the setup with `npx exponential-mcp doctor`, which checks the saved key and Claude Desktop's configuration and prints an entry that works on your machine; `npx exponential-mcp config` shows where the key is stored.
+4. Check the setup. For Claude Desktop, `npx exponential-mcp doctor` checks the saved key and Claude Desktop's configuration and prints an entry that works on your machine; `npx exponential-mcp config` shows where the key is stored. `doctor` does not look at Claude Code: there, run `claude mcp list`, and `exponential` should show as connected.
 
 ### Other MCP clients
 

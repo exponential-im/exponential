@@ -179,8 +179,15 @@ export const integrations: IntegrationData[] = [
       },
       {
         title: "Check the connection",
-        body: "The doctor command checks the saved key and Claude Desktop's configuration, and prints an entry that works on your machine.",
-        code: { language: "bash", content: "npx exponential-mcp doctor" },
+        body: "For Claude Desktop, the doctor command checks the saved key and Claude Desktop's configuration, and prints an entry that works on your machine. It does not look at Claude Code. There, list your MCP servers: exponential should show as connected.",
+        code: {
+          language: "bash",
+          content: `# Claude Desktop
+npx exponential-mcp doctor
+
+# Claude Code
+claude mcp list`,
+        },
       },
     ],
     tools: MCP_TOOLS,
