@@ -296,6 +296,17 @@ export class TranscriptionProcessingService {
       }
 
       let mergedItems = mergeActionItems(notesItems, transcriptItems);
+      // A draft a reviewer discarded from this meeting is not drafted again.
+      const discarded = await db.discardedActionDraft.findMany({
+        where: { transcriptionSessionId: transcriptionId },
+        select: { name: true },
+      });
+      if (discarded.length > 0) {
+        mergedItems = filterNearDuplicateActions(
+          mergedItems,
+          discarded.map((draft) => ({ text: draft.name })),
+        );
+      }
       if (options.replaceDrafts) {
         // Actions already created from this meeting are not drafted again.
         const created = await db.action.findMany({

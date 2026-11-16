@@ -92,6 +92,7 @@ describe("screenshot pairing survives a failed create mid-list", () => {
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
   });
 
   it("InternalActionProcessor.itemResults stays index-parallel with its input", async () => {
@@ -178,6 +179,7 @@ describe("generateDraftActions after a partial publish", () => {
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
     // The extraction mocks are module-level and carry calls over from the
     // pairing tests above; clear them so "not called" means this test.
     vi.mocked(ActionExtractionService.extractFromNotes).mockClear();
@@ -227,6 +229,7 @@ describe("generateDraftActions with action items from the combined decision pass
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
     vi.mocked(ActionExtractionService.extractFromNotes).mockReset().mockResolvedValue([]);
     vi.mocked(ActionExtractionService.extractFromTranscript).mockReset().mockResolvedValue([]);
     db.transcriptionSession.findUnique.mockResolvedValue({
@@ -320,6 +323,22 @@ describe("generateDraftActions with action items from the combined decision pass
       // The created actions are what new items are compared against.
       const lastCall = vi.mocked(filterNearDuplicateActions).mock.calls.at(-1)!;
       expect(lastCall[1]).toEqual([{ text: "Review the accordion PR" }, { text: "Book the venue" }]);
+    });
+
+    it("does not draft again what a reviewer discarded from this meeting", async () => {
+      db.action.count.mockResolvedValue(0);
+      db.discardedActionDraft.findMany.mockResolvedValue([{ name: "Share the onboarding video" }] as never);
+
+      await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+      });
+
+      expect(db.discardedActionDraft.findMany).toHaveBeenCalledWith({
+        where: { transcriptionSessionId: TRANSCRIPTION_ID },
+        select: { name: true },
+      });
+      const comparedWith = vi.mocked(filterNearDuplicateActions).mock.calls.map((call) => call[1]);
+      expect(comparedWith).toContainEqual([{ text: "Share the onboarding video" }]);
     });
 
     it("without the flag, a meeting with drafts is left as it is", async () => {
