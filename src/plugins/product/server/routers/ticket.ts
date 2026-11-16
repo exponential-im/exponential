@@ -1163,15 +1163,20 @@ export const ticketRouter = createTRPCRouter({
         });
       }
 
-      // One notification per ticket that actually changed hands.
-      for (const t of tickets) {
-        await notifyTicketAssigned(ctx.db, {
-          ticketId: t.id,
-          assigneeId: input.assigneeId,
-          previousAssigneeId: t.assigneeId,
-          actorUserId: ctx.session.user.id,
-        });
-      }
+      // One notification per ticket that actually changed hands. Every
+      // selected ticket was written above (stamped or kept), so the selection
+      // is the updated set. In parallel: a serial send per ticket would make a
+      // large bulk assignment one long mutation.
+      await Promise.all(
+        tickets.map((t) =>
+          notifyTicketAssigned(ctx.db, {
+            ticketId: t.id,
+            assigneeId: input.assigneeId,
+            previousAssigneeId: t.assigneeId,
+            actorUserId: ctx.session.user.id,
+          }),
+        ),
+      );
 
       const patchedFields = fields.map(([k]) => k).filter((k) => k !== "status");
       await Promise.all(
