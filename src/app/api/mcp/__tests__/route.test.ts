@@ -34,7 +34,7 @@ vi.mock("next/server", async (importOriginal) => ({
 }));
 vi.mock("~/server/api/fetchHandler", () => ({ handleTRPCRequest }));
 
-import { POST } from "../route";
+import { DELETE, GET, POST } from "../route";
 import { generateJWT, type JWTTokenType } from "~/server/utils/jwt";
 import { generateExternalAgentKey, hashExternalAgentKey } from "~/server/utils/external-agent-keys";
 
@@ -186,5 +186,73 @@ describe("POST /api/mcp credentials", () => {
 
     expect(res.status).toBe(401);
     expect(auth).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/mcp protocol edges", () => {
+  async function expectUnauthorized(res: Response, challenge: string) {
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe(challenge);
+    expect(res.headers.get("mcp-session-id")).toBeNull();
+    expect(handleTRPCRequest).not.toHaveBeenCalled();
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/Unauthorized/);
+  }
+
+  it("401s with a bare Bearer challenge when there is no credential", async () => {
+    await expectUnauthorized(await POST(mcpRequest(rpc("tools/list"), {})), "Bearer");
+  });
+
+  it("401s with invalid_token for a token that is neither a key nor a valid JWT", async () => {
+    await expectUnauthorized(await POST(mcpRequest(rpc("tools/list"), bearer("not-a-token"))), 'Bearer error="invalid_token"');
+  });
+
+  it("401s for a revoked agent key (its row is gone)", async () => {
+    const revoked = generateExternalAgentKey().secret;
+    await expectUnauthorized(await POST(mcpRequest(rpc("tools/list"), bearer(revoked))), 'Bearer error="invalid_token"');
+  });
+
+  it("401s for an expired agent key", async () => {
+    db.externalAgentKey.findUnique.mockResolvedValue({
+      id: "key-1",
+      expiresAt: new Date(Date.now() - 1000),
+      agent: { shadowUser: SHADOW },
+    });
+    await expectUnauthorized(await POST(mcpRequest(rpc("tools/list"))), 'Bearer error="invalid_token"');
+  });
+
+  it("401s for an expired api-token JWT", async () => {
+    const expired = generateJWT(PERSON, { tokenType: "api-token", expiryMinutes: -1 });
+    await expectUnauthorized(await POST(mcpRequest(rpc("tools/list"), bearer(expired))), 'Bearer error="invalid_token"');
+  });
+
+  it("runs no tool for an unauthenticated tools/call", async () => {
+    const res = await POST(mcpRequest(rpc("tools/call", { name: "get_workspaces", arguments: {} }), {}));
+    expect(res.status).toBe(401);
+    expect(handleTRPCRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["GET", GET],
+    ["DELETE", DELETE],
+  ])("answers %s with 405 and Allow: POST", async (_method, handler) => {
+    const res = handler();
+
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("POST");
+    expect(res.headers.get("mcp-session-id")).toBeNull();
+  });
+
+  it("serves initialize and tools/list as two independent requests, with no session between them", async () => {
+    const init = await POST(mcpRequest(INITIALIZE()));
+    expect(init.status).toBe(200);
+    expect(init.headers.get("mcp-session-id")).toBeNull();
+
+    // No Mcp-Session-Id sent back: a different instance could serve this one.
+    const list = await POST(mcpRequest(rpc("tools/list"), { ...bearer(AGENT_KEY), "mcp-protocol-version": "2025-06-18" }));
+    expect(list.status).toBe(200);
+    expect(list.headers.get("mcp-session-id")).toBeNull();
+    const { result } = (await list.json()) as { result: { tools: unknown[] } };
+    expect(result.tools).toHaveLength(listTools().length);
   });
 });

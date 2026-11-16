@@ -13,6 +13,7 @@ import { flushAnalytics } from "~/server/analytics/posthog";
 import { db } from "~/server/db";
 import { bearerTokenFrom, resolveBearerToken } from "~/server/services/access/bearer";
 import { createInProcessClient } from "~/server/mcp/inProcessClient";
+import { methodNotAllowed, unauthorized } from "~/server/mcp/responses";
 import { serveMcpRequest } from "~/server/mcp/serve";
 
 export const runtime = "nodejs";
@@ -30,7 +31,7 @@ export async function POST(req: Request): Promise<Response> {
   const token = bearerTokenFrom(req.headers);
   const resolved = token ? await resolveBearerToken(token) : null;
   if (!resolved?.tokenType || !ACCEPTED_TOKEN_TYPES.has(resolved.tokenType)) {
-    return new Response(null, { status: 401 });
+    return unauthorized(token !== null);
   }
 
   // Tool calls capture analytics through the tRPC middleware; send them once
@@ -39,4 +40,13 @@ export async function POST(req: Request): Promise<Response> {
 
   const client = createInProcessClient({ db, ...resolved, headers: req.headers });
   return serveMcpRequest(req, client);
+}
+
+// Stateless: no SSE stream to open with GET and no session to end with DELETE.
+export function GET(): Response {
+  return methodNotAllowed();
+}
+
+export function DELETE(): Response {
+  return methodNotAllowed();
 }
