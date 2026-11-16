@@ -1,6 +1,7 @@
 import { db } from "~/server/db";
 import NodeCache from "node-cache";
 import { CalendarEventPermissionError } from "./CalendarProvider";
+import { IntegrationAuthError } from "~/server/utils/integrationErrors";
 import type {
   CalendarEvent,
   CalendarInfo,
@@ -18,6 +19,13 @@ import type {
  * uncapped stall would hold it until the function's own budget ran out.
  */
 const GRAPH_DELETE_TIMEOUT_MS = 10_000;
+
+/**
+ * Cap on every other outbound Microsoft call (token refresh, Graph reads and
+ * writes). Without one, a stalled socket holds the request — or the calendar
+ * sync cron — until the function is killed (windy.bell).
+ */
+const GRAPH_TIMEOUT_MS = 10_000;
 
 // Cache with 15 minute TTL (same as Google)
 const calendarCache = new NodeCache({
@@ -107,7 +115,8 @@ export class MicrosoftCalendarService implements CalendarProvider {
     });
 
     if (!account?.access_token) {
-      throw new Error(
+      throw new IntegrationAuthError(
+        "Outlook Calendar",
         "No Microsoft Calendar access token found. Please connect your Outlook Calendar.",
       );
     }
@@ -115,7 +124,8 @@ export class MicrosoftCalendarService implements CalendarProvider {
     const now = Math.floor(Date.now() / 1000);
     if (account.expires_at && account.expires_at <= now) {
       if (!account.refresh_token) {
-        throw new Error(
+        throw new IntegrationAuthError(
+          "Outlook Calendar",
           "Access token expired and no refresh token available. Please reconnect your Outlook Calendar.",
         );
       }
@@ -127,6 +137,7 @@ export class MicrosoftCalendarService implements CalendarProvider {
         {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
           body: new URLSearchParams({
             client_id: process.env.MICROSOFT_ENTRA_ID_CLIENT_ID!,
             client_secret: process.env.MICROSOFT_ENTRA_ID_CLIENT_SECRET!,
@@ -142,7 +153,8 @@ export class MicrosoftCalendarService implements CalendarProvider {
           "Failed to refresh Microsoft token:",
           await response.text(),
         );
-        throw new Error(
+        throw new IntegrationAuthError(
+          "Outlook Calendar",
           "Failed to refresh access token. Please reconnect your Outlook Calendar.",
         );
       }
@@ -174,7 +186,14 @@ export class MicrosoftCalendarService implements CalendarProvider {
     const accessToken = await this.getAccessToken(userId, accountId);
     const response = await fetch(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
     });
+    if (response.status === 401) {
+      throw new IntegrationAuthError(
+        "Outlook Calendar",
+        "Microsoft rejected the stored access token. Please reconnect your Outlook Calendar.",
+      );
+    }
     if (!response.ok) {
       const text = await response.text();
       throw new Error(
@@ -197,6 +216,7 @@ export class MicrosoftCalendarService implements CalendarProvider {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
     });
     if (!response.ok) {
       const text = await response.text();
@@ -217,6 +237,7 @@ export class MicrosoftCalendarService implements CalendarProvider {
         headers: {
           Authorization: `Bearer ${accessToken}`,
         },
+        signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
       });
 
       if (!response.ok) {
