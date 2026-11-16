@@ -25,6 +25,7 @@ import {
   partitionActions,
 } from "~/lib/actions/partition";
 import { groupOverdueCohorts } from "~/lib/actions/triage";
+import { withoutPausedProjects } from "~/lib/actions/pausedProjects";
 import type { Action } from "~/lib/actions/types";
 import { CreateActionModal } from "../CreateActionModal";
 import { EditActionModal } from "../EditActionModal";
@@ -154,8 +155,10 @@ export function TodayDesktopShell({
     },
   );
 
+  // Actions of an On hold, Completed or Cancelled project are off the plate
+  // on every tab; the project's own page still lists them.
   const filteredActions = useMemo<ActionData[]>(() => {
-    const all = actionsQuery.data ?? [];
+    const all = withoutPausedProjects(actionsQuery.data ?? []);
     if (selectedTagIds.length === 0) return all;
     return all.filter((a) =>
       a.tags?.some((at) => selectedTagIds.includes(at.tagId.toString())),
