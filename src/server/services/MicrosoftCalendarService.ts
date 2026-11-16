@@ -1,7 +1,7 @@
 import { db } from "~/server/db";
 import NodeCache from "node-cache";
 import { CalendarEventPermissionError } from "./CalendarProvider";
-import { IntegrationAuthError } from "~/server/utils/integrationErrors";
+import { IntegrationAuthError, IntegrationUnavailableError } from "~/server/utils/integrationErrors";
 import type {
   CalendarEvent,
   CalendarInfo,
@@ -153,6 +153,14 @@ export class MicrosoftCalendarService implements CalendarProvider {
           "Failed to refresh Microsoft token:",
           await response.text(),
         );
+        // A 429/5xx from the token endpoint is Microsoft struggling, not a
+        // revoked grant — say "try again", not "reconnect".
+        if (response.status === 429 || response.status >= 500) {
+          throw new IntegrationUnavailableError(
+            "Outlook Calendar",
+            "Outlook Calendar could not refresh the access token right now. Try again shortly.",
+          );
+        }
         throw new IntegrationAuthError(
           "Outlook Calendar",
           "Failed to refresh access token. Please reconnect your Outlook Calendar.",

@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 
+import { initGithubClient } from "~/server/services/githubService";
 import { classifyIntegrationError, toIntegrationTRPCError } from "~/server/utils/integrationErrors";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 
@@ -19,11 +20,17 @@ import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServe
  * GitHub" state rather than the request reaching Sentry as a 500.
  */
 
-let reportedRejectedToken = false;
+/**
+ * The token GitHub last rejected, remembered per server instance so later
+ * reads skip the doomed authenticated round trip and go straight to the
+ * unauthenticated one. Keyed on the token value: once it is rotated (a new
+ * deploy, a new env value) the new token is tried again.
+ */
+let rejectedToken: string | null = null;
 
-/** Test seam: forget that the rejected token was already reported. */
+/** Test seam: forget the rejected token (and that it was reported). */
 export function resetPublicRepoReadReporting(): void {
-  reportedRejectedToken = false;
+  rejectedToken = null;
 }
 
 function isRejectedCredentials(error: unknown): boolean {
@@ -39,25 +46,26 @@ export async function readPublicRepo<T>(
   } = {},
 ): Promise<T> {
   const createClient =
-    options.createClient ?? ((token?: string) => (token ? new Octokit({ auth: token }) : new Octokit()));
+    // The authenticated client goes through the shared helper so it gets
+    // whatever configuration the rest of the GitHub integration uses.
+    options.createClient ?? ((token?: string) => (token ? initGithubClient(token) : new Octokit()));
   const token = options.token?.trim();
 
   try {
-    if (token) {
+    if (token && token !== rejectedToken) {
       try {
         return await read(createClient(token));
       } catch (error) {
         if (!isRejectedCredentials(error)) throw error;
-        if (!reportedRejectedToken) {
-          reportedRejectedToken = true;
-          reportHandledErrorServer(
-            new Error(
-              "GITHUB_TOKEN was rejected by GitHub (Bad credentials). The public product timeline is falling back to unauthenticated reads; rotate the token.",
-              { cause: error },
-            ),
-            { area: "github.publicRepoRead", kind: "config" },
-          );
-        }
+        // Reached once per rejected token value, so this reports once.
+        rejectedToken = token;
+        reportHandledErrorServer(
+          new Error(
+            "GITHUB_TOKEN was rejected by GitHub (Bad credentials). The public product timeline is falling back to unauthenticated reads; rotate the token.",
+            { cause: error },
+          ),
+          { area: "github.publicRepoRead", kind: "config" },
+        );
       }
     }
     return await read(createClient());

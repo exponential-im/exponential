@@ -44,9 +44,23 @@ describe("readPublicRepo", () => {
     expect(await readPublicRepo(read, { token: "ghp_expired", createClient })).toBe("commits");
     expect(await readPublicRepo(read, { token: "ghp_expired", createClient })).toBe("commits");
 
-    expect(built).toEqual(["ghp_expired", undefined, "ghp_expired", undefined]);
+    // The second read skips the doomed authenticated attempt entirely.
+    expect(built).toEqual(["ghp_expired", undefined, undefined]);
     expect(report).toHaveBeenCalledTimes(1);
     expect((report.mock.calls[0]![0] as Error).message).toMatch(/rotate the token/);
+  });
+
+  it("tries a rotated token again after the old one was rejected", async () => {
+    const { built, createClient } = clients();
+    const read = vi.fn(async (octokit: Octokit) => {
+      if ((octokit as unknown as { token?: string }).token === "ghp_expired") throw httpError(401, "Bad credentials");
+      return "commits";
+    });
+
+    await readPublicRepo(read, { token: "ghp_expired", createClient });
+    await readPublicRepo(read, { token: "ghp_rotated", createClient });
+
+    expect(built).toEqual(["ghp_expired", undefined, "ghp_rotated"]);
   });
 
   it("reads unauthenticated when no token is configured", async () => {

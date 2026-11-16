@@ -3,7 +3,7 @@ import { db } from '~/server/db';
 import NodeCache from 'node-cache';
 import { withTimeout } from '~/server/utils/withTimeout';
 import { CalendarEventPermissionError } from './CalendarProvider';
-import { IntegrationAuthError } from '~/server/utils/integrationErrors';
+import { IntegrationAuthError, oauthRefreshFailure } from '~/server/utils/integrationErrors';
 import type {
   CalendarEvent,
   CalendarInfo,
@@ -117,12 +117,11 @@ export class GoogleCalendarService implements CalendarProvider {
         return google.calendar({ version: 'v3', auth: oauth2Client });
       } catch (error) {
         console.error('Failed to refresh Google Calendar token:', error);
-        // A timeout or network failure is not a revoked grant — don't tell
-        // the user to reconnect when Google merely didn't answer.
-        if (error instanceof Error && (error.name === 'TimeoutError' || error.message === 'fetch failed')) {
-          throw error;
-        }
-        throw new IntegrationAuthError('Google Calendar', 'Failed to refresh access token. Please reconnect your Google Calendar.', { cause: error });
+        // Only a rejected grant (400 invalid_grant / 401) means "reconnect".
+        // A 429/5xx from Google's token endpoint means "try again"; a timeout,
+        // a network failure or our own DB write failing is rethrown as-is.
+        const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
+        throw oauthRefreshFailure('Google Calendar', typeof status === 'number' ? status : undefined, error) ?? error;
       }
     } else {
       // Token is still valid

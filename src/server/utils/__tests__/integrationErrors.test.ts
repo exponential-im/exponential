@@ -5,6 +5,8 @@ import { APIErrorCode, APIResponseError, RequestTimeoutError } from "@notionhq/c
 import {
   classifyIntegrationError,
   IntegrationAuthError,
+  IntegrationUnavailableError,
+  oauthRefreshFailure,
   toIntegrationTRPCError,
 } from "../integrationErrors";
 import { TimeoutError } from "../withTimeout";
@@ -98,5 +100,29 @@ describe("toIntegrationTRPCError", () => {
 
   it("returns null for errors that are not integration states", () => {
     expect(toIntegrationTRPCError(new Error("boom"))).toBeNull();
+  });
+});
+
+describe("oauthRefreshFailure", () => {
+  it("says reconnect only when the token endpoint rejected the grant", () => {
+    for (const status of [400, 401]) {
+      const error = oauthRefreshFailure("Google Calendar", status, new Error("invalid_grant"));
+      expect(error).toBeInstanceOf(IntegrationAuthError);
+      expect(error?.message).toBe("Failed to refresh access token. Please reconnect your Google Calendar.");
+      expect(toIntegrationTRPCError(error)?.code).toBe("PRECONDITION_FAILED");
+    }
+  });
+
+  it("says try again for a 429 or 5xx from the token endpoint", () => {
+    for (const status of [429, 500, 503]) {
+      const error = oauthRefreshFailure("Outlook Calendar", status, undefined);
+      expect(error).toBeInstanceOf(IntegrationUnavailableError);
+      expect(toIntegrationTRPCError(error)?.code).toBe("BAD_GATEWAY");
+    }
+  });
+
+  it("returns null without a status, so the caller rethrows the original", () => {
+    expect(oauthRefreshFailure("Google Calendar", undefined, new TypeError("fetch failed"))).toBeNull();
+    expect(oauthRefreshFailure("Google Calendar", 403, new Error("x"))).toBeNull();
   });
 });

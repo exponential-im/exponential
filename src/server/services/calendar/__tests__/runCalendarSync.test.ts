@@ -46,6 +46,36 @@ describe("calendar sweep failure isolation", () => {
     expect(report.mock.calls[0]![1]).toMatchObject({ context: { feedId: "feed-broken" } });
   });
 
+  it("reserves sweep time for connected accounts when feeds are slow", async () => {
+    // Every feed sync "takes" 50s of wall clock.
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    db.calendarFeed.findMany.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({ id: `feed-${i}` })) as never,
+    );
+    db.calendarFeed.findUnique.mockImplementation((() => {
+      clock += 50_000;
+      return Promise.resolve(null);
+    }) as never);
+    db.connectedAccount.findMany.mockResolvedValue([
+      { id: "acct-1", provider: "microsoft-entra-id", user: { email: "a@example.com" } },
+    ] as never);
+    // syncConnectedAccount finds no account row: a cheap, recorded failure —
+    // what matters is that it was attempted at all.
+    db.connectedAccount.findUnique.mockResolvedValue(null);
+
+    try {
+      const result = await runCalendarSync(db, resolvePublic);
+      // Feeds start at 0s, 50s and 100s; at 150s the 144s feed share is
+      // spent, so the remaining 7 wait for the next sweep.
+      expect(result.failed).toHaveLength(3);
+      expect(result.accounts.processed).toBe(1);
+      expect(result.accounts.failed).toEqual([{ accountId: "acct-1", error: "Account not found" }]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("records an unreachable feed host on the feed without reporting it", async () => {
     db.calendarFeed.findUnique.mockResolvedValue({
       id: "feed-1",

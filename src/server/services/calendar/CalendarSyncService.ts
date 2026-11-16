@@ -616,6 +616,15 @@ export interface CalendarSweepResult {
 const SWEEP_BUDGET_MS = 240_000;
 
 /**
+ * The share of the budget feeds may start syncing in. Feeds run first, and
+ * the two source types have separate queues, so without a reservation a run
+ * of slow feed hosts would consume the whole budget on every sweep and the
+ * connected accounts (Google/Outlook busy time) would never sync. Stopping
+ * feeds at 60% leaves accounts at least ~96s, less any feed still in flight.
+ */
+const FEED_BUDGET_MS = 144_000;
+
+/**
  * Run one source's sync so that nothing it throws — a DB blip mid-write, a
  * provider error that escaped the sync's own handling — can fail the whole
  * sweep. The sync functions record expected failures themselves; anything
@@ -681,7 +690,7 @@ export async function runCalendarSync(
   // Sequential on purpose: feed hosts are third parties, and a serverless
   // function fanning out N concurrent fetches is how timeouts get flaky.
   for (const feed of feeds) {
-    if (Date.now() - startedAt > SWEEP_BUDGET_MS) break;
+    if (Date.now() - startedAt > FEED_BUDGET_MS) break;
     const outcome = await isolated(() => syncFeed(db, feed.id, resolveHost), {
       area: "calendar.runCalendarSync.feed",
       context: { feedId: feed.id },

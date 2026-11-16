@@ -45,6 +45,53 @@ export class IntegrationAuthError extends Error {
   }
 }
 
+/**
+ * Thrown by our own integration code when the provider answered but could
+ * not serve the request right now (a 5xx or 429 from a token endpoint). The
+ * stored grant may be perfectly fine, so the user is told to try again rather
+ * than to reconnect.
+ */
+export class IntegrationUnavailableError extends Error {
+  readonly provider: string;
+
+  constructor(provider: string, message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "IntegrationUnavailableError";
+    this.provider = provider;
+  }
+}
+
+/**
+ * Decide what an OAuth token-refresh failure means from the token endpoint's
+ * HTTP status. 400/401 (`invalid_grant`, `invalid_client`) mean the grant is
+ * gone and the user must reconnect; 429/5xx mean the provider is struggling
+ * and a later attempt will likely work. Returns null when there is no status
+ * (a network failure, or something that is not the provider at all, such as
+ * our own database write) so the caller rethrows the original error and the
+ * classifier — or Sentry — sees it as it is.
+ */
+export function oauthRefreshFailure(
+  provider: string,
+  status: number | undefined,
+  cause: unknown,
+): IntegrationAuthError | IntegrationUnavailableError | null {
+  if (status === 400 || status === 401) {
+    return new IntegrationAuthError(
+      provider,
+      `Failed to refresh access token. Please reconnect your ${provider}.`,
+      { cause },
+    );
+  }
+  if (status !== undefined && (status === 429 || status >= 500)) {
+    return new IntegrationUnavailableError(
+      provider,
+      `${provider} could not refresh the access token right now. Try again shortly.`,
+      { cause },
+    );
+  }
+  return null;
+}
+
 const NETWORK_ERROR_CODES = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
@@ -86,6 +133,9 @@ function classifyOne(error: ErrorLike, providerHint: string | undefined): Integr
 
   if (error instanceof IntegrationAuthError) {
     return { kind: "auth", provider: error.provider, message: error.message };
+  }
+  if (error instanceof IntegrationUnavailableError) {
+    return { kind: "unavailable", provider: error.provider, message: error.message };
   }
 
   // Octokit's RequestError (`@octokit/request-error`).
