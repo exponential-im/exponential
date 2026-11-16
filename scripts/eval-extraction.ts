@@ -33,7 +33,7 @@
  * decision log, so a result does not depend on what the workspace held on the
  * day the meeting was first read.
  *
- * Needs OPENAI_API_KEY for a run. The exported folder holds private meeting
+ * A run needs OPENAI_API_KEY and nothing else: no database. The exported folder holds private meeting
  * transcripts: it is git-ignored, and it should stay on this machine.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
@@ -45,12 +45,13 @@ import { parseTranscript, type TranscriptTurn } from "../src/lib/transcript";
 import {
   DEFAULT_MAX_DECISIONS,
   DecisionExtractionService,
+  chunkTurns,
   extractNotesDecisionItems,
   filterNearDuplicateCandidates,
   findSupportingTurns,
   type DecisionCandidate,
 } from "../src/server/services/DecisionExtractionService";
-import { summaryDecisionText } from "../src/server/services/decisions/generateDraftDecisions";
+import { summaryDecisionText } from "../src/server/services/decisions/summaryDecisionText";
 import {
   formatEvalReport,
   formatMeetingDetail,
@@ -265,6 +266,11 @@ async function extractCandidates(
     transcriptCandidates = filterNearDuplicateCandidates(run.candidates, alreadyCaptured);
     sectionsTotal = run.chunksTotal;
     sectionsUnread = run.chunksSkipped + run.chunksFailed;
+  } else if (turns.length > 0) {
+    // The notes and summary used the whole decision budget, so the transcript
+    // pass never ran: every section of the transcript went unread.
+    sectionsTotal = chunkTurns(turns).length;
+    sectionsUnread = sectionsTotal;
   }
 
   return {
