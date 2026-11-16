@@ -1,7 +1,8 @@
 /**
  * The hosted MCP endpoint (`/api/mcp`, hosted MCP Agent PRD, D4 and Seam 1).
- * Real `Request` objects go through the exported handlers. The bearer
- * resolver's DB lookup, the tRPC handler and analytics are mocked, so what is
+ * Real `Request` objects go through the exported handlers, and credentials go
+ * through the real bearer resolver: real-format agent keys and real signed
+ * JWTs. Prisma, NextAuth, the tRPC handler and analytics are mocked, so what is
  * under test is the route's own decisions and the MCP protocol it speaks.
  */
 
@@ -12,32 +13,34 @@ import { listTools } from "exponential-mcp/tools";
 vi.hoisted(() => {
   process.env.SKIP_ENV_VALIDATION ??= "true";
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
+  process.env.AUTH_SECRET = "mcp-route-test-secret";
 });
 
-const { resolveBearerToken, handleTRPCRequest } = vi.hoisted(() => ({
-  resolveBearerToken: vi.fn(),
+const { db, auth, handleTRPCRequest } = vi.hoisted(() => ({
+  db: {
+    externalAgentKey: { findUnique: vi.fn(), update: vi.fn() },
+    user: { findUnique: vi.fn() },
+  },
+  auth: vi.fn(),
   handleTRPCRequest: vi.fn(),
 }));
 
-vi.mock("~/server/db", () => ({ db: { marker: "db" } }));
+vi.mock("~/server/db", () => ({ db }));
+vi.mock("~/server/auth", () => ({ auth }));
 vi.mock("~/server/analytics/posthog", () => ({ flushAnalytics: vi.fn() }));
 vi.mock("next/server", async (importOriginal) => ({
   ...(await importOriginal<typeof import("next/server")>()),
   after: vi.fn(),
 }));
-vi.mock("~/server/services/access/bearer", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("~/server/services/access/bearer")>()),
-  resolveBearerToken,
-}));
 vi.mock("~/server/api/fetchHandler", () => ({ handleTRPCRequest }));
 
 import { POST } from "../route";
+import { generateJWT, type JWTTokenType } from "~/server/utils/jwt";
+import { generateExternalAgentKey, hashExternalAgentKey } from "~/server/utils/external-agent-keys";
 
-const AGENT_KEY = "exp_agent_testkey";
-const AGENT_SESSION = {
-  user: { id: "user-shadow", email: null, name: "Claude", image: null, isAdmin: false },
-  expires: "2099-01-01T00:00:00.000Z",
-};
+const AGENT_KEY = generateExternalAgentKey().secret;
+const SHADOW = { id: "user-shadow", email: null, name: "Claude", image: null };
+const PERSON = { id: "user-person", email: "person@example.test", name: "Person", image: null, isAdmin: false };
 const RUN_TOOLS = ["report_progress", "ask_owner", "finish_run"];
 
 let rpcId = 0;
@@ -46,17 +49,23 @@ function rpc(method: string, params: Record<string, unknown> = {}) {
   return { jsonrpc: "2.0", id: rpcId, method, params };
 }
 
-function mcpRequest(body: unknown, headers: Record<string, string> = {}): Request {
+const INITIALIZE = () =>
+  rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
+
+function mcpRequest(body: unknown, headers: Record<string, string> = { authorization: `Bearer ${AGENT_KEY}` }): Request {
   return new Request("http://localhost:3000/api/mcp", {
     method: "POST",
     headers: {
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
-      authorization: `Bearer ${AGENT_KEY}`,
       ...headers,
     },
     body: JSON.stringify(body),
   });
+}
+
+function bearer(token: string): Record<string, string> {
+  return { authorization: `Bearer ${token}` };
 }
 
 /** A tRPC batch response carrying one superjson-encoded result. */
@@ -71,8 +80,17 @@ const globalFetch = vi.fn();
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal("fetch", globalFetch);
-  resolveBearerToken.mockImplementation((token: string) =>
-    Promise.resolve(token === AGENT_KEY ? { session: AGENT_SESSION, tokenType: "agent-key", agentRunId: undefined } : null),
+  auth.mockResolvedValue({ user: { id: PERSON.id }, expires: "2099-01-01T00:00:00.000Z" });
+  db.externalAgentKey.update.mockResolvedValue({});
+  db.externalAgentKey.findUnique.mockImplementation(({ where }: { where: { keyHash: string } }) =>
+    Promise.resolve(
+      where.keyHash === hashExternalAgentKey(AGENT_KEY)
+        ? { id: "key-1", expiresAt: null, agent: { shadowUser: SHADOW } }
+        : null,
+    ),
+  );
+  db.user.findUnique.mockImplementation(({ where }: { where: { id: string } }) =>
+    Promise.resolve(where.id === PERSON.id ? PERSON : null),
   );
 });
 
@@ -82,16 +100,13 @@ afterEach(() => {
 
 describe("POST /api/mcp with an agent key", () => {
   it("answers initialize without issuing a session", async () => {
-    const res = await POST(
-      mcpRequest(rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } })),
-    );
+    const res = await POST(mcpRequest(INITIALIZE()));
 
     expect(res.status).toBe(200);
     expect(res.headers.get("mcp-session-id")).toBeNull();
     const body = (await res.json()) as { result: { serverInfo: { name: string }; capabilities: unknown } };
     expect(body.result.serverInfo.name).toBe("exponential");
     expect(body.result.capabilities).toEqual({ tools: {} });
-    expect(resolveBearerToken).toHaveBeenCalledWith(AGENT_KEY);
   });
 
   it("lists the stdio registry's tools without the run tools", async () => {
@@ -104,7 +119,7 @@ describe("POST /api/mcp with an agent key", () => {
     for (const runTool of RUN_TOOLS) expect(names).not.toContain(runTool);
   });
 
-  it("runs a tool call in-process through tRPC as the resolved principal", async () => {
+  it("runs a tool call in-process through tRPC as the agent", async () => {
     handleTRPCRequest.mockResolvedValue(trpcBatchResponse([{ id: "w1", slug: "acme", name: "Acme" }]));
 
     const res = await POST(mcpRequest(rpc("tools/call", { name: "get_workspaces", arguments: {} })));
@@ -117,7 +132,11 @@ describe("POST /api/mcp with an agent key", () => {
     expect(handleTRPCRequest).toHaveBeenCalledTimes(1);
     const [trpcReq, createContext] = handleTRPCRequest.mock.calls[0] as [Request, () => unknown];
     expect(new URL(trpcReq.url).pathname).toBe("/api/trpc/workspace.list");
-    expect(createContext()).toMatchObject({ db: { marker: "db" }, session: AGENT_SESSION, tokenType: "agent-key" });
+    expect(createContext()).toMatchObject({
+      db,
+      session: { user: { id: SHADOW.id, isAdmin: false } },
+      tokenType: "agent-key",
+    });
     // Nothing went over the network.
     expect(globalFetch).not.toHaveBeenCalled();
   });
@@ -129,5 +148,43 @@ describe("POST /api/mcp with an agent key", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]!.text).toMatch(/Unknown tool: finish_run/);
     expect(handleTRPCRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /api/mcp credentials", () => {
+  it("accepts a person's api-token JWT and runs as that person", async () => {
+    handleTRPCRequest.mockResolvedValue(trpcBatchResponse([]));
+    const token = generateJWT(PERSON, { tokenType: "api-token" });
+
+    const res = await POST(mcpRequest(rpc("tools/call", { name: "get_workspaces", arguments: {} }), bearer(token)));
+
+    expect(res.status).toBe(200);
+    const [, createContext] = handleTRPCRequest.mock.calls[0] as [Request, () => unknown];
+    expect(createContext()).toMatchObject({ session: { user: { id: PERSON.id } }, tokenType: "api-token" });
+  });
+
+  it.each<JWTTokenType>([
+    "agent-context",
+    "whatsapp-gateway",
+    "telegram-gateway",
+    "matrix-gateway",
+    "voice-session",
+    "device-token",
+    "extension-token",
+  ])("refuses a %s JWT with 401, though it is valid on /api/trpc", async (tokenType) => {
+    const token = generateJWT(PERSON, { tokenType });
+
+    const res = await POST(mcpRequest(rpc("tools/list"), bearer(token)));
+
+    expect(res.status).toBe(401);
+    expect(db.user.findUnique).toHaveBeenCalled(); // it did resolve; the route refused the type
+    expect(handleTRPCRequest).not.toHaveBeenCalled();
+  });
+
+  it("never authenticates with a session cookie", async () => {
+    const res = await POST(mcpRequest(rpc("tools/list"), { cookie: "authjs.session-token=valid-session" }));
+
+    expect(res.status).toBe(401);
+    expect(auth).not.toHaveBeenCalled();
   });
 });

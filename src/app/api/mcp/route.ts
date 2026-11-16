@@ -2,7 +2,7 @@
  * The hosted MCP endpoint (hosted MCP Agent PRD, D4): Streamable HTTP,
  * stateless, served by the app itself so a self-hosted install serves it at
  * its own address. A client authenticates with `Authorization: Bearer` (an
- * External agent key); tool calls run in-process through tRPC as that
+ * External agent key or a personal API token); tool calls run in-process through tRPC as that
  * principal, through the same procedures and access checks as every other
  * caller.
  */
@@ -18,10 +18,18 @@ import { serveMcpRequest } from "~/server/mcp/serve";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+/**
+ * The credentials this endpoint accepts (Agent PRD D5): an External agent key,
+ * or a person's own API token, which acts as that person. Every other JWT type
+ * (chat gateways, agent-context, device, extension, voice) is refused, and a
+ * session cookie never authenticates: `auth()` is never called here.
+ */
+const ACCEPTED_TOKEN_TYPES: ReadonlySet<string> = new Set(["agent-key", "api-token"]);
+
 export async function POST(req: Request): Promise<Response> {
   const token = bearerTokenFrom(req.headers);
   const resolved = token ? await resolveBearerToken(token) : null;
-  if (!resolved) {
+  if (!resolved?.tokenType || !ACCEPTED_TOKEN_TYPES.has(resolved.tokenType)) {
     return new Response(null, { status: 401 });
   }
 
