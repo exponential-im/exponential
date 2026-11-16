@@ -18,6 +18,16 @@ export function publicJson(body: unknown, init: { status?: number; headers?: Rec
   });
 }
 
+/** An OAuth error body (RFC 6749 §5.2, RFC 7591 §3.2.2). */
+export function oauthError(
+  status: number,
+  error: string,
+  description: string,
+  headers?: Record<string, string>,
+): Response {
+  return publicJson({ error, error_description: description }, { status, headers });
+}
+
 /** A CORS preflight for a public OAuth endpoint. */
 export function publicPreflight(methods: string): Response {
   return new Response(null, {
