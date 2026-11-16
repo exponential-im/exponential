@@ -136,15 +136,47 @@ export async function assertAssignableUsers(
 ): Promise<void> {
   for (const candidateId of new Set(candidateIds)) {
     const canAssign = await canAssignUserToAction(db, callerId, scope, candidateId);
-    if (!canAssign) {
-      throw new TRPCError({
-        code: "NOT_FOUND",
-        message: `Assignee not found in this ${
-          scope.projectId ? "project" : scope.teamId ? "team" : "workspace"
-        }`,
-      });
-    }
+    if (!canAssign) throw assigneeNotFound(scope);
   }
+}
+
+function assigneeNotFound(scope: AssignmentScope): TRPCError {
+  return new TRPCError({
+    code: "NOT_FOUND",
+    message: `Assignee not found in this ${
+      scope.projectId ? "project" : scope.teamId ? "team" : "workspace"
+    }`,
+  });
+}
+
+/**
+ * Turn assignee emails into user ids, for callers (the CLI, MCP, agents) that
+ * know a colleague's email but not their CUID. Case-insensitive.
+ *
+ * Only resolves; the caller still runs `assertAssignableUsers` on the result,
+ * so an email reaches no further than an id would. An email with no account
+ * throws the very error `assertAssignableUsers` throws for an account that is
+ * not assignable here, so the response cannot tell a caller whether an
+ * address is registered somewhere else.
+ */
+export async function resolveAssigneeEmails(
+  db: PrismaClient,
+  scope: AssignmentScope,
+  emails: string[],
+): Promise<string[]> {
+  const wanted = [...new Set(emails.map((e) => e.trim().toLowerCase()))].filter(Boolean);
+  if (wanted.length === 0) return [];
+
+  const users = await db.user.findMany({
+    where: { OR: wanted.map((email) => ({ email: { equals: email, mode: "insensitive" as const } })) },
+    select: { id: true, email: true },
+  });
+  const byEmail = new Map(users.map((u) => [u.email?.toLowerCase(), u.id]));
+  return wanted.map((email) => {
+    const id = byEmail.get(email);
+    if (!id) throw assigneeNotFound(scope);
+    return id;
+  });
 }
 
 /**
