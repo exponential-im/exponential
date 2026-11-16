@@ -280,10 +280,12 @@ async function extractCandidates(
   }
   const summaryText = summaryDecisionText(fixture.summary);
   if (summaryText) backWithEvidence(extractNotesDecisionItems(summaryText));
+  let notesOverflow: DecisionCandidate[] = [];
   if (turns.length > 0 && notesCandidates.length > 0) {
     const review = await DecisionExtractionService.reviewCuratedCandidates(notesCandidates, { modelName });
     const curatedShare = DEFAULT_MAX_DECISIONS - TRANSCRIPT_DECISION_RESERVE;
     notesCandidates.splice(0, notesCandidates.length, ...review.kept.slice(0, curatedShare));
+    notesOverflow = review.kept.slice(curatedShare);
   }
 
   let transcriptCandidates: DecisionCandidate[] = [];
@@ -308,8 +310,15 @@ async function extractCandidates(
     sectionsUnread = sectionsTotal;
   }
 
+  // Notes beyond their share take the slots the transcript pass left unused.
+  const spareSlots = Math.max(0, DEFAULT_MAX_DECISIONS - notesCandidates.length - transcriptCandidates.length);
+  const notesTopUp = filterNearDuplicateCandidates(notesOverflow, {
+    decisions: transcriptCandidates.filter((c) => !c.isOpenQuestion).map((c) => c.statement),
+    questions: transcriptCandidates.filter((c) => c.isOpenQuestion).map((c) => c.statement),
+  }).slice(0, spareSlots);
+
   return {
-    candidates: [...notesCandidates, ...transcriptCandidates].map(toEvalCandidate),
+    candidates: [...notesCandidates, ...notesTopUp, ...transcriptCandidates].map(toEvalCandidate),
     sectionsTotal,
     sectionsUnread,
   };

@@ -85,6 +85,30 @@ function candidate(overrides: Partial<DecisionCandidate> = {}): DecisionCandidat
   };
 }
 
+/**
+ * A meeting whose notes hold more supported decisions than the notes' share
+ * of the budget. Each statement has words of its own, so none reads as a
+ * rewording of another, and each is said in a transcript turn.
+ */
+const MANY_STATEMENTS = [
+  "Invoices migrate onto Stripe billing",
+  "Onboarding checklist replaces welcome video",
+  "Search indexing switches towards Typesense",
+  "Exports become asynchronous background jobs",
+  "Calendar sync drops Outlook support",
+  "Permissions adopt role based groups",
+  "Webhooks retry using exponential backoff",
+  "Dashboards default onto weekly ranges",
+  "Imports accept spreadsheet uploads only",
+  "Archiving happens after ninety days",
+  "Mentions notify through mobile push",
+  "Templates live inside shared library",
+  "Reminders respect quiet evening hours",
+  "Analytics pipeline moves onto ClickHouse",
+];
+const MANY_TRANSCRIPT = MANY_STATEMENTS.map((statement, i) => `${i % 2 === 0 ? "Dev Fixture" : "Pat Reviewer"}: ${statement}.`).join("\n");
+const manyNotesCandidates = () => MANY_STATEMENTS.map((statement) => candidate({ statement, evidence: [], origin: "notes" }));
+
 /** `extractFromTranscript` returns a run object, not a bare array. */
 function transcriptRun(candidates: unknown[], over: Record<string, number> = {}) {
   return { candidates, chunksTotal: 1, chunksFailed: 0, chunksSkipped: 0, ...over };
@@ -318,21 +342,52 @@ describe("generateDraftDecisions", () => {
   });
 
   it("keeps a share of the budget for the transcript however much the notes hold", async () => {
-    // Twenty distinct notes decisions, each a restatement of a real turn so it finds evidence.
-    const topics = ["accordion", "blockers", "prioritisation", "ceremony", "review", "standup", "drawer", "hover", "debates", "parked"];
-    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, notes: "## Decisions\n- many" } as never);
-    extractFromNotes.mockResolvedValue(
-      topics.flatMap((topic, i) => [
-        candidate({ statement: `The ${topic} work moves to squad ${i} alpha`, evidence: [], origin: "notes" }),
-        candidate({ statement: `Budget line ${i} beta covers the ${topic} tooling`, evidence: [], origin: "notes" }),
-      ]),
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, transcription: MANY_TRANSCRIPT, notes: "## Decisions\n- many" } as never);
+    extractFromNotes.mockResolvedValue(manyNotesCandidates());
+    extractFromTranscript.mockResolvedValue(
+      transcriptRun([1, 2, 3, 4, 5].map((n) => candidate({ statement: ["Zebra", "Quokka", "Narwhal", "Ocelot", "Pangolin"][n - 1] + " mascot chosen" }))),
     );
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    // Fourteen notes decisions were supported, yet the transcript still got its five slots.
+    expect((extractFromTranscript.mock.calls[0]![1] as { maxDecisions: number }).maxDecisions).toBe(5);
+    const statements = db.decision.create.mock.calls.map((c) => c[0].data.statement);
+    expect(statements).toHaveLength(15);
+    expect(statements.filter((statement) => statement.endsWith("mascot chosen"))).toHaveLength(5);
+  });
+
+  it("gives the transcript's unused slots back to the notes", async () => {
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, transcription: MANY_TRANSCRIPT, notes: "## Decisions\n- many" } as never);
+    extractFromNotes.mockResolvedValue(manyNotesCandidates());
+    // The transcript pass finds nothing, as it does without a model key.
     extractFromTranscript.mockResolvedValue(transcriptRun([]));
 
     await generateDraftDecisions(db, "m1", "u-dev");
 
-    expect(extractFromTranscript).toHaveBeenCalledTimes(1);
-    expect((extractFromTranscript.mock.calls[0]![1] as { maxDecisions: number }).maxDecisions).toBeGreaterThanOrEqual(5);
+    // Nothing the notes held is thrown away to keep slots nobody used.
+    expect(db.decision.create).toHaveBeenCalledTimes(MANY_STATEMENTS.length);
+  });
+
+  it("checks a proposal the review turned into a question against the questions already captured", async () => {
+    db.decision.findMany
+      .mockResolvedValueOnce([
+        { id: "d-rej", reviewState: "REJECTED", status: "OPEN", statement: "Should prioritisation debates be parked for the ceremony?" },
+      ] as never)
+      .mockResolvedValue([] as never);
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, notes: "## Decisions\n- Parking prioritisation debates proposed" } as never);
+    const proposal = candidate({ statement: "Parking prioritisation debates proposed for the ceremony", evidence: [], origin: "notes" });
+    extractFromNotes.mockResolvedValue([proposal]);
+    reviewCuratedCandidates.mockImplementation(async (candidates: Array<Record<string, unknown>>) => ({
+      kept: candidates.map((c) => ({ ...c, statement: "Should prioritisation debates be parked for the ceremony?", isOpenQuestion: true })),
+      dropped: [],
+      reviewed: true,
+    }));
+    extractFromTranscript.mockResolvedValue(transcriptRun([]));
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    expect(db.decision.create).not.toHaveBeenCalled();
   });
 
   it("does not review notes when there is no transcript to check them against", async () => {
