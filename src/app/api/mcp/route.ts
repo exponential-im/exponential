@@ -6,7 +6,8 @@
  * through tRPC as that principal, through the same procedures and access
  * checks as every other caller.
  *
- * Per request, in order: the Origin check, the credential, then serving.
+ * Per request, in order: the Origin check, the credential, the rate limit,
+ * then serving.
  */
 
 import { after } from "next/server";
@@ -16,8 +17,9 @@ import { db } from "~/server/db";
 import { bearerTokenFrom, resolveBearerToken } from "~/server/services/access/bearer";
 import { createInProcessClient } from "~/server/mcp/inProcessClient";
 import { checkOrigin, corsHeaders, PREFLIGHT_HEADERS, withHeaders } from "~/server/mcp/origin";
-import { forbiddenOrigin, methodNotAllowed, unauthorized } from "~/server/mcp/responses";
+import { forbiddenOrigin, methodNotAllowed, tooManyRequests, unauthorized } from "~/server/mcp/responses";
 import { serveMcpRequest } from "~/server/mcp/serve";
+import { checkRateLimit } from "~/server/utils/rateLimit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -30,6 +32,13 @@ export const maxDuration = 60;
  */
 const ACCEPTED_TOKEN_TYPES: ReadonlySet<string> = new Set(["agent-key", "api-token"]);
 
+/**
+ * Requests a principal may make per minute (Agent PRD D6, open question 4).
+ * A guess until there is traffic. Keyed by the session user, so each agent
+ * and each person has its own budget, shared across its keys and tokens.
+ */
+const MCP_REQUESTS_PER_MINUTE = 120;
+
 export async function POST(req: Request): Promise<Response> {
   const origin = checkOrigin(req.headers);
   if (!origin.allowed) return forbiddenOrigin();
@@ -40,6 +49,14 @@ export async function POST(req: Request): Promise<Response> {
   if (!resolved?.tokenType || !ACCEPTED_TOKEN_TYPES.has(resolved.tokenType)) {
     return withHeaders(unauthorized(token !== null), cors);
   }
+
+  const limit = await checkRateLimit({
+    name: "mcp-principal",
+    key: resolved.session.user.id,
+    limit: MCP_REQUESTS_PER_MINUTE,
+    windowSeconds: 60,
+  });
+  if (!limit.success) return withHeaders(tooManyRequests(limit), cors);
 
   // Tool calls capture analytics through the tRPC middleware; send them once
   // the response is out, as the tRPC route does.

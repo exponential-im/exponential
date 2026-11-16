@@ -28,13 +28,14 @@ vi.mock("~/env", async (importOriginal) => {
   };
 });
 
-const { db, auth, handleTRPCRequest } = vi.hoisted(() => ({
+const { db, auth, handleTRPCRequest, checkRateLimit } = vi.hoisted(() => ({
   db: {
     externalAgentKey: { findUnique: vi.fn(), update: vi.fn() },
     user: { findUnique: vi.fn() },
   },
   auth: vi.fn(),
   handleTRPCRequest: vi.fn(),
+  checkRateLimit: vi.fn(),
 }));
 
 vi.mock("~/server/db", () => ({ db }));
@@ -45,6 +46,10 @@ vi.mock("next/server", async (importOriginal) => ({
   after: vi.fn(),
 }));
 vi.mock("~/server/api/fetchHandler", () => ({ handleTRPCRequest }));
+vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/server/utils/rateLimit")>()),
+  checkRateLimit,
+}));
 
 import { DELETE, GET, OPTIONS, POST } from "../route";
 import { generateJWT, type JWTTokenType } from "~/server/utils/jwt";
@@ -102,6 +107,7 @@ const globalFetch = vi.fn();
 beforeEach(() => {
   vi.clearAllMocks();
   envOverrides.MCP_ALLOWED_ORIGINS = undefined;
+  checkRateLimit.mockResolvedValue({ success: true, retryAfterSeconds: 0 });
   vi.stubGlobal("fetch", globalFetch);
   auth.mockResolvedValue({ user: { id: PERSON.id }, expires: "2099-01-01T00:00:00.000Z" });
   db.externalAgentKey.update.mockResolvedValue({});
@@ -346,5 +352,43 @@ describe("POST /api/mcp origin allowlist", () => {
 
     expect(res.status).toBe(403);
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+describe("POST /api/mcp rate limit", () => {
+  it("counts each request against its principal: 120 a minute, keyed by the session user", async () => {
+    await POST(mcpRequest(rpc("tools/list")));
+
+    expect(checkRateLimit).toHaveBeenCalledWith({
+      name: "mcp-principal",
+      key: SHADOW.id,
+      limit: 120,
+      windowSeconds: 60,
+    });
+  });
+
+  it("answers 429 with Retry-After over the limit and runs no tool", async () => {
+    checkRateLimit.mockResolvedValue({ success: false, retryAfterSeconds: 17 });
+
+    const res = await POST(mcpRequest(rpc("tools/call", { name: "get_workspaces", arguments: {} })));
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("17");
+    expect(res.headers.get("mcp-session-id")).toBeNull();
+    expect(handleTRPCRequest).not.toHaveBeenCalled();
+  });
+
+  it("keeps CORS headers on a 429 for an allowed origin", async () => {
+    checkRateLimit.mockResolvedValue({ success: false, retryAfterSeconds: 5 });
+
+    const res = await POST(mcpRequest(rpc("tools/list"), { ...bearer(AGENT_KEY), origin: "https://app.example.test" }));
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+  });
+
+  it("does not spend a principal's budget on a request that fails authentication", async () => {
+    await POST(mcpRequest(rpc("tools/list"), bearer("not-a-token")));
+    expect(checkRateLimit).not.toHaveBeenCalled();
   });
 });

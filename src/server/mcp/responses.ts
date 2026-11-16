@@ -4,6 +4,8 @@
  * None of them carries an `Mcp-Session-Id`: the endpoint is stateless.
  */
 
+import { tooManyRequestsInit, type RateLimitResult } from "~/server/utils/rateLimit";
+
 function jsonRpcError(status: number, message: string, headers: Record<string, string>): Response {
   return new Response(JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message }, id: null }), {
     status,
@@ -26,6 +28,12 @@ export function unauthorized(hadCredential: boolean): Response {
 /** 403 for a browser origin that is neither the app's nor listed in `MCP_ALLOWED_ORIGINS`. */
 export function forbiddenOrigin(): Response {
   return jsonRpcError(403, "Forbidden: this origin may not call the MCP endpoint.", {});
+}
+
+/** 429 for a principal over its request limit, with `Retry-After`. */
+export function tooManyRequests(result: RateLimitResult): Response {
+  const init = tooManyRequestsInit(result);
+  return jsonRpcError(init.status, "Too many requests: slow down and retry after the Retry-After interval.", init.headers);
 }
 
 /** 405 for every method but POST: there is no SSE stream to GET and no session to DELETE. */
