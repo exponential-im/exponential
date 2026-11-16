@@ -17,8 +17,11 @@ vi.hoisted(() => {
   process.env.NEXT_PUBLIC_APP_URL = "https://app.example.test";
 });
 
-/** `env` as the route reads it, with MCP_ALLOWED_ORIGINS settable per test. */
-const envOverrides = vi.hoisted(() => ({ MCP_ALLOWED_ORIGINS: undefined as string | undefined }));
+/** `env` as the route reads it, with MCP_ALLOWED_ORIGINS and MCP_OAUTH_MODE settable per test. */
+const envOverrides = vi.hoisted(() => ({
+  MCP_ALLOWED_ORIGINS: undefined as string | undefined,
+  MCP_OAUTH_MODE: undefined as "off" | "admin" | "on" | undefined,
+}));
 vi.mock("~/env", async (importOriginal) => {
   const actual = await importOriginal<typeof import("~/env")>();
   return {
@@ -107,6 +110,7 @@ const globalFetch = vi.fn();
 beforeEach(() => {
   vi.clearAllMocks();
   envOverrides.MCP_ALLOWED_ORIGINS = undefined;
+  envOverrides.MCP_OAUTH_MODE = undefined;
   checkRateLimit.mockResolvedValue({ success: true, retryAfterSeconds: 0 });
   vi.stubGlobal("fetch", globalFetch);
   auth.mockResolvedValue({ user: { id: PERSON.id }, expires: "2099-01-01T00:00:00.000Z" });
@@ -289,6 +293,37 @@ describe("POST /api/mcp protocol edges", () => {
     expect(list.headers.get("mcp-session-id")).toBeNull();
     const { result } = (await list.json()) as { result: { tools: unknown[] } };
     expect(result.tools).toHaveLength(listTools().length);
+  });
+});
+
+describe("POST /api/mcp 401 challenge with OAuth on", () => {
+  const RESOURCE_METADATA = 'resource_metadata="https://app.example.test/.well-known/oauth-protected-resource/api/mcp"';
+
+  it.each(["admin", "on"] as const)("points a client with no credential at the metadata (MCP_OAUTH_MODE=%s)", async (mode) => {
+    envOverrides.MCP_OAUTH_MODE = mode;
+
+    const res = await POST(mcpRequest(rpc("tools/list"), {}));
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("www-authenticate")).toBe(`Bearer ${RESOURCE_METADATA}, scope="mcp"`);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toMatch(/sign in with OAuth/);
+  });
+
+  it("keeps invalid_token alongside the pointer for a credential that does not authenticate", async () => {
+    envOverrides.MCP_OAUTH_MODE = "admin";
+
+    const res = await POST(mcpRequest(rpc("tools/list"), bearer("not-a-token")));
+
+    expect(res.headers.get("www-authenticate")).toBe(`Bearer error="invalid_token", ${RESOURCE_METADATA}, scope="mcp"`);
+  });
+
+  it("is unchanged from V1 with MCP_OAUTH_MODE=off", async () => {
+    envOverrides.MCP_OAUTH_MODE = "off";
+
+    const res = await POST(mcpRequest(rpc("tools/list"), {}));
+
+    expect(res.headers.get("www-authenticate")).toBe("Bearer");
   });
 });
 
