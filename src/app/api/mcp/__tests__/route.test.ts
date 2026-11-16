@@ -14,6 +14,18 @@ vi.hoisted(() => {
   process.env.SKIP_ENV_VALIDATION ??= "true";
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.AUTH_SECRET = "mcp-route-test-secret";
+  process.env.NEXT_PUBLIC_APP_URL = "https://app.example.test";
+});
+
+/** `env` as the route reads it, with MCP_ALLOWED_ORIGINS settable per test. */
+const envOverrides = vi.hoisted(() => ({ MCP_ALLOWED_ORIGINS: undefined as string | undefined }));
+vi.mock("~/env", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/env")>();
+  return {
+    env: new Proxy(actual.env, {
+      get: (target, key) => (key in envOverrides ? envOverrides[key as keyof typeof envOverrides] : Reflect.get(target, key)),
+    }),
+  };
 });
 
 const { db, auth, handleTRPCRequest } = vi.hoisted(() => ({
@@ -34,7 +46,7 @@ vi.mock("next/server", async (importOriginal) => ({
 }));
 vi.mock("~/server/api/fetchHandler", () => ({ handleTRPCRequest }));
 
-import { DELETE, GET, POST } from "../route";
+import { DELETE, GET, OPTIONS, POST } from "../route";
 import { generateJWT, type JWTTokenType } from "~/server/utils/jwt";
 import { generateExternalAgentKey, hashExternalAgentKey } from "~/server/utils/external-agent-keys";
 
@@ -52,15 +64,25 @@ function rpc(method: string, params: Record<string, unknown> = {}) {
 const INITIALIZE = () =>
   rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } });
 
+/**
+ * A request as the server receives it. happy-dom, registered globally by
+ * `src/test/setup.ts`, drops `Origin` from a Request's headers as a browser
+ * would; a server sees it. So the headers go on as a standalone `Headers`.
+ */
+function serverRequest(method: string, body: unknown, headers: Record<string, string>): Request {
+  const req = new Request("http://localhost:3000/api/mcp", {
+    method,
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  Object.defineProperty(req, "headers", { value: new Headers(headers) });
+  return req;
+}
+
 function mcpRequest(body: unknown, headers: Record<string, string> = { authorization: `Bearer ${AGENT_KEY}` }): Request {
-  return new Request("http://localhost:3000/api/mcp", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      ...headers,
-    },
-    body: JSON.stringify(body),
+  return serverRequest("POST", body, {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    ...headers,
   });
 }
 
@@ -79,6 +101,7 @@ const globalFetch = vi.fn();
 
 beforeEach(() => {
   vi.clearAllMocks();
+  envOverrides.MCP_ALLOWED_ORIGINS = undefined;
   vi.stubGlobal("fetch", globalFetch);
   auth.mockResolvedValue({ user: { id: PERSON.id }, expires: "2099-01-01T00:00:00.000Z" });
   db.externalAgentKey.update.mockResolvedValue({});
@@ -254,5 +277,74 @@ describe("POST /api/mcp protocol edges", () => {
     expect(list.headers.get("mcp-session-id")).toBeNull();
     const { result } = (await list.json()) as { result: { tools: unknown[] } };
     expect(result.tools).toHaveLength(listTools().length);
+  });
+});
+
+describe("POST /api/mcp origin allowlist", () => {
+  const withOrigin = (origin: string) => ({ ...bearer(AGENT_KEY), origin });
+
+  it("serves a request with no Origin and sends no CORS headers", async () => {
+    const res = await POST(mcpRequest(rpc("tools/list")));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("serves the app's own origin, with CORS headers for it", async () => {
+    const res = await POST(mcpRequest(rpc("tools/list"), withOrigin("https://app.example.test")));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(res.headers.get("mcp-session-id")).toBeNull();
+  });
+
+  it("serves an origin listed in MCP_ALLOWED_ORIGINS", async () => {
+    envOverrides.MCP_ALLOWED_ORIGINS = "https://inspector.example.test/, https://other.example.test";
+
+    const res = await POST(mcpRequest(rpc("tools/list"), withOrigin("https://inspector.example.test")));
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://inspector.example.test");
+  });
+
+  it("refuses a foreign origin with 403 before looking at the credential", async () => {
+    envOverrides.MCP_ALLOWED_ORIGINS = "https://inspector.example.test";
+
+    const res = await POST(mcpRequest(rpc("tools/call", { name: "get_workspaces", arguments: {} }), withOrigin("https://evil.example.test")));
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
+    expect(db.externalAgentKey.findUnique).not.toHaveBeenCalled();
+    expect(handleTRPCRequest).not.toHaveBeenCalled();
+  });
+
+  it("refuses an opaque origin", async () => {
+    const res = await POST(mcpRequest(rpc("tools/list"), withOrigin("null")));
+    expect(res.status).toBe(403);
+  });
+
+  it("lets an allowed browser origin read a 401 and its challenge", async () => {
+    const res = await POST(mcpRequest(rpc("tools/list"), { origin: "https://app.example.test" }));
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+    expect(res.headers.get("access-control-expose-headers")).toBe("WWW-Authenticate");
+  });
+
+  it("answers a preflight from an allowed origin", () => {
+    const res = OPTIONS(serverRequest("OPTIONS", undefined, { origin: "https://app.example.test" }));
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
+    expect(res.headers.get("access-control-allow-methods")).toBe("POST");
+    expect(res.headers.get("access-control-allow-headers")).toMatch(/Authorization/);
+  });
+
+  it("refuses a preflight from a foreign origin", () => {
+    const res = OPTIONS(serverRequest("OPTIONS", undefined, { origin: "https://evil.example.test" }));
+
+    expect(res.status).toBe(403);
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 });

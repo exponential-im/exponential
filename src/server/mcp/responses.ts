@@ -23,6 +23,11 @@ export function unauthorized(hadCredential: boolean): Response {
   });
 }
 
+/** 403 for a browser origin that is neither the app's nor listed in `MCP_ALLOWED_ORIGINS`. */
+export function forbiddenOrigin(): Response {
+  return jsonRpcError(403, "Forbidden: this origin may not call the MCP endpoint.", {});
+}
+
 /** 405 for every method but POST: there is no SSE stream to GET and no session to DELETE. */
 export function methodNotAllowed(): Response {
   return jsonRpcError(405, "Method not allowed: this endpoint is stateless and accepts POST only.", {
