@@ -24,6 +24,7 @@ import {
   NOT_ANCHORED,
   type CommentQuote,
 } from "~/server/services/prd/anchor-comment";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 
 const authorSelect = {
   id: true,
@@ -117,12 +118,15 @@ async function createQuotedThread(
   }
   const comment = created.row ?? (await createRow(db));
 
-  void emitPageCommentMention(db, {
-    pageId,
-    commentId: comment.id,
-    commentContent: body,
-    commentAuthorId: userId,
-  });
+  emitAfterResponse("pageComment.mention", () =>
+    emitPageCommentMention(db, {
+      pageId,
+      commentId: comment.id,
+      commentContent: body,
+      commentAuthorId: userId,
+    }),
+    { pageId, commentId: comment.id },
+  );
 
   return { ...comment, anchor };
 }
@@ -221,12 +225,15 @@ export const pageCommentRouter = createTRPCRouter({
       });
 
       // Fire-and-forget: notify mentioned members who can view the page.
-      void emitPageCommentMention(ctx.db, {
-        pageId: input.pageId,
-        commentId: comment.id,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-      });
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: input.pageId,
+          commentId: comment.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { pageId: input.pageId, commentId: comment.id },
+      );
 
       // Viewers may comment but not edit the body, so only an editor's
       // thread writes its mark into the doc.
@@ -294,12 +301,15 @@ export const pageCommentRouter = createTRPCRouter({
         include: { createdBy: { select: authorSelect } },
       });
 
-      void emitPageCommentMention(ctx.db, {
-        pageId: parent.pageId,
-        commentId: comment.id,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-      });
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: parent.pageId,
+          commentId: comment.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { pageId: parent.pageId, commentId: comment.id },
+      );
 
       return comment;
     }),
@@ -363,13 +373,16 @@ export const pageCommentRouter = createTRPCRouter({
 
       // Fire-and-forget: notify mentions added by the edit. Passing the old
       // body means already-notified users aren't pinged again.
-      void emitPageCommentMention(ctx.db, {
-        pageId: existing.pageId,
-        commentId: updated.id,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-        previousContent: existing.body,
-      });
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: existing.pageId,
+          commentId: updated.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+          previousContent: existing.body,
+        }),
+        { pageId: existing.pageId, commentId: updated.id },
+      );
 
       return updated;
     }),
