@@ -1047,7 +1047,9 @@ export class DecisionExtractionService {
       if (verdict.index < 0 || verdict.index >= candidates.length) continue;
       const question = verdict.question?.replace(/\s+/g, " ").trim();
       if (!verdict.keep) {
-        droppedReasons.set(verdict.index, verdict.reason?.trim() || "unspecified");
+        // A missing reason and one that trims to nothing both read as unspecified.
+        const reason = verdict.reason?.trim() ?? "";
+        droppedReasons.set(verdict.index, reason.length > 0 ? reason : "unspecified");
       } else if (question && !candidates[verdict.index]!.isOpenQuestion) {
         asQuestion.set(verdict.index, question.endsWith("?") ? question : `${question}?`);
       }
