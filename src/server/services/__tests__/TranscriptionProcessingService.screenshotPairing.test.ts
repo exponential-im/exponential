@@ -324,10 +324,11 @@ describe("generateDraftActions with action items from the combined decision pass
         replaceDrafts: true,
       });
 
-      // Only the half-written new set is removed; the old ids are never touched.
+      // Every draft that is not one of the old ones goes, including one the
+      // processor wrote but reported as failed; the old ids are never touched.
       expect(db.action.deleteMany).toHaveBeenCalledTimes(1);
       expect(db.action.deleteMany).toHaveBeenCalledWith({
-        where: { id: { in: ["id-Review the accordion PR"] }, status: "DRAFT" },
+        where: { transcriptionSessionId: TRANSCRIPTION_ID, status: "DRAFT", id: { notIn: ["old-1", "old-2"] } },
       });
       expect(result.success).toBe(false);
       expect(result.draftCount).toBe(2);

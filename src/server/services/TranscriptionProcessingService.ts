@@ -368,10 +368,12 @@ export class TranscriptionProcessingService {
         // Some of the new drafts could not be written. Take back the ones
         // that were, and leave the old set as it was: a re-extract replaces
         // the drafts whole or not at all.
-        const createdIds = actionResult.createdItems.map((item) => item.id);
-        if (createdIds.length > 0) {
-          await db.action.deleteMany({ where: { id: { in: createdIds }, status: "DRAFT" } });
-        }
+        // By "not one of the old drafts", not by the ids the processor
+        // reported: an action whose assignee write failed is on the table but
+        // counted as a failure, and would otherwise be left behind.
+        await db.action.deleteMany({
+          where: { transcriptionSessionId: transcriptionId, status: "DRAFT", id: { notIn: draftIdsToReplace } },
+        });
         result.errors = actionResult.errors;
         result.draftCount = draftIdsToReplace.length;
         return result;
