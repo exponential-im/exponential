@@ -19,6 +19,7 @@ import { recordActivity } from "~/server/services/activity/recordActivity";
 import {
   DEFAULT_MAX_DECISIONS,
   DecisionExtractionService,
+  TRANSCRIPT_DECISION_RESERVE,
   extractNotesDecisionItems,
   filterNearDuplicateCandidates,
   findSupportingTurns,
@@ -330,6 +331,22 @@ export async function generateDraftDecisions(
     const summaryText = summaryDecisionText(meeting.summary);
     if (summaryText) {
       backWithEvidence(extractNotesDecisionItems(summaryText), "Summary");
+    }
+
+    // Notes and summaries label loosely (most are model-written), and the
+    // passes above copy them near-verbatim. Hold each to the transcript
+    // pass's definition before it can become a draft: follow-up tasks,
+    // status updates and general intentions go, an unagreed proposal becomes
+    // the open question it is. Only with a transcript: without one there is
+    // nothing to check the notes against, and they are the only source.
+    if (turns.length > 0 && notesCandidates.length > 0) {
+      const review = await DecisionExtractionService.reviewCuratedCandidates(notesCandidates);
+      for (const { candidate, reason } of review.dropped) {
+        console.log(`[generateDraftDecisions] Notes candidate dropped on review (${reason}): "${candidate.statement}"`);
+      }
+      // The transcript is always read: it keeps a share of the budget.
+      const curatedShare = DEFAULT_MAX_DECISIONS - TRANSCRIPT_DECISION_RESERVE;
+      notesCandidates.splice(0, notesCandidates.length, ...review.kept.slice(0, curatedShare));
     }
 
     // Transcript second: told what notes and the log already hold.
