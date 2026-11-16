@@ -99,11 +99,12 @@ describe("redeemAuthorizationCode", () => {
     expect(db.oAuthToken.create).not.toHaveBeenCalled();
   });
 
-  it("refuses the loser of two concurrent redemptions", async () => {
+  it("refuses the loser of two concurrent redemptions and revokes the winner's tokens", async () => {
     db.oAuthAuthorizationCode.updateMany.mockResolvedValue({ count: 0 });
 
     expect(await redeem()).toMatchObject({ ok: false, error: "invalid_grant" });
     expect(db.oAuthToken.create).not.toHaveBeenCalled();
+    expect(db.oAuthToken.deleteMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" } });
   });
 
   it.each([

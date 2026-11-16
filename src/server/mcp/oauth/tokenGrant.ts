@@ -75,10 +75,11 @@ export async function redeemAuthorizationCode(
 
   // A code used twice may have been intercepted: revoke whatever the
   // connection holds (RFC 9700 §4.5 / OAuth 2.1 §4.1.3).
-  if (code.usedAt) {
+  const refuseReuse = async () => {
     await db.oAuthToken.deleteMany({ where: { connectionId: code.connection.id } });
     return invalidGrant("The authorization code has already been used.");
-  }
+  };
+  if (code.usedAt) return refuseReuse();
   if (code.expiresAt <= now) return invalidGrant("The authorization code has expired.");
   if (code.connection.clientId !== redemption.clientId) {
     return invalidGrant("The authorization code was issued to another client.");
@@ -112,7 +113,10 @@ export async function redeemAuthorizationCode(
     });
     return true;
   });
-  if (!issued) return invalidGrant("The authorization code has already been used.");
+  // Losing the claim is reuse too, and the winner may be the interceptor. By
+  // now the winner's transaction has committed (the claim waits on its row
+  // lock), so its token exists to be revoked.
+  if (!issued) return refuseReuse();
 
   return {
     ok: true,
