@@ -288,6 +288,7 @@ export async function createAction(
         subject: { actionId: created.id, assignedUserIds: notifiedAssigneeIds },
         db,
       }),
+      { actionId: created.id },
     );
   }
 

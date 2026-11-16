@@ -1574,6 +1574,7 @@ export const actionRouter = createTRPCRouter({
           },
           db: ctx.db,
         }),
+        { actionId: input.actionId },
       );
 
       // Return updated action with assignees. `agentRunsQueued` is the number
