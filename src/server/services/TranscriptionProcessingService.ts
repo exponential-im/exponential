@@ -1,6 +1,6 @@
 import { db } from '~/server/db';
 import { FirefliesService, type FirefliesSummary } from './FirefliesService';
-import { ActionExtractionService, filterNearDuplicateActions, mergeActionItems, numberScreenshotMarkers } from './ActionExtractionService';
+import { ActionExtractionService, filterDiscardedActions, filterNearDuplicateActions, mergeActionItems, numberScreenshotMarkers } from './ActionExtractionService';
 import { InternalActionProcessor } from './processors/InternalActionProcessor';
 import { type ParsedActionItem } from './processors/ActionProcessor';
 import { NotificationServiceFactory } from './notifications/NotificationServiceFactory';
@@ -301,12 +301,10 @@ export class TranscriptionProcessingService {
         where: { transcriptionSessionId: transcriptionId },
         select: { name: true },
       });
-      if (discarded.length > 0) {
-        mergedItems = filterNearDuplicateActions(
-          mergedItems,
-          discarded.map((draft) => ({ text: draft.name })),
-        );
-      }
+      mergedItems = filterDiscardedActions(
+        mergedItems,
+        discarded.map((draft) => draft.name),
+      );
       if (options.replaceDrafts) {
         // Actions already created from this meeting are not drafted again.
         const created = await db.action.findMany({

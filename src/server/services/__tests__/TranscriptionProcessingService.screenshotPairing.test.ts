@@ -50,6 +50,7 @@ vi.mock("../ActionExtractionService", () => ({
   },
   numberScreenshotMarkers: vi.fn((text: string) => ({ numberedText: text, count: 0 })),
   filterNearDuplicateActions: vi.fn((items: unknown[]) => items),
+  filterDiscardedActions: vi.fn((items: unknown[]) => items),
   mergeActionItems: vi.fn((a: unknown[], b: unknown[]) => [...a, ...b]),
 }));
 
@@ -70,7 +71,7 @@ vi.mock("../meetings/assignMeetingPlacement", () => ({
 
 import { TranscriptionProcessingService } from "../TranscriptionProcessingService";
 import { InternalActionProcessor } from "../processors/InternalActionProcessor";
-import { ActionExtractionService, filterNearDuplicateActions } from "../ActionExtractionService";
+import { ActionExtractionService, filterDiscardedActions, filterNearDuplicateActions } from "../ActionExtractionService";
 import { FirefliesService } from "../FirefliesService";
 
 const USER_ID = "user-1";
@@ -337,8 +338,7 @@ describe("generateDraftActions with action items from the combined decision pass
         where: { transcriptionSessionId: TRANSCRIPTION_ID },
         select: { name: true },
       });
-      const comparedWith = vi.mocked(filterNearDuplicateActions).mock.calls.map((call) => call[1]);
-      expect(comparedWith).toContainEqual([{ text: "Share the onboarding video" }]);
+      expect(vi.mocked(filterDiscardedActions).mock.calls.at(-1)![1]).toEqual(["Share the onboarding video"]);
     });
 
     it("without the flag, a meeting with drafts is left as it is", async () => {

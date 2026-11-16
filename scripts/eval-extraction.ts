@@ -216,7 +216,7 @@ async function exportMeetings(dataDir: string): Promise<void> {
           source: d.source,
           statement: d.statement,
           evidenceTurns: evidenceTurnsOf(d.evidence),
-          ...(d.rejectionReason ? { reason: d.rejectionReason } : {}),
+          ...(d.reviewState === "REJECTED" && d.rejectionReason ? { reason: d.rejectionReason } : {}),
         })),
         discardedActions: meeting.discardedActionDrafts,
       };
