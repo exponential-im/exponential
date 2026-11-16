@@ -36,7 +36,7 @@
  * A run needs OPENAI_API_KEY and nothing else: no database. The exported folder holds private meeting
  * transcripts: it is git-ignored, and it should stay on this machine.
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import path from "path";
 
 import { PrismaClient } from "@prisma/client";
@@ -162,6 +162,12 @@ async function exportMeetings(dataDir: string): Promise<void> {
     });
 
     mkdirSync(dataDir, { recursive: true });
+    // An export replaces the set: a meeting whose labels were since reset, or
+    // one from another database, must not linger and be scored on old labels.
+    const exportedFiles = new Set(meetings.map((meeting) => `${meeting.id}.json`));
+    for (const file of readdirSync(dataDir)) {
+      if (file.endsWith(".json") && !exportedFiles.has(file)) rmSync(path.join(dataDir, file));
+    }
     let labels = 0;
     for (const meeting of meetings) {
       const fixture: MeetingFixture = {
@@ -219,7 +225,7 @@ const toEvalCandidate = (candidate: DecisionCandidate): EvalCandidate => ({
  */
 async function extractCandidates(
   fixture: MeetingFixture,
-  modelName: string | undefined,
+  modelName: string,
 ): Promise<{ candidates: EvalCandidate[]; sectionsTotal: number; sectionsUnread: number }> {
   const turns: TranscriptTurn[] = parseTranscript({
     transcription: fixture.transcription,
@@ -300,7 +306,7 @@ async function runEval(args: Args): Promise<void> {
     console.log = () => undefined;
     let extracted;
     try {
-      extracted = await extractCandidates(fixture, args.model);
+      extracted = await extractCandidates(fixture, model);
     } finally {
       console.log = log;
     }
