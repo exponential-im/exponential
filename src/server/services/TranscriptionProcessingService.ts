@@ -32,6 +32,12 @@ export interface DraftTranscriptionActionsResult {
   draftCount: number;
   /** Unreviewed drafts a re-extract removed to make way for the new ones. */
   draftsReplaced?: number;
+  /**
+   * A re-extract left the existing drafts in place because the transcript
+   * could not be read in full. Said out loud so the reviewer is not left
+   * looking at an unchanged list with no explanation.
+   */
+  draftsKept?: boolean;
   errors: string[];
 }
 
@@ -325,6 +331,7 @@ export class TranscriptionProcessingService {
           // already there came from a reading that could, so they stay.
           result.success = true;
           result.draftCount = existingDraftCount;
+          result.draftsKept = true;
           return result;
         }
         // The old drafts are removed only once the new ones exist (below):

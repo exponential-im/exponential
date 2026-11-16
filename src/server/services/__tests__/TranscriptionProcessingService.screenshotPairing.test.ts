@@ -344,7 +344,7 @@ describe("generateDraftActions with action items from the combined decision pass
         transcriptIncomplete: true,
       });
 
-      expect(result).toMatchObject({ success: true, draftCount: 2 });
+      expect(result).toMatchObject({ success: true, draftCount: 2, draftsKept: true });
       expect(db.action.deleteMany).not.toHaveBeenCalled();
       expect(db.action.create).not.toHaveBeenCalled();
     });
