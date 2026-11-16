@@ -1,7 +1,6 @@
 import * as Sentry from "@sentry/nextjs";
 
 import { db } from "~/server/db";
-import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { ingestSentryBug } from "~/server/services/sentry/SentryBugService";
 import {
   buildClientErrorBody,
@@ -83,18 +82,14 @@ export function reportHandledErrorServer(
     context,
   };
 
-  // Filed after the response, with the platform keeping the function alive
-  // until it settles: a bare `void` promise can be frozen with the instance
-  // and the ticket silently never filed. The caller still returns at once.
-  // Dedup on the error fingerprint happens inside ingestSentryBug.
-  runAfterResponse(() =>
-    ingestSentryBug(db, buildClientErrorBug(report), {
-      body: buildClientErrorBody(report),
-      labels: clientErrorLabels(area),
-      heading: "New app error",
-      ...(renotifyAfterMs !== undefined ? { renotifyAfterMs } : {}),
-    }).catch((ingestError: unknown) => {
-      console.error(`[reportHandledErrorServer] could not file a bug (${area}):`, ingestError);
-    }),
-  );
+  // Fire-and-forget, like the client helper's fetch. Dedup on the error
+  // fingerprint happens inside ingestSentryBug.
+  void ingestSentryBug(db, buildClientErrorBug(report), {
+    body: buildClientErrorBody(report),
+    labels: clientErrorLabels(area),
+    heading: "New app error",
+    ...(renotifyAfterMs !== undefined ? { renotifyAfterMs } : {}),
+  }).catch((ingestError: unknown) => {
+    console.error(`[reportHandledErrorServer] could not file a bug (${area}):`, ingestError);
+  });
 }
