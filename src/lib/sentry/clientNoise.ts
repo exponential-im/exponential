@@ -25,6 +25,10 @@ export const IGNORE_ERRORS: RegExp[] = [
   /^(TypeError: )?network error$/,
   // A fetch aborted by navigation / unmount (Safari's wording).
   /^(AbortError: )?Fetch is aborted$/,
+  // A promise rejected with a bare {code, message} object: the shape wallet
+  // providers (EIP-1193) and extensions use. Nothing in our code rejects
+  // with that shape; real errors are Error instances and still report.
+  /^(UnhandledRejection: )?Object captured as promise rejection with keys: code, message$/,
   // Something appended a second root element to `document` itself, which
   // React never does: an extension or translator injecting markup.
   /^(HierarchyRequestError: )?Failed to execute 'appendChild' on 'Node': Only one element on document allowed\.$/,

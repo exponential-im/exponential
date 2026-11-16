@@ -25,6 +25,7 @@ describe("IGNORE_ERRORS", () => {
     ["Error", "NetworkError: A network error occurred."],
     ["TypeError", "network error"],
     ["AbortError", "Fetch is aborted"],
+    ["UnhandledRejection", "Object captured as promise rejection with keys: code, message"],
     ["HierarchyRequestError", "Failed to execute 'appendChild' on 'Node': Only one element on document allowed."],
   ])("drops %s: %s", (type, value) => {
     expect(ignored(type, value)).toBe(true);
@@ -37,6 +38,8 @@ describe("IGNORE_ERRORS", () => {
     ["TypeError", "e.scrollTo is not a function"],
     ["NotFoundError", "Failed to execute 'removeChild' on 'Node': The node to be removed is not a child of this node."],
     ["Error", "Something network error happened"],
+    ["UnhandledRejection", "Object captured as promise rejection with keys: code, data, message"],
+    ["UnhandledRejection", "Object captured as promise rejection with keys: code"],
   ])("keeps %s: %s", (type, value) => {
     expect(ignored(type, value)).toBe(false);
   });
