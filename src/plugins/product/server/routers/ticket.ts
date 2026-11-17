@@ -140,11 +140,8 @@ const DEP_TICKET_SELECT = {
   priority: true,
   prUrl: true,
   assignee: { select: { id: true, name: true, image: true } },
-} as const;
-
-/** `ticket.search` rows: a dependency row plus the Product it lives in. */
-const SEARCH_TICKET_SELECT = {
-  ...DEP_TICKET_SELECT,
+  // ADR-0002: a linked ticket may live in a sibling Product, so a dependency
+  // row (and a search result) says which one, for its link and display ID.
   product: { select: { id: true, name: true, slug: true } },
 } as const;
 
@@ -1369,7 +1366,7 @@ export const ticketRouter = createTRPCRouter({
           orderBy: [{ updatedAt: "desc" }],
           take,
           ...(skip > 0 ? { skip } : {}),
-          select: SEARCH_TICKET_SELECT,
+          select: DEP_TICKET_SELECT,
         });
 
       if (!q) return find({}, limit);

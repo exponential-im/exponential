@@ -1165,3 +1165,46 @@ describe("ticket router — search scope (mocked)", () => {
     expect(dbMock.ticket.findMany).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * ADR-0002: moving a Product to another workspace must not leave a
+ * dependency edge crossing workspaces, so edges to Products left behind go.
+ */
+describe("product.moveToWorkspace drops cross-workspace dependencies (mocked)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    dbMock.product.findUnique.mockResolvedValue(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { id: productId, workspaceId, slug: "plugin", name: "Plugin" } as any,
+    );
+    stubMembership(dbMock, true);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dbMock.workspace.findUnique.mockResolvedValue({ slug: "other" } as any);
+    dbMock.product.findMany.mockResolvedValue([]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dbMock.$transaction.mockImplementation((fn: any) => fn(dbMock));
+    dbMock.ticket.findMany.mockResolvedValue([]);
+    dbMock.ticketDependency.deleteMany.mockResolvedValue({ count: 2 });
+  });
+
+  it("deletes edges between the moved product and any other product, and reports the count", async () => {
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.product.product.moveToWorkspace({
+      id: productId,
+      targetWorkspaceId: "ws-2",
+    });
+
+    expect(dbMock.ticketDependency.deleteMany).toHaveBeenCalledWith({
+      where: {
+        OR: [
+          { ticket: { productId }, dependsOn: { productId: { not: productId } } },
+          { dependsOn: { productId }, ticket: { productId: { not: productId } } },
+        ],
+      },
+    });
+    expect(res.droppedDependencies).toBe(2);
+  });
+});
