@@ -180,7 +180,7 @@ test("a 1-star rating in the chat posts once to the ops room, and the link opens
 
   // ── Why, in one tap, plus a note: stored on the same rating ──────────
   await page.getByRole("button", { name: "Wrong answer" }).click();
-  await page.getByLabel("Note about this response").fill("It said nothing was there.");
+  await page.getByPlaceholder("Anything else? (optional)").fill("It said nothing was there.");
   await page.getByRole("button", { name: "Done" }).click();
   await expect(page.getByText("Thanks for your feedback!")).toBeVisible();
   await expect

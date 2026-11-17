@@ -144,47 +144,56 @@ export const feedbackRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Reply not found" });
       }
 
-      const existing = await ctx.db.feedback.findFirst({
-        where: { userId, aiInteractionId: input.aiInteractionId, feature: "agent_response" },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, content: true, metadata: true },
-      });
-      const previous = metadataObject(existing?.metadata);
-      const shouldNotify = isLowRating(input.rating) && typeof previous.opsNotifiedAt !== "string";
-      const now = new Date().toISOString();
-      const metadata = {
-        ...previous,
-        ...(input.improvementSuggestion !== undefined
-          ? { improvementSuggestion: input.improvementSuggestion }
-          : {}),
-        ...(input.reasons !== undefined ? { reasons: input.reasons } : {}),
-        timestamp: now,
-        // Claimed with the write, before the post: a double tap must not
-        // post twice, and a failed post is not worth a second ping.
-        ...(shouldNotify ? { opsNotifiedAt: now } : {}),
-      } as Prisma.InputJsonObject;
+      // Read-then-write, so it is serialized per person per reply: the star
+      // tap and a reason tap right behind it would otherwise both find no
+      // row, both create one and both post. The lock is released at commit.
+      // (There is no unique constraint to lean on: older rows may repeat.)
+      const { feedbackEntry, shouldNotify } = await ctx.db.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`agent-feedback:${userId}:${input.aiInteractionId}`}))`;
+        const existing = await tx.feedback.findFirst({
+          where: { userId, aiInteractionId: input.aiInteractionId, feature: "agent_response" },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, content: true, metadata: true },
+        });
+        const previous = metadataObject(existing?.metadata);
+        const notify = isLowRating(input.rating) && typeof previous.opsNotifiedAt !== "string";
+        const now = new Date().toISOString();
+        const metadata = {
+          ...previous,
+          ...(input.improvementSuggestion !== undefined
+            ? { improvementSuggestion: input.improvementSuggestion }
+            : {}),
+          ...(input.reasons !== undefined ? { reasons: input.reasons } : {}),
+          timestamp: now,
+          // Claimed in the same transaction as the read, before the post: a
+          // double tap cannot post twice, and a failed post is not worth a
+          // second ping.
+          ...(notify ? { opsNotifiedAt: now } : {}),
+        } as Prisma.InputJsonObject;
 
-      const feedbackEntry = existing
-        ? await ctx.db.feedback.update({
-            where: { id: existing.id },
-            data: {
-              rating: input.rating,
-              content: input.comment ?? existing.content,
-              metadata,
-            },
-            select: { id: true },
-          })
-        : await ctx.db.feedback.create({
-            data: {
-              userId,
-              feature: "agent_response",
-              rating: input.rating,
-              content: input.comment ?? "",
-              aiInteractionId: input.aiInteractionId,
-              metadata,
-            },
-            select: { id: true },
-          });
+        const entry = existing
+          ? await tx.feedback.update({
+              where: { id: existing.id },
+              data: {
+                rating: input.rating,
+                content: input.comment ?? existing.content,
+                metadata,
+              },
+              select: { id: true },
+            })
+          : await tx.feedback.create({
+              data: {
+                userId,
+                feature: "agent_response",
+                rating: input.rating,
+                content: input.comment ?? "",
+                aiInteractionId: input.aiInteractionId,
+                metadata,
+              },
+              select: { id: true },
+            });
+        return { feedbackEntry: entry, shouldNotify: notify };
+      });
 
       if (shouldNotify) {
         // After the response, kept alive by the platform: the person who

@@ -106,9 +106,9 @@ export function InteractionTrace({ interactionId }: { interactionId: string }) {
                     </Text>
                   </Group>
                   {rating.note && (
-                    <Text size="sm" className="mt-1 whitespace-pre-wrap text-text-secondary">
-                      {rating.note}
-                    </Text>
+                    <div className="mt-1">
+                      <MarkdownRenderer content={rating.note} variant="compact" />
+                    </div>
                   )}
                 </div>
                 <Button

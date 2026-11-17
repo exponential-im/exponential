@@ -56,6 +56,8 @@ describe("feedback.submitAgentFeedback", () => {
     db.feedback.findFirst.mockResolvedValue(null);
     db.feedback.create.mockResolvedValue({ id: "fb-1" } as never);
     db.feedback.update.mockResolvedValue({ id: "fb-1" } as never);
+    // The rating is written inside a transaction; hand the callback the mock.
+    db.$transaction.mockImplementation(((run: (tx: PrismaClient) => unknown) => run(db)) as never);
   });
 
   it("posts a low rating to the ops room once and files no ticket", async () => {
@@ -68,6 +70,9 @@ describe("feedback.submitAgentFeedback", () => {
     expect((created?.metadata as Record<string, unknown>).opsNotifiedAt).toEqual(expect.any(String));
     expect(db.ticket.create).not.toHaveBeenCalled();
     expect(db.featureRequest.create).not.toHaveBeenCalled();
+    // Serialized per person per reply, so two taps cannot both post.
+    const lockSql = (db.$executeRaw.mock.calls[0]?.[0] as unknown as string[]).join("?");
+    expect(lockSql).toContain("pg_advisory_xact_lock");
   });
 
   it("stores the reasons and note on the same rating without a second post", async () => {
