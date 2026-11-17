@@ -419,6 +419,10 @@ export default function TicketsBacklogPage() {
   // something shows them or filters them: the section opened, the board (it
   // has Done and Deployed columns), a search, or a Filter facet. A status
   // facet that names no completed status rules them all out instead.
+  // Opening the Filter popover loads them too: its options are derived from
+  // the loaded rows, so values found only on completed tickets would be
+  // missing otherwise.
+  const [filterPopoverOpened, setFilterPopoverOpened] = useState(false);
   const statusFilterExcludesCompleted =
     filters.status.length > 0 &&
     !filters.status.some((st) => COMPLETED_STATUSES.has(st));
@@ -427,7 +431,8 @@ export default function TicketsBacklogPage() {
   const needCompleted =
     entity === "tickets" &&
     !statusFilterExcludesCompleted &&
-    (view === "board" || !collapsed.has("__completed") || clientFilterActive);
+    (view === "board" || !collapsed.has("__completed") || clientFilterActive ||
+      filterPopoverOpened);
 
   const productId = product?.id ?? "";
   const { data: activeList, isLoading } = api.product.ticket.listSummaries.useQuery(
@@ -743,10 +748,12 @@ export default function TicketsBacklogPage() {
     return { active, completed };
   }, [sorted]);
 
-  // The Completed header's count. Once the rows are in, count them (search
-  // and facets apply to them); before that the server's count is exact,
-  // because any client-side filter would already have loaded them.
-  const completedTotal = completedLoaded
+  // The Completed header's count. While the rows are wanted, count them
+  // (search and facets apply to them); otherwise the server's count is exact,
+  // because any client-side filter would have made them wanted. Rows cached
+  // from an earlier visit don't count: a disabled query isn't refetched when
+  // a mutation invalidates it, so they can be stale.
+  const completedTotal = needCompleted && completedLoaded
     ? completedTickets.length
     : statusFilterExcludesCompleted
       ? 0
@@ -1227,6 +1234,7 @@ export default function TicketsBacklogPage() {
                 activeCount={activeFilterCount}
                 onToggle={toggleFilter}
                 onClear={clearFilters}
+                onOpen={() => setFilterPopoverOpened(true)}
               />
             )}
 
