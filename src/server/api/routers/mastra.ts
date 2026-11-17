@@ -1664,6 +1664,10 @@ export const mastraRouter = createTRPCRouter({
       meetingType: z.string().optional(),
       limit: z.number().optional().default(5),
       includeTranscript: z.boolean().optional().default(true),
+      // One specific Meeting, e.g. the one open on /recording/<id>. Without
+      // it the agent can only take the latest few and hope the right one is
+      // among them.
+      transcriptionId: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1714,6 +1718,15 @@ export const mastraRouter = createTRPCRouter({
           summary: true,
         },
       });
+
+      // A Meeting asked for by id that isn't there is an answer the agent
+      // must hear ("not found"), not an empty list it reads as "no meetings".
+      if (input.transcriptionId && transcriptions.length === 0) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Meeting not found or access denied',
+        });
+      }
 
       // Filter by participants if specified
       if (input.participants && input.participants.length > 0) {
@@ -1766,6 +1779,8 @@ export const mastraRouter = createTRPCRouter({
       }).optional(),
       topK: z.number().optional().default(5),
       sourceTypes: z.array(z.enum(['transcription', 'resource', 'document', 'page'])).optional(),
+      // Search inside one Meeting (the one open on /recording/<id>).
+      transcriptionId: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1792,22 +1807,27 @@ export const mastraRouter = createTRPCRouter({
 
       try {
         // Use KnowledgeService for vector search.
-        // We pass userId for further-narrowing — this matches the previous
-        // behaviour for this user-facing knowledge-base search where users only
-        // expect to see their own indexed content. The cross-user agent path
+        // We pass userId for further-narrowing — this user-facing
+        // knowledge-base search shows people their own indexed pages,
+        // resources and documents. The cross-user agent path
         // (knowledgeChunkRouter.semanticSearch) deliberately omits userId.
+        //
+        // Meetings are the exception: a Meeting imported by an agent or a
+        // teammate carries the importer's userId on its chunks, so "own chunks"
+        // hid Meetings the caller can open on the Meetings page. Their chunks
+        // are governed by `transcriptionViewerId` alone.
         const knowledgeService = getKnowledgeService(ctx.db);
 
         const searchResults = await knowledgeService.search(input.query, {
           workspaceId: input.workspaceId,
           userId,
-          // Own chunks are own pages/meetings/resources today; keep access
-          // explicit anyway.
+          userIdExemptSourceTypes: ['transcription'],
           pageViewerId: userId,
           transcriptionViewerId: userId,
           resourceViewerId: userId,
           projectId: input.projectId,
-          sourceTypes: input.sourceTypes,
+          sourceTypes: input.transcriptionId ? ['transcription'] : input.sourceTypes,
+          sourceId: input.transcriptionId,
           limit: input.topK,
         });
 
@@ -1843,6 +1863,10 @@ export const mastraRouter = createTRPCRouter({
 
         if (input.projectId) {
           whereClause.projectId = input.projectId;
+        }
+
+        if (input.transcriptionId) {
+          whereClause.id = input.transcriptionId;
         }
 
         // Mirror the vector-search nullable-tolerant filter: include sessions in this

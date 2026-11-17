@@ -117,7 +117,7 @@ For Railway/Supabase/Neon, pgvector is pre-installed. Just run the migration.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `mastra.queryMeetingContext` | mutation | Semantic search across all knowledge (transcriptions + resources) |
+| `mastra.queryMeetingContext` | query | Semantic search across knowledge, `workspaceId` required. The caller's own pages, resources and documents, plus every Meeting they can view (a Meeting imported by an agent or a teammate carries the importer's `userId` on its chunks, so Meetings are scoped by the viewer rule, not by chunk owner). `transcriptionId` searches inside one Meeting. Behind the agent's `query-meeting-context` tool and the Knowledge Base search box |
 | `mastra.backfillTranscriptionEmbeddings` | mutation | Generate embeddings for existing transcriptions |
 | `mastra.getEmbeddingStats` | query | Get statistics on embedding coverage |
 
