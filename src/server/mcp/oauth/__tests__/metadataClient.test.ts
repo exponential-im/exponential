@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mockDeep, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
-import { isMetadataDocumentClientId, METADATA_DOCUMENT_TTL_MS, resolveMetadataClient } from "../metadataClient";
+import { isMetadataDocumentClientId, METADATA_DOCUMENT_TTL_MS, publicOnlyLookup, resolveMetadataClient } from "../metadataClient";
 
 const URL_ID = "https://claude.ai/oauth/claude-code-client-metadata";
 const DOCUMENT = {
@@ -25,15 +25,10 @@ const resolvePrivate = async () => ["10.0.0.5"];
 let db: DeepMockProxy<PrismaClient>;
 let fetchMock: ReturnType<typeof vi.fn>;
 
-const jsonResponse = (body: unknown, init: ResponseInit = {}) =>
-  new Response(typeof body === "string" ? body : JSON.stringify(body), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-    ...init,
-  });
+const jsonResponse = (body: unknown) => ({ status: 200, body: typeof body === "string" ? body : JSON.stringify(body) });
 
 const resolve = (deps: { resolveHost?: () => Promise<string[]> } = {}) =>
-  resolveMetadataClient(db, URL_ID, { fetch: fetchMock as unknown as typeof fetch, resolveHost: resolvePublic, ...deps });
+  resolveMetadataClient(db, URL_ID, { getDocument: fetchMock, resolveHost: resolvePublic, ...deps });
 
 beforeEach(() => {
   db = mockDeep<PrismaClient>();
@@ -70,10 +65,7 @@ describe("resolveMetadataClient", () => {
       ok: true,
       client: expect.objectContaining({ kind: "metadata", name: "Claude Code", redirectUris: DOCUMENT.redirect_uris }) as unknown,
     });
-    expect(fetchMock).toHaveBeenCalledWith(
-      URL_ID,
-      expect.objectContaining({ redirect: "manual", signal: expect.any(AbortSignal) as unknown }),
-    );
+    expect(fetchMock).toHaveBeenCalledWith(URL_ID);
     expect(db.oAuthClient.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { metadataUrl: URL_ID },
@@ -127,7 +119,7 @@ describe("resolveMetadataClient", () => {
 
   it("refuses a literal private address, without fetching", async () => {
     const result = await resolveMetadataClient(db, "https://169.254.169.254/latest/meta-data", {
-      fetch: fetchMock as unknown as typeof fetch,
+      getDocument: fetchMock,
       resolveHost: resolvePublic,
     });
 
@@ -143,8 +135,8 @@ describe("resolveMetadataClient", () => {
   });
 
   it.each([
-    ["a redirect (never followed)", () => new Response(null, { status: 302, headers: { location: "https://elsewhere.example/c.json" } }), /HTTP 302/],
-    ["a 404", () => new Response("nope", { status: 404 }), /HTTP 404/],
+    ["a redirect (never followed)", () => ({ status: 302, body: "" }), /HTTP 302/],
+    ["a 404", () => ({ status: 404, body: "" }), /HTTP 404/],
     ["a body that is not JSON", () => jsonResponse("<html>"), /not JSON/],
     ["a document over 64 KB", () => jsonResponse({ ...DOCUMENT, padding: "x".repeat(70 * 1024) }), /64 KB/],
     ["a confidential client", () => jsonResponse({ ...DOCUMENT, token_endpoint_auth_method: "private_key_jwt" }), /only public clients/],
@@ -171,9 +163,55 @@ describe("resolveMetadataClient", () => {
     expect(await resolve()).toEqual({ ok: false, message: expect.stringMatching(/could not be fetched/) as unknown });
   });
 
+  it("names the refused address when the connection's own lookup finds a private one", async () => {
+    // The guard saw a public address; the second lookup, at connect time, did not.
+    fetchMock.mockRejectedValue(Object.assign(new Error("refused"), { code: "EPRIVATEADDRESS" }));
+
+    expect(await resolve()).toEqual({ ok: false, message: "claude.ai resolves to a private or loopback address" });
+    expect(db.oAuthClient.upsert).not.toHaveBeenCalled();
+  });
+
   it("names a client that sends no name after its host", async () => {
     fetchMock.mockResolvedValue(jsonResponse({ client_id: URL_ID, redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }));
 
     expect(await resolve()).toMatchObject({ ok: true, client: { name: "claude.ai" } });
+  });
+});
+
+describe("publicOnlyLookup (the DNS rebinding defence)", () => {
+  type Answer = { address: string; family: number }[];
+  const lookupWith = (answer: Answer) =>
+    ((_host: string, _options: unknown, callback: (error: null, addresses: Answer) => void) => callback(null, answer)) as never;
+
+  function run(answer: Answer, options: { all?: boolean }, allowLoopback = false) {
+    return new Promise<{ error: NodeJS.ErrnoException | null; address: unknown; family?: number }>((done) => {
+      publicOnlyLookup(allowLoopback, lookupWith(answer))("rebind.example", options as never, (error, address, family) =>
+        done({ error, address, family }),
+      );
+    });
+  }
+
+  it("passes a public answer through, as one address or as the list", async () => {
+    expect(await run([{ address: "160.79.104.10", family: 4 }], {})).toEqual({ error: null, address: "160.79.104.10", family: 4 });
+    expect(await run([{ address: "160.79.104.10", family: 4 }], { all: true })).toMatchObject({
+      error: null,
+      address: [{ address: "160.79.104.10", family: 4 }],
+    });
+  });
+
+  it.each([
+    ["a private address", [{ address: "10.0.0.5", family: 4 }]],
+    ["cloud metadata", [{ address: "169.254.169.254", family: 4 }]],
+    ["loopback", [{ address: "127.0.0.1", family: 4 }]],
+    ["a mix of public and private", [{ address: "160.79.104.10", family: 4 }, { address: "192.168.1.1", family: 4 }]],
+    ["no answer at all", []],
+  ])("refuses %s at connect time, whatever the earlier check saw", async (_label, answer) => {
+    const { error } = await run(answer, { all: true });
+
+    expect(error?.code).toBe("EPRIVATEADDRESS");
+  });
+
+  it("lets loopback through only when told to (localhost outside production)", async () => {
+    expect((await run([{ address: "127.0.0.1", family: 4 }], {}, true)).error).toBeNull();
   });
 });

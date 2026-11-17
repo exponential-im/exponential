@@ -4,16 +4,29 @@
  * it publishes as its `client_id`; the document lists its name and redirect
  * URIs. Claude offers this as "Use Claude's published identity".
  *
- * Fetching a URL a stranger chose is an SSRF primitive, so the fetch goes
- * through `assertSafeOutboundUrl` (https only, no private or loopback
- * address), follows no redirects, gives up after 5 seconds and reads at most
- * 64 KB. The document is cached as an `OAuthClient` of kind `metadata` and
- * reused for 24 hours before it is fetched again.
+ * Fetching a URL a stranger chose is an SSRF primitive, and anyone can
+ * trigger it by opening `/oauth/authorize`. So the URL first passes
+ * `assertSafeOutboundUrl` (https only, no private or loopback address), and
+ * the request itself checks again where it matters: the socket's own DNS
+ * lookup refuses a private answer, so the address that was checked is the
+ * address connected to and a rebinding DNS server can't swap in an internal
+ * one between the two. It follows no redirects, gives up after 5 seconds and
+ * reads at most 64 KB. The document is cached as an `OAuthClient` of kind
+ * `metadata` and reused for 24 hours before it is fetched again.
  */
 
+import dns from "node:dns";
+import http from "node:http";
+import https from "node:https";
+import type { LookupFunction } from "node:net";
 import type { PrismaClient } from "@prisma/client";
 
-import { assertSafeOutboundUrl, defaultResolveHost, type ResolveHost } from "~/server/utils/privateAddress";
+import {
+  assertSafeOutboundUrl,
+  defaultResolveHost,
+  isPrivateAddress,
+  type ResolveHost,
+} from "~/server/utils/privateAddress";
 import { parseRegistration, UNNAMED_CLIENT } from "./registration";
 
 /** A cached document is reused this long before it is fetched again. */
@@ -31,13 +44,88 @@ export interface MetadataClient {
 
 export type MetadataClientResult = { ok: true; client: MetadataClient } | { ok: false; message: string };
 
+/** A fetched document: the HTTP status and, for a 200, the body. */
+export interface FetchedDocument {
+  status: number;
+  body: string;
+}
+
 /** What the fetch depends on; tests replace both, so no test touches the network. */
 export interface MetadataFetchDeps {
-  fetch?: typeof fetch;
+  getDocument?: (url: string) => Promise<FetchedDocument>;
   resolveHost?: ResolveHost;
 }
 
 class MetadataDocumentError extends Error {}
+
+type LookupAll = (
+  hostname: string,
+  options: dns.LookupAllOptions,
+  callback: (error: NodeJS.ErrnoException | null, addresses: dns.LookupAddress[]) => void,
+) => void;
+
+/**
+ * A socket lookup that refuses any private or loopback answer (the DNS
+ * rebinding defence). Node calls it to resolve the host it is about to
+ * connect to, so what it lets through is what the request reaches.
+ * `allowLoopback` is the local-development escape hatch for `localhost`.
+ */
+export function publicOnlyLookup(allowLoopback: boolean, lookupAll: LookupAll = dns.lookup): LookupFunction {
+  return (hostname, options, callback) => {
+    lookupAll(hostname, { ...options, all: true }, (error, addresses) => {
+      if (error) {
+        callback(error, "");
+        return;
+      }
+      const first = addresses[0];
+      if (!first || (!allowLoopback && addresses.some((entry) => isPrivateAddress(entry.address)))) {
+        const refused: NodeJS.ErrnoException = new Error(`${hostname} resolves to a private or loopback address`);
+        refused.code = "EPRIVATEADDRESS";
+        callback(refused, "");
+        return;
+      }
+      if (options.all) callback(null, addresses);
+      else callback(null, first.address, first.family);
+    });
+  };
+}
+
+/** GET `url` once: no redirects, a 5 second budget, at most 64 KB, through the public-only lookup. */
+function getPinnedDocument(url: string): Promise<FetchedDocument> {
+  const target = new URL(url);
+  const allowLoopback = process.env.NODE_ENV !== "production" && target.hostname === "localhost";
+  const client = target.protocol === "http:" ? http : https;
+  return new Promise((resolve, reject) => {
+    const request = client.get(
+      target,
+      { headers: { accept: "application/json" }, lookup: publicOnlyLookup(allowLoopback) },
+      (response) => {
+        const status = response.statusCode ?? 0;
+        if (status !== 200) {
+          response.resume();
+          resolve({ status, body: "" });
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let total = 0;
+        response.on("data", (chunk: Buffer) => {
+          total += chunk.length;
+          if (total > MAX_DOCUMENT_BYTES) {
+            response.destroy();
+            reject(new MetadataDocumentError("its client document is larger than 64 KB"));
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
+        response.on("error", reject);
+      },
+    );
+    const timer = setTimeout(() => request.destroy(new Error("timed out")), FETCH_TIMEOUT_MS);
+    request.on("close", () => clearTimeout(timer));
+    request.on("error", reject);
+  });
+}
 
 /**
  * Whether `clientId` names a metadata document rather than a registered
@@ -64,28 +152,6 @@ export function isMetadataDocumentClientId(clientId: string): boolean {
   return !rawPath.split("/").some((segment) => segment === "." || segment === "..");
 }
 
-async function readCapped(response: Response): Promise<string> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_DOCUMENT_BYTES) {
-    throw new MetadataDocumentError("its client document is larger than 64 KB");
-  }
-  if (!response.body) return response.text();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_DOCUMENT_BYTES) {
-      await reader.cancel();
-      throw new MetadataDocumentError("its client document is larger than 64 KB");
-    }
-    chunks.push(value);
-  }
-  return new TextDecoder().decode(Buffer.concat(chunks));
-}
-
 /** Fetch and check the document at `url`; throws `MetadataDocumentError` with a reason. */
 async function fetchDocument(url: string, deps: MetadataFetchDeps): Promise<{ name: string; redirectUris: string[] }> {
   await assertSafeOutboundUrl(
@@ -101,25 +167,27 @@ async function fetchDocument(url: string, deps: MetadataFetchDeps): Promise<{ na
     deps.resolveHost ?? defaultResolveHost,
   );
 
-  let response: Response;
+  let fetched: FetchedDocument;
   try {
-    response = await (deps.fetch ?? fetch)(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: { accept: "application/json" },
-    });
-  } catch {
-    throw new MetadataDocumentError("its client document could not be fetched");
+    fetched = await (deps.getDocument ?? getPinnedDocument)(url);
+  } catch (error) {
+    if (error instanceof MetadataDocumentError) throw error;
+    const refusedAddress = (error as NodeJS.ErrnoException).code === "EPRIVATEADDRESS";
+    throw new MetadataDocumentError(
+      refusedAddress ? `${new URL(url).hostname} resolves to a private or loopback address` : "its client document could not be fetched",
+    );
   }
-  if (response.status !== 200) {
-    throw new MetadataDocumentError(`its client document answered HTTP ${response.status}`);
+  if (fetched.status !== 200) {
+    throw new MetadataDocumentError(`its client document answered HTTP ${fetched.status}`);
+  }
+  if (Buffer.byteLength(fetched.body, "utf8") > MAX_DOCUMENT_BYTES) {
+    throw new MetadataDocumentError("its client document is larger than 64 KB");
   }
 
   let document: unknown;
   try {
-    document = JSON.parse(await readCapped(response));
-  } catch (error) {
-    if (error instanceof MetadataDocumentError) throw error;
+    document = JSON.parse(fetched.body);
+  } catch {
     throw new MetadataDocumentError("its client document is not JSON");
   }
   if (typeof document !== "object" || document === null || Array.isArray(document)) {

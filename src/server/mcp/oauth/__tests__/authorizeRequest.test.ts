@@ -127,7 +127,7 @@ describe("validateAuthorizeRequest", () => {
     const upsert = vi.fn();
     const metadataDb = { oAuthClient: { findUnique, upsert } } as unknown as Pick<PrismaClient, "oAuthClient">;
     const deps = (body: unknown) => ({
-      fetch: vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch,
+      getDocument: vi.fn().mockResolvedValue({ status: 200, body: JSON.stringify(body) }),
       resolveHost: async () => ["160.79.104.10"],
     });
 
