@@ -1,17 +1,14 @@
 /**
  * `POST /api/oauth/token` (hosted MCP Agent PRD, D9): a public MCP client
- * exchanges an authorization code and its PKCE verifier for an access token
- * bound to `/api/mcp` and a refresh token. Form-encoded in, JSON out. 404
- * while `MCP_OAUTH_MODE` is off.
- *
- * Only the `authorization_code` grant for now; the `refresh_token` grant
- * (rotation and replay detection, D8) comes with the next ticket.
+ * exchanges an authorization code and its PKCE verifier, or a refresh token,
+ * for an access token bound to `/api/mcp` and a new refresh token.
+ * Form-encoded in, JSON out. 404 while `MCP_OAUTH_MODE` is off.
  */
 
 import { db } from "~/server/db";
 import { oauthError, publicJson, publicPreflight, whenOAuthEnabled } from "~/server/mcp/oauth/http";
-import { mcpResource } from "~/server/mcp/oauth/metadata";
-import { redeemAuthorizationCode } from "~/server/mcp/oauth/tokenGrant";
+import { MCP_SCOPE, mcpResource } from "~/server/mcp/oauth/metadata";
+import { redeemAuthorizationCode, redeemRefreshToken } from "~/server/mcp/oauth/tokenGrant";
 import { checkRateLimit, clientIpFrom, tooManyRequestsInit } from "~/server/utils/rateLimit";
 
 export const runtime = "nodejs";
@@ -54,13 +51,29 @@ export const POST = whenOAuthEnabled(async (req: Request): Promise<Response> => 
   }
 
   const grantType = form.get("grant_type");
-  if (grantType !== "authorization_code") {
-    return oauthError(400, "unsupported_grant_type", "Only the authorization_code grant is supported.");
+  if (grantType !== "authorization_code" && grantType !== "refresh_token") {
+    return oauthError(400, "unsupported_grant_type", "Only the authorization_code and refresh_token grants are supported.");
   }
 
   const resource = form.get("resource");
   if (resource !== null && resource !== mcpResource() && resource !== `${mcpResource()}/`) {
     return oauthError(400, "invalid_target", `This server issues tokens only for ${mcpResource()}.`);
+  }
+
+  if (grantType === "refresh_token") {
+    const refreshToken = form.get("refresh_token");
+    const clientId = form.get("client_id");
+    if (!refreshToken || !clientId) {
+      return oauthError(400, "invalid_request", "refresh_token and client_id are required.");
+    }
+    // RFC 6749 §6: a refresh may narrow the scope, never widen it. There is one scope.
+    const scope = form.get("scope");
+    if (scope !== null && scope.split(" ").some((s) => s !== "" && s !== MCP_SCOPE)) {
+      return oauthError(400, "invalid_scope", `The only scope is "${MCP_SCOPE}".`);
+    }
+    const refreshed = await redeemRefreshToken(db, { refreshToken, clientId });
+    if (!refreshed.ok) return oauthError(400, refreshed.error, refreshed.description, NO_CACHE);
+    return publicJson(refreshed.tokens, { headers: NO_CACHE });
   }
 
   const code = form.get("code");

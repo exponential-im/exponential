@@ -58,7 +58,8 @@ export function protectedResourceMetadata() {
 /**
  * RFC 8414 authorization-server metadata. It advertises only what this
  * install implements: public clients (no secret) registering themselves,
- * the authorization-code grant with S256 PKCE, and `iss` on the redirect.
+ * the authorization-code grant with S256 PKCE, rotating refresh tokens, and
+ * `iss` on the redirect.
  */
 export function authorizationServerMetadata() {
   const issuer = oauthIssuer();
@@ -69,7 +70,7 @@ export function authorizationServerMetadata() {
     registration_endpoint: `${issuer}/api/oauth/register`,
     scopes_supported: [MCP_SCOPE],
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     authorization_response_iss_parameter_supported: true,
