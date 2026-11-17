@@ -80,6 +80,7 @@ describe.each(["admin", "on"] as const)("with MCP_OAUTH_MODE=%s", (mode) => {
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
       authorization_response_iss_parameter_supported: true,
+      client_id_metadata_document_supported: true,
     });
   });
 

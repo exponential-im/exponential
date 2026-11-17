@@ -25,7 +25,7 @@ function codeRow(overrides: Record<string, unknown> = {}) {
     expiresAt: new Date(Date.now() + 60_000),
     redirectUri: REDIRECT,
     codeChallenge: CHALLENGE,
-    connection: { id: "conn-1", clientId: "client-1", disconnectedAt: null },
+    connection: { id: "conn-1", disconnectedAt: null, client: { id: "client-1", metadataUrl: null } },
     ...overrides,
   };
 }
@@ -102,6 +102,16 @@ describe("redeemAuthorizationCode", () => {
     });
   });
 
+  it("accepts a metadata client by the document URL it uses as client_id", async () => {
+    const url = "https://claude.ai/oauth/claude-code-client-metadata";
+    db.oAuthAuthorizationCode.findUnique.mockResolvedValue(
+      codeRow({ connection: { id: "conn-1", disconnectedAt: null, client: { id: "cuid-1", metadataUrl: url } } }) as never,
+    );
+
+    expect(await redeem({ clientId: url })).toMatchObject({ ok: true });
+    expect(await redeem({ clientId: "https://claude.ai/oauth/someone-else" })).toMatchObject({ ok: false, error: "invalid_grant" });
+  });
+
   it("refuses a reused code and revokes the connection's tokens", async () => {
     db.oAuthAuthorizationCode.findUnique.mockResolvedValue(codeRow({ usedAt: new Date() }) as never);
 
@@ -126,7 +136,7 @@ describe("redeemAuthorizationCode", () => {
     ["another client", () => undefined, { clientId: "client-2" }],
     [
       "a disconnected connection",
-      () => db.oAuthAuthorizationCode.findUnique.mockResolvedValue(codeRow({ connection: { id: "conn-1", clientId: "client-1", disconnectedAt: new Date() } }) as never),
+      () => db.oAuthAuthorizationCode.findUnique.mockResolvedValue(codeRow({ connection: { id: "conn-1", disconnectedAt: new Date(), client: { id: "client-1", metadataUrl: null } } }) as never),
       {},
     ],
   ] as const)("refuses %s with invalid_grant and issues nothing", async (_label, arrange, overrides) => {
@@ -146,7 +156,7 @@ describe("redeemRefreshToken", () => {
       id: "tok-1",
       rotatedAt: null,
       refreshExpiresAt: new Date(Date.now() + 60_000),
-      connection: { id: "conn-1", clientId: "client-1", disconnectedAt: null },
+      connection: { id: "conn-1", disconnectedAt: null, client: { id: "client-1", metadataUrl: null } },
       ...overrides,
     };
   }
@@ -215,7 +225,7 @@ describe("redeemRefreshToken", () => {
     ["another client", () => undefined, { clientId: "client-2" }],
     [
       "a disconnected connection",
-      () => db.oAuthToken.findUnique.mockResolvedValue(tokenRow({ connection: { id: "conn-1", clientId: "client-1", disconnectedAt: new Date() } }) as never),
+      () => db.oAuthToken.findUnique.mockResolvedValue(tokenRow({ connection: { id: "conn-1", disconnectedAt: new Date(), client: { id: "client-1", metadataUrl: null } } }) as never),
       {},
     ],
   ] as const)("refuses %s with invalid_grant and issues nothing", async (_label, arrange, overrides) => {

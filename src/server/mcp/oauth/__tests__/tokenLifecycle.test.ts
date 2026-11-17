@@ -22,8 +22,8 @@ const fake = vi.hoisted(() => {
   const tokens: Row[] = [];
   const connection = {
     id: "conn-1",
-    clientId: "client-1",
     disconnectedAt: null,
+    client: { id: "client-1", metadataUrl: null },
     resource: "https://app.example.test/api/mcp",
     agent: { shadowUser: { id: "shadow-1", email: null, name: "Agent", image: null } },
   };

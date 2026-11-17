@@ -15,6 +15,7 @@
 import crypto from "crypto";
 import type { Prisma, PrismaClient } from "@prisma/client";
 
+import { isClientId } from "./clients";
 import { MCP_SCOPE } from "./metadata";
 import {
   ACCESS_TOKEN_LIFETIME_MS,
@@ -105,7 +106,7 @@ export async function redeemAuthorizationCode(db: GrantDb, redemption: CodeRedem
       expiresAt: true,
       redirectUri: true,
       codeChallenge: true,
-      connection: { select: { id: true, clientId: true, disconnectedAt: true } },
+      connection: { select: { id: true, disconnectedAt: true, client: { select: { id: true, metadataUrl: true } } } },
     },
   });
   if (!code) return invalidGrant("The authorization code is not valid.");
@@ -118,7 +119,7 @@ export async function redeemAuthorizationCode(db: GrantDb, redemption: CodeRedem
   };
   if (code.usedAt) return refuseReuse();
   if (code.expiresAt <= now) return invalidGrant("The authorization code has expired.");
-  if (code.connection.clientId !== redemption.clientId) {
+  if (!isClientId(code.connection.client, redemption.clientId)) {
     return invalidGrant("The authorization code was issued to another client.");
   }
   if (code.redirectUri !== redemption.redirectUri) {
@@ -164,7 +165,7 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
       id: true,
       rotatedAt: true,
       refreshExpiresAt: true,
-      connection: { select: { id: true, clientId: true, disconnectedAt: true } },
+      connection: { select: { id: true, disconnectedAt: true, client: { select: { id: true, metadataUrl: true } } } },
     },
   });
   if (!row) return invalidGrant("The refresh token is not valid.");
@@ -178,7 +179,7 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
   };
   if (row.rotatedAt) return refuseReplay();
   if (row.refreshExpiresAt <= now) return invalidGrant("The refresh token has expired.");
-  if (row.connection.clientId !== redemption.clientId) {
+  if (!isClientId(row.connection.client, redemption.clientId)) {
     return invalidGrant("The refresh token was issued to another client.");
   }
   if (row.connection.disconnectedAt) return invalidGrant("This connection has been disconnected.");

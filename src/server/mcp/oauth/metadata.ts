@@ -57,9 +57,9 @@ export function protectedResourceMetadata() {
 
 /**
  * RFC 8414 authorization-server metadata. It advertises only what this
- * install implements: public clients (no secret) registering themselves,
- * the authorization-code grant with S256 PKCE, rotating refresh tokens, and
- * `iss` on the redirect.
+ * install implements: public clients (no secret) registering themselves
+ * or identified by a client ID metadata document, the authorization-code
+ * grant with S256 PKCE, rotating refresh tokens, and `iss` on the redirect.
  */
 export function authorizationServerMetadata() {
   const issuer = oauthIssuer();
@@ -74,5 +74,6 @@ export function authorizationServerMetadata() {
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
     authorization_response_iss_parameter_supported: true,
+    client_id_metadata_document_supported: true,
   };
 }
