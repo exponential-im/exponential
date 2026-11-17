@@ -72,6 +72,7 @@ const fake = vi.hoisted(() => {
       },
     },
     oAuthConnection: { update: async () => ({}) },
+    $queryRaw: async () => [],
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
   };
   return db;

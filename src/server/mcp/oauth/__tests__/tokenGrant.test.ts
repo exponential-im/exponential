@@ -93,6 +93,15 @@ describe("redeemAuthorizationCode", () => {
     });
   });
 
+  it("takes the connection's lock before claiming the code or writing a token", async () => {
+    await redeem();
+
+    expect(db.$queryRaw.mock.calls[0]?.slice(1)).toEqual(["conn-1"]);
+    const lockedAt = db.$queryRaw.mock.invocationCallOrder[0] ?? Infinity;
+    expect(lockedAt).toBeLessThan(db.oAuthAuthorizationCode.updateMany.mock.invocationCallOrder[0] ?? 0);
+    expect(lockedAt).toBeLessThan(db.oAuthToken.create.mock.invocationCallOrder[0] ?? 0);
+  });
+
   it("claims the code atomically, so it is used once", async () => {
     await redeem();
 
@@ -203,12 +212,20 @@ describe("redeemRefreshToken", () => {
     });
   });
 
-  it("treats a replayed refresh token as stolen: every token of the connection goes", async () => {
+  it("treats a replayed refresh token as stolen: every token of the connection goes, under its lock", async () => {
     db.oAuthToken.findUnique.mockResolvedValue(tokenRow({ rotatedAt: new Date() }) as never);
 
     expect(await refresh()).toMatchObject({ ok: false, error: "invalid_grant" });
     expect(db.oAuthToken.deleteMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" } });
     expect(db.oAuthToken.create).not.toHaveBeenCalled();
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(db.oAuthToken.deleteMany.mock.invocationCallOrder[0] ?? 0);
+  });
+
+  it("takes the connection's lock before rotating the row", async () => {
+    await refresh();
+
+    expect(db.$queryRaw.mock.calls[0]?.slice(1)).toEqual(["conn-1"]);
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(db.oAuthToken.updateMany.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("revokes the connection when it loses a concurrent refresh, the winner's new pair included", async () => {

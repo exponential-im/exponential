@@ -88,6 +88,27 @@ function newPair(now: Date) {
 }
 
 /**
+ * Take the connection's row lock for the rest of the transaction. Every write
+ * to a connection's tokens takes it first (both grants, replay revocation,
+ * `/api/oauth/revoke`, rebinding in `approve`), so they run one at a time per
+ * connection. Without it, under Postgres's Read Committed, a revocation could
+ * delete the rows it can see while a refresh is inserting a new pair, and
+ * the new pair would survive. With it, the revocation waits for the refresh
+ * to commit, and its delete, a new statement, sees the new pair.
+ */
+export async function lockConnection(tx: Prisma.TransactionClient, connectionId: string): Promise<void> {
+  await tx.$queryRaw`SELECT 1 FROM "OAuthConnection" WHERE "id" = ${connectionId} FOR UPDATE`;
+}
+
+/** Delete every token of the connection, under its lock. */
+export async function revokeConnectionTokens(db: Pick<PrismaClient, "$transaction">, connectionId: string): Promise<void> {
+  await db.$transaction(async (tx) => {
+    await lockConnection(tx, connectionId);
+    await tx.oAuthToken.deleteMany({ where: { connectionId } });
+  });
+}
+
+/**
  * Housekeeping on every grant, inside its transaction (no cron): drop the
  * connection's rows whose refresh token has expired, and its expired codes.
  */
@@ -114,7 +135,7 @@ export async function redeemAuthorizationCode(db: GrantDb, redemption: CodeRedem
   // A code used twice may have been intercepted: revoke whatever the
   // connection holds (RFC 9700 §4.5 / OAuth 2.1 §4.1.3).
   const refuseReuse = async () => {
-    await db.oAuthToken.deleteMany({ where: { connectionId: code.connection.id } });
+    await revokeConnectionTokens(db, code.connection.id);
     return invalidGrant("The authorization code has already been used.");
   };
   if (code.usedAt) return refuseReuse();
@@ -132,6 +153,7 @@ export async function redeemAuthorizationCode(db: GrantDb, redemption: CodeRedem
 
   const pair = newPair(now);
   const issued = await db.$transaction(async (tx) => {
+    await lockConnection(tx, code.connection.id);
     // Claim the code atomically: of two concurrent redemptions, one wins.
     const claimed = await tx.oAuthAuthorizationCode.updateMany({
       where: { id: code.id, usedAt: null },
@@ -143,8 +165,8 @@ export async function redeemAuthorizationCode(db: GrantDb, redemption: CodeRedem
     return true;
   });
   // Losing the claim is reuse too, and the winner may be the interceptor. By
-  // now the winner's transaction has committed (the claim waits on its row
-  // lock), so its token exists to be revoked.
+  // now the winner's transaction has committed (it held the connection lock),
+  // so its token exists to be revoked.
   if (!issued) return refuseReuse();
 
   return { ok: true, tokens: pair.response };
@@ -174,7 +196,7 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
   // holding a stolen token already used it, and the server can't tell which.
   // Revoke every token of the connection, so both have to sign in again (D8).
   const refuseReplay = async () => {
-    await db.oAuthToken.deleteMany({ where: { connectionId: row.connection.id } });
+    await revokeConnectionTokens(db, row.connection.id);
     return invalidGrant("The refresh token has already been used.");
   };
   if (row.rotatedAt) return refuseReplay();
@@ -186,6 +208,7 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
 
   const pair = newPair(now);
   const issued = await db.$transaction(async (tx) => {
+    await lockConnection(tx, row.connection.id);
     // Claim the row atomically: of two concurrent refreshes, one wins.
     const claimed = await tx.oAuthToken.updateMany({
       where: { id: row.id, rotatedAt: null },
@@ -197,7 +220,7 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
     return true;
   });
   // Losing the claim is a replay too. The winner's transaction has committed by
-  // now (the claim waits on its row lock), so its new pair is revoked as well.
+  // now (it held the connection lock), so its new pair is revoked as well.
   if (!issued) return refuseReplay();
 
   return { ok: true, tokens: pair.response };

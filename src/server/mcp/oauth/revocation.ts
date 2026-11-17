@@ -12,6 +12,7 @@
 import type { PrismaClient } from "@prisma/client";
 
 import { isClientId } from "./clients";
+import { revokeConnectionTokens } from "./tokenGrant";
 import { ACCESS_TOKEN_PREFIX, hashOAuthSecret, REFRESH_TOKEN_PREFIX } from "./tokens";
 
 export interface Revocation {
@@ -21,7 +22,10 @@ export interface Revocation {
 }
 
 /** Revoke the pair `token` belongs to; returns whether anything was revoked. */
-export async function revokeToken(db: Pick<PrismaClient, "oAuthToken">, revocation: Revocation): Promise<boolean> {
+export async function revokeToken(
+  db: Pick<PrismaClient, "$transaction" | "oAuthToken">,
+  revocation: Revocation,
+): Promise<boolean> {
   const hash = hashOAuthSecret(revocation.token);
   // The prefix says which kind it is, whatever `token_type_hint` claims.
   const where = revocation.token.startsWith(ACCESS_TOKEN_PREFIX)
@@ -38,6 +42,6 @@ export async function revokeToken(db: Pick<PrismaClient, "oAuthToken">, revocati
   if (!row) return false;
   if (revocation.clientId !== null && !isClientId(row.connection.client, revocation.clientId)) return false;
 
-  await db.oAuthToken.deleteMany({ where: { connectionId: row.connection.id } });
+  await revokeConnectionTokens(db, row.connection.id);
   return true;
 }

@@ -21,10 +21,15 @@ vi.mock("~/env", async (importOriginal) => {
   };
 });
 
-const { db, checkRateLimit } = vi.hoisted(() => ({
-  db: { oAuthToken: { findUnique: vi.fn(), deleteMany: vi.fn() } },
-  checkRateLimit: vi.fn(),
-}));
+const { db, checkRateLimit } = vi.hoisted(() => {
+  const db = {
+    oAuthToken: { findUnique: vi.fn(), deleteMany: vi.fn() },
+    $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
+  };
+  db.$transaction.mockImplementation((fn: (tx: typeof db) => Promise<unknown>) => fn(db));
+  return { db, checkRateLimit: vi.fn() };
+});
 vi.mock("~/server/db", () => ({ db }));
 vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/server/utils/rateLimit")>()),
@@ -56,6 +61,7 @@ beforeEach(() => {
   checkRateLimit.mockResolvedValue({ success: true, retryAfterSeconds: 0 });
   db.oAuthToken.findUnique.mockResolvedValue(ROW);
   db.oAuthToken.deleteMany.mockResolvedValue({ count: 2 });
+  db.$transaction.mockImplementation((fn: (tx: typeof db) => Promise<unknown>) => fn(db));
 });
 
 describe("POST /api/oauth/revoke", () => {
@@ -69,6 +75,9 @@ describe("POST /api/oauth/revoke", () => {
       expect.objectContaining({ where: { accessTokenHash: hashOAuthSecret(ACCESS) } }),
     );
     expect(db.oAuthToken.deleteMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" } });
+    // Under the connection's lock, taken first, so a refresh in flight can't slip a pair past it.
+    expect(db.$queryRaw.mock.calls[0]?.slice(1)).toEqual(["conn-1"]);
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(db.oAuthToken.deleteMany.mock.invocationCallOrder[0] ?? 0);
   });
 
   it("revoking a refresh token does the same, whatever the hint says", async () => {
