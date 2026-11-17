@@ -93,9 +93,8 @@ describe("searchTimerTargets", () => {
     ] as never);
     db.ticket.findMany.mockImplementation((async (args: { where: { AND: unknown[] } }) => {
       const json = JSON.stringify(args.where);
-      if (json.includes('"assigneeId"')) {
-        return [ticketRow("committed", "COMMITTED"), ticketRow("prog", "IN_PROGRESS")];
-      }
+      if (json.includes('"status":"IN_PROGRESS"')) return [ticketRow("prog", "IN_PROGRESS")];
+      if (json.includes('"status":"COMMITTED"')) return [ticketRow("committed", "COMMITTED")];
       return [ticketRow("prog", "IN_PROGRESS"), ticketRow("recent", "QA")];
     }) as never);
     db.project.findMany.mockImplementation((async (args: { where: { id?: unknown } }) =>
@@ -126,6 +125,25 @@ describe("searchTimerTargets", () => {
       JSON.stringify(a?.where).includes('"assigneeId"'),
     );
     expect(JSON.stringify(cycleCall?.[0]?.where)).toContain('"listType":"SPRINT"');
+  });
+
+  it("an IN_PROGRESS ticket is never pushed past the limit by a more recently touched COMMITTED one", async () => {
+    db.timeEntry.findMany.mockResolvedValue([] as never);
+    db.ticket.findMany.mockImplementation((async (args: { where: unknown }) => {
+      const json = JSON.stringify(args.where);
+      if (json.includes('"status":"IN_PROGRESS"')) return [ticketRow("older-prog", "IN_PROGRESS")];
+      if (json.includes('"status":"COMMITTED"')) return [ticketRow("fresh-committed", "COMMITTED")];
+      return [];
+    }) as never);
+    db.project.findMany.mockResolvedValue([] as never);
+
+    const result = await searchTimerTargets(db as unknown as PrismaClient, USER_ID, {
+      workspaceId: WS.id,
+      limit: 1,
+      now: NOW,
+    });
+
+    expect(result.tickets.map((t) => t.id)).toEqual(["older-prog"]);
   });
 
   it("with a query: tickets and projects matched, archived tickets excluded, scoped to the workspace", async () => {
@@ -215,10 +233,30 @@ describe("resolveTimerTarget", () => {
     );
 
     expect(target).toMatchObject({ kind: "project", id: "p1", context: "Grow revenue" });
-    expect(db.project.findFirst.mock.calls[0]![0]!.where).toMatchObject({
-      slug: "project-p1",
-      workspaceId: WS.id,
+    const where = db.project.findFirst.mock.calls[0]![0]!.where as { AND: unknown[] };
+    expect(where.AND[0]).toEqual({ OR: [{ id: "project-p1" }, { slug: "project-p1" }] });
+    expect(where.AND[1]).toEqual({ workspaceId: WS.id });
+  });
+
+  it("the app's compound slug-cuid project link resolves by its CUID suffix", async () => {
+    db.workspace.findUnique.mockResolvedValue({ id: WS.id } as never);
+    db.project.findFirst.mockResolvedValue(projectRow("cmlf3zmw40005l804w0eg28p4") as never);
+
+    await resolveTimerTarget(
+      db as unknown as PrismaClient,
+      USER_ID,
+      "https://www.exponential.im/w/exponential/projects/mvp_development-cmlf3zmw40005l804w0eg28p4?tab=tasks",
+    );
+
+    const where = db.project.findFirst.mock.calls[0]![0]!.where as { AND: unknown[] };
+    expect(where.AND[0]).toEqual({
+      OR: [
+        { id: "mvp_development-cmlf3zmw40005l804w0eg28p4" },
+        { slug: "mvp_development-cmlf3zmw40005l804w0eg28p4" },
+        { id: "cmlf3zmw40005l804w0eg28p4" },
+      ],
     });
+    expect(where.AND[1]).toEqual({ workspaceId: WS.id });
   });
 
   it("anything unknown or out of reach is null, not an error", async () => {

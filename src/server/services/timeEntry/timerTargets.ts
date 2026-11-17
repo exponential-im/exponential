@@ -230,22 +230,30 @@ export async function searchTimerTargets(
     ...new Set(recentEntries.map((e) => e.action.projectId).filter((id): id is string => !!id)),
   ];
 
-  const [inCycle, recentTickets, recentProjects, activeProjects] = await Promise.all([
-    db.ticket.findMany({
-      where: {
-        AND: [
-          ticketScope,
-          {
-            assigneeId: userId,
-            status: { in: [...IN_FLIGHT_ORDER] },
-            cycle: { is: currentCycleWhere(input.workspaceId, now) },
-          },
-        ],
-      },
-      select: TICKET_TARGET_SELECT,
-      orderBy: { updatedAt: "desc" },
-      take: limit,
-    }),
+  // One query per in-flight status, so a recently touched COMMITTED ticket
+  // can never push an IN_PROGRESS one past the limit before ordering.
+  const inCycleByStatus = Promise.all(
+    IN_FLIGHT_ORDER.map((status) =>
+      db.ticket.findMany({
+        where: {
+          AND: [
+            ticketScope,
+            {
+              assigneeId: userId,
+              status,
+              cycle: { is: currentCycleWhere(input.workspaceId, now) },
+            },
+          ],
+        },
+        select: TICKET_TARGET_SELECT,
+        orderBy: { updatedAt: "desc" },
+        take: limit,
+      }),
+    ),
+  );
+
+  const [inCycleGroups, recentTickets, recentProjects, activeProjects] = await Promise.all([
+    inCycleByStatus,
     recentTicketIds.length
       ? db.ticket.findMany({
           where: { AND: [ticketScope, { id: { in: recentTicketIds } }] },
@@ -266,11 +274,8 @@ export async function searchTimerTargets(
     }),
   ]);
 
-  const rank = (status: string) => IN_FLIGHT_ORDER.indexOf(status as (typeof IN_FLIGHT_ORDER)[number]);
-  const inCycleOrdered = [...inCycle].sort((a, b) => rank(a.status) - rank(b.status));
-
   return {
-    tickets: mergeUnique(inCycleOrdered, inIdOrder(recentTickets, recentTicketIds))
+    tickets: mergeUnique(...inCycleGroups, inIdOrder(recentTickets, recentTicketIds))
       .slice(0, limit)
       .map(toTicketTarget),
     projects: mergeUnique(inIdOrder(recentProjects, recentProjectIds), activeProjects)
@@ -278,6 +283,16 @@ export async function searchTimerTargets(
       .map(toProjectTarget)
       .filter(isTarget),
   };
+}
+
+/**
+ * Project URLs come as the bare slug, the id, or the app's compound
+ * `slug-cuid` form (`my_project-cmjoko5550000rz03x4eqvycy`) — the same three
+ * forms `project.getById` accepts.
+ */
+function projectRefWhere(segment: string): Prisma.ProjectWhereInput {
+  const cuid = /-(c[a-z0-9]{24,})$/.exec(segment)?.[1];
+  return { OR: [{ id: segment }, { slug: segment }, ...(cuid ? [{ id: cuid }] : [])] };
 }
 
 export type ParsedTargetUrl =
@@ -384,9 +399,11 @@ export async function resolveTimerTarget(
   if (!workspace) return null;
   const project = await db.project.findFirst({
     where: {
-      slug: parsed.projectSlug,
-      workspaceId: workspace.id,
-      ...(await projectAccessWhere(db, userId, workspace.id)),
+      AND: [
+        projectRefWhere(parsed.projectSlug),
+        { workspaceId: workspace.id },
+        await projectAccessWhere(db, userId, workspace.id),
+      ],
     },
     select: PROJECT_TARGET_SELECT,
   });
