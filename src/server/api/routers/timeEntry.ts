@@ -10,11 +10,12 @@ import {
 } from "~/server/api/middleware/apiKeyAuth";
 import { TimeEntryService } from "~/server/services/timeEntry/TimeEntryService";
 import {
-  findTimerTicket,
   resolveTimerTarget,
   searchTimerTargets,
 } from "~/server/services/timeEntry/timerTargets";
 import {
+  buildTicketAccessWhere,
+  buildTicketWriteWhere,
   canViewAction,
   getActionAccess,
   getProjectAccess,
@@ -143,14 +144,31 @@ export const timeEntryRouter = createTRPCRouter({
       // Access enforcement at the router layer (the service is access-agnostic
       // for testability). Three cases:
       //   1. Attaching to an existing action  → check viewAction on that id.
-      //   2. Logging against a ticket         → workspace membership via the
-      //      ticket's product (as search does); NOT_FOUND otherwise.
+      //   2. Logging against a ticket         → it mints an Action on the
+      //      Ticket, so a workspace WRITE role via the ticket's product:
+      //      NOT_FOUND when the ticket is out of sight, FORBIDDEN for a viewer.
       //   3. Creating a new action            → check workspace + project
       //      access on caller-provided IDs so a guessed id can't be used to
       //      mint actions in a workspace/project the user can't reach.
       if (input.ticketId) {
-        if (!(await findTimerTicket(ctx.db, ctx.userId, input.ticketId))) {
+        const [visible, writable] = await Promise.all([
+          ctx.db.ticket.findFirst({
+            where: { AND: [{ id: input.ticketId }, buildTicketAccessWhere(ctx.userId)] },
+            select: { id: true },
+          }),
+          ctx.db.ticket.findFirst({
+            where: { AND: [{ id: input.ticketId }, buildTicketWriteWhere(ctx.userId)] },
+            select: { id: true },
+          }),
+        ]);
+        if (!visible) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
+        }
+        if (!writable) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You need owner, admin, or member access to this workspace to log time on its tickets.",
+          });
         }
       } else if (input.actionId) {
         const access = await getActionAccess(

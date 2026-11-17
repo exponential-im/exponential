@@ -171,9 +171,11 @@ describe("searchTimerTargets", () => {
 
     await searchTimerTargets(db as unknown as PrismaClient, USER_ID, { workspaceId: WS.id, query: "x" });
 
-    expect(db.project.findMany.mock.calls[0]![0]!.where).toMatchObject({
-      workspaceId: WS.id,
-      projectMembers: { some: { userId: USER_ID } },
+    expect(db.project.findMany.mock.calls[0]![0]!.where).toEqual({
+      AND: [
+        { AND: [{ workspaceId: WS.id }, { projectMembers: { some: { userId: USER_ID } } }] },
+        { name: { contains: "x", mode: "insensitive" } },
+      ],
     });
   });
 });
@@ -235,7 +237,7 @@ describe("resolveTimerTarget", () => {
     expect(target).toMatchObject({ kind: "project", id: "p1", context: "Grow revenue" });
     const where = db.project.findFirst.mock.calls[0]![0]!.where as { AND: unknown[] };
     expect(where.AND[0]).toEqual({ OR: [{ id: "project-p1" }, { slug: "project-p1" }] });
-    expect(where.AND[1]).toEqual({ workspaceId: WS.id });
+    expect(where.AND[1]).toMatchObject({ AND: [{ workspaceId: WS.id }, expect.anything()] });
   });
 
   it("the app's compound slug-cuid project link resolves by its CUID suffix", async () => {
@@ -256,7 +258,7 @@ describe("resolveTimerTarget", () => {
         { id: "cmlf3zmw40005l804w0eg28p4" },
       ],
     });
-    expect(where.AND[1]).toEqual({ workspaceId: WS.id });
+    expect(where.AND[1]).toMatchObject({ AND: [{ workspaceId: WS.id }, expect.anything()] });
   });
 
   it("anything unknown or out of reach is null, not an error", async () => {

@@ -861,6 +861,10 @@ describe("timeEntry.start on a Ticket (the plugin's \"What's this for?\" picker)
 
     await humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, typedTitle: "  wiring the picker  " });
 
+    // The find-then-create is serialised per (person, ticket).
+    const lockSql = (db.$executeRaw.mock.calls[0]![0] as unknown as string[]).join("?");
+    expect(lockSql).toContain("pg_advisory_xact_lock");
+    expect(db.$executeRaw.mock.calls[0]![1]).toBe(`timer-ticket-action:${OWNER_ID}:${TICKET_ID}`);
     expect(db.action.findFirst).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { ticketId: TICKET_ID, createdById: OWNER_ID, source: "plugin", status: "ACTIVE" },
@@ -920,6 +924,18 @@ describe("timeEntry.start on a Ticket (the plugin's \"What's this for?\" picker)
         },
       }),
     );
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("a workspace viewer can see the ticket but not log time on it: FORBIDDEN, nothing written", async () => {
+    // Visible through membership, but no write role (the write where names roles).
+    db.ticket.findFirst.mockImplementation((async (args: { where: unknown }) =>
+      JSON.stringify(args.where).includes('"role"') ? null : { id: TICKET_ID }) as never);
+
+    await expect(humanCaller(db).timeEntry.start({ ticketId: TICKET_ID })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
     expect(db.action.create).not.toHaveBeenCalled();
     expect(db.timeEntry.create).not.toHaveBeenCalled();
   });

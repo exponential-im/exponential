@@ -242,6 +242,10 @@ export class TimeEntryService {
    * made any other way (by hand, by an agent) are never reused, so the timer
    * can't pile time onto someone's real task. NOT_FOUND for a missing Ticket;
    * access is the router's job.
+   *
+   * A transaction-scoped advisory lock on (person, ticket) serialises the
+   * find-then-create, so a double-clicked Play or two open popups can't each
+   * create an Action and strand one.
    */
   private async findOrCreateTicketAction(
     tx: Db,
@@ -255,6 +259,7 @@ export class TimeEntryService {
     if (!ticket) {
       throw new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
     }
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`timer-ticket-action:${userId}:${ticketId}`}))`;
     const existing = await tx.action.findFirst({
       where: { ticketId, createdById: userId, source: "plugin", status: "ACTIVE" },
       orderBy: { createdAt: "desc" },

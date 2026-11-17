@@ -11,19 +11,19 @@
  *   - `resolveTimerTarget` — the active tab's URL to a target, so the picker
  *     is usually filled before the person touches it.
  *
- * Access mirrors global search (`search.ts`): tickets through workspace
- * membership via their product (guests denied), projects through
- * `buildProjectAccessWhere` (a workspace guest sees only projects they are a
- * member of). Anything the caller can't see is simply absent: a URL for it
- * resolves to null, never an error that confirms it exists.
+ * Access comes from the access service and mirrors global search
+ * (`search.ts`): `buildTicketAccessWhere` (workspace membership via the
+ * ticket's product; guests denied) and `buildWorkspaceProjectAccessWhere`
+ * (a workspace guest sees only projects they are a member of). Anything the
+ * caller can't see is simply absent: a URL for it resolves to null, never an
+ * error that confirms it exists.
  */
 
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { ticketDisplayId, ticketUrlId } from "~/lib/fun-ids";
 import {
-  buildProjectAccessWhere,
-  buildWorkspaceAccessWhere,
-  isWorkspaceGuest,
+  buildTicketAccessWhere,
+  buildWorkspaceProjectAccessWhere,
 } from "~/server/services/access";
 import { currentCycleWhere } from "~/plugins/product/server/currentCycle";
 import { searchTicketsIdFirst } from "~/plugins/product/server/services/ticketTextSearch";
@@ -86,20 +86,6 @@ const PROJECT_TARGET_SELECT = {
 } satisfies Prisma.ProjectSelect;
 
 type ProjectTargetRow = Prisma.ProjectGetPayload<{ select: typeof PROJECT_TARGET_SELECT }>;
-
-function ticketAccessWhere(userId: string): Prisma.TicketWhereInput {
-  return { product: { workspace: { is: buildWorkspaceAccessWhere(userId) } } };
-}
-
-async function projectAccessWhere(
-  db: PrismaClient,
-  userId: string,
-  workspaceId: string,
-): Promise<Prisma.ProjectWhereInput> {
-  return (await isWorkspaceGuest(db, userId, workspaceId))
-    ? { projectMembers: { some: { userId } } }
-    : buildProjectAccessWhere(userId);
-}
 
 function toTicketTarget(t: TicketTargetRow): TimerTarget {
   const context = [t.feature?.name, t.feature?.goal?.title].filter(Boolean).join(" · ");
@@ -174,15 +160,12 @@ export async function searchTimerTargets(
   const query = input.query?.trim() ?? "";
   const ticketScope: Prisma.TicketWhereInput = {
     AND: [
-      ticketAccessWhere(userId),
+      buildTicketAccessWhere(userId),
       { product: { workspaceId: input.workspaceId } },
       { status: { not: "ARCHIVED" } },
     ],
   };
-  const projectScope: Prisma.ProjectWhereInput = {
-    workspaceId: input.workspaceId,
-    ...(await projectAccessWhere(db, userId, input.workspaceId)),
-  };
+  const projectScope = await buildWorkspaceProjectAccessWhere(db, userId, input.workspaceId);
 
   if (query) {
     const [tickets, projects] = await Promise.all([
@@ -200,7 +183,7 @@ export async function searchTimerTargets(
         productName: (t) => t.product.name,
       }),
       db.project.findMany({
-        where: { ...projectScope, name: { contains: query, mode: "insensitive" } },
+        where: { AND: [projectScope, { name: { contains: query, mode: "insensitive" } }] },
         select: PROJECT_TARGET_SELECT,
         orderBy: { name: "asc" },
         take: limit,
@@ -262,12 +245,12 @@ export async function searchTimerTargets(
       : Promise.resolve([]),
     recentProjectIds.length
       ? db.project.findMany({
-          where: { ...projectScope, id: { in: recentProjectIds } },
+          where: { AND: [projectScope, { id: { in: recentProjectIds } }] },
           select: PROJECT_TARGET_SELECT,
         })
       : Promise.resolve([]),
     db.project.findMany({
-      where: { ...projectScope, status: "ACTIVE" },
+      where: { AND: [projectScope, { status: "ACTIVE" }] },
       select: PROJECT_TARGET_SELECT,
       orderBy: { name: "asc" },
       take: limit,
@@ -362,7 +345,7 @@ export async function resolveTimerTarget(
     const ticket = await db.ticket.findFirst({
       where: {
         AND: [
-          ticketAccessWhere(userId),
+          buildTicketAccessWhere(userId),
           {
             OR: [
               { prUrl: { equals: pr, mode: "insensitive" } },
@@ -386,7 +369,7 @@ export async function resolveTimerTarget(
     });
     if (!product) return null;
     const ticket = await db.ticket.findFirst({
-      where: { AND: [ticketRefWhere(product.id, parsed.identifier), ticketAccessWhere(userId)] },
+      where: { AND: [ticketRefWhere(product.id, parsed.identifier), buildTicketAccessWhere(userId)] },
       select: TICKET_TARGET_SELECT,
     });
     return ticket ? toTicketTarget(ticket) : null;
@@ -401,26 +384,10 @@ export async function resolveTimerTarget(
     where: {
       AND: [
         projectRefWhere(parsed.projectSlug),
-        { workspaceId: workspace.id },
-        await projectAccessWhere(db, userId, workspace.id),
+        await buildWorkspaceProjectAccessWhere(db, userId, workspace.id),
       ],
     },
     select: PROJECT_TARGET_SELECT,
   });
   return project ? toProjectTarget(project) : null;
-}
-
-/**
- * The ticket's id when the caller can log time on it (workspace membership
- * via its product, as for search), else null. Used by `timeEntry.start`.
- */
-export async function findTimerTicket(
-  db: PrismaClient,
-  userId: string,
-  ticketId: string,
-): Promise<{ id: string } | null> {
-  return db.ticket.findFirst({
-    where: { AND: [{ id: ticketId }, ticketAccessWhere(userId)] },
-    select: { id: true },
-  });
 }
