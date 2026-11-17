@@ -47,6 +47,7 @@ import {
 } from '~/lib/localWiki';
 import { preprocessAgentMarkdown, linkifyBareUrls } from '~/lib/chat/agentMarkdown';
 import { failureCopy } from '~/lib/chat/failureCopy';
+import { resolveChatWorkspaceId } from '~/lib/chat/chatWorkspace';
 import { applyToolRefreshInvalidations } from './agent/toolRefreshInvalidation';
 import { LocalWikiFirstRun } from './LocalWikiFirstRun';
 import { PositionsImportPill, IMPORT_POSITIONS_PROMPT } from './PositionsImportPill';
@@ -465,10 +466,13 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
   const { workspaceId: urlWorkspaceId } = useWorkspace();
   // A page that names its own workspace wins over the provider's value: on a
   // route with no workspace slug (/recording/<id>) the provider falls back to
-  // the person's default workspace, which may not be the one on screen.
-  const pageWorkspaceId =
-    typeof pageContext?.data?.workspaceId === 'string' ? pageContext.data.workspaceId : undefined;
-  const workspaceId = workspaceIdProp ?? pageWorkspaceId ?? urlWorkspaceId;
+  // the person's default workspace, which may not be the one on screen. The
+  // drawer resolves the same way before passing its prop (see chatWorkspace.ts).
+  const workspaceId = resolveChatWorkspaceId({
+    explicit: workspaceIdProp,
+    pageContext,
+    provider: urlWorkspaceId,
+  });
   const utils = api.useUtils();
 
   // Fetch the user's custom assistant (if configured)
