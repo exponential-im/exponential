@@ -1,6 +1,32 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
+import type { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { getEmbeddingService } from "~/server/services/EmbeddingService";
+import { isLowRating, LOW_RATING_REASON_IDS } from "~/lib/feedback/lowRating";
+import { agentErrorTraceContext } from "~/server/services/ai/providerError";
+import {
+  findFaultTickets,
+  notifyLowRating,
+  parseToolTrace,
+  readReasons,
+} from "~/server/services/feedback/lowRatingAlert";
+import { runAfterResponse } from "~/server/utils/runAfterResponse";
+
+// The trace of a turn is another person's conversation plus raw tool error
+// text. Admins only, checked here and not just by the /admin layout.
+const adminProcedure = protectedProcedure.use(async ({ ctx, next }) => {
+  if (!ctx.session.user.isAdmin) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
+  }
+  return next();
+});
+
+function metadataObject(metadata: unknown): Record<string, unknown> {
+  return metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>)
+    : {};
+}
 
 export const feedbackRouter = createTRPCRouter({
   submitCalendarFeedback: protectedProcedure
@@ -85,32 +111,86 @@ export const feedbackRouter = createTRPCRouter({
     }),
 
   /**
-   * Submit feedback for an AI agent response
+   * Rate an AI agent response.
+   *
+   * One rating per person per reply: a second call updates the first, which
+   * is how the one-tap reasons and the note arrive after a thumbs-down (the
+   * rating is sent the moment the stars are tapped, so it is not lost when
+   * the person stops there).
+   *
+   * A low rating (1 or 2) is posted to the ops room once, with a link to the
+   * admin trace view. No ticket is filed: see `lowRatingAlert`.
    */
   submitAgentFeedback: protectedProcedure
     .input(
       z.object({
         aiInteractionId: z.string(),
-        rating: z.number().min(1).max(5),
-        comment: z.string().optional(),
-        improvementSuggestion: z.string().optional(),
+        rating: z.number().int().min(1).max(5),
+        comment: z.string().max(2000).optional(),
+        improvementSuggestion: z.string().max(2000).optional(),
+        reasons: z.array(z.enum(LOW_RATING_REASON_IDS)).max(LOW_RATING_REASON_IDS.length).optional(),
       })
     )
     .mutation(async ({ input, ctx }) => {
-      // Create feedback linked to the AI interaction
-      const feedbackEntry = await ctx.db.feedback.create({
-        data: {
-          userId: ctx.session.user.id,
-          feature: "agent_response",
-          rating: input.rating,
-          content: input.comment ?? "",
-          aiInteractionId: input.aiInteractionId,
-          metadata: {
-            improvementSuggestion: input.improvementSuggestion,
-            timestamp: new Date().toISOString(),
-          },
-        },
+      const userId = ctx.session.user.id;
+      // A rating now reaches the ops room, so it has to be on a reply the
+      // rater actually received. Not-found for both cases: the id of someone
+      // else's turn should not be confirmable.
+      const interaction = await ctx.db.aiInteractionHistory.findUnique({
+        where: { id: input.aiInteractionId },
+        select: { systemUserId: true },
       });
+      if (!interaction || interaction.systemUserId !== userId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Reply not found" });
+      }
+
+      const existing = await ctx.db.feedback.findFirst({
+        where: { userId, aiInteractionId: input.aiInteractionId, feature: "agent_response" },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, content: true, metadata: true },
+      });
+      const previous = metadataObject(existing?.metadata);
+      const shouldNotify = isLowRating(input.rating) && typeof previous.opsNotifiedAt !== "string";
+      const now = new Date().toISOString();
+      const metadata = {
+        ...previous,
+        ...(input.improvementSuggestion !== undefined
+          ? { improvementSuggestion: input.improvementSuggestion }
+          : {}),
+        ...(input.reasons !== undefined ? { reasons: input.reasons } : {}),
+        timestamp: now,
+        // Claimed with the write, before the post: a double tap must not
+        // post twice, and a failed post is not worth a second ping.
+        ...(shouldNotify ? { opsNotifiedAt: now } : {}),
+      } as Prisma.InputJsonObject;
+
+      const feedbackEntry = existing
+        ? await ctx.db.feedback.update({
+            where: { id: existing.id },
+            data: {
+              rating: input.rating,
+              content: input.comment ?? existing.content,
+              metadata,
+            },
+            select: { id: true },
+          })
+        : await ctx.db.feedback.create({
+            data: {
+              userId,
+              feature: "agent_response",
+              rating: input.rating,
+              content: input.comment ?? "",
+              aiInteractionId: input.aiInteractionId,
+              metadata,
+            },
+            select: { id: true },
+          });
+
+      if (shouldNotify) {
+        // After the response, kept alive by the platform: the person who
+        // rated should not wait on a chat room. notifyLowRating never throws.
+        runAfterResponse(() => notifyLowRating(ctx.db, feedbackEntry.id));
+      }
 
       // If there's an improvement suggestion, use AI clustering to deduplicate
       if (input.improvementSuggestion) {
@@ -151,6 +231,124 @@ export const feedbackRouter = createTRPCRouter({
         success: true,
         id: feedbackEntry.id,
       };
+    }),
+
+  /**
+   * Everything needed to see what went wrong on one agent turn: the message,
+   * the reply, each tool call with its status and error kind, the model, the
+   * page type, the Mastra run with a ready-to-run logs command, and the
+   * ratings people gave it. Admin only: this is another person's
+   * conversation and raw tool error text.
+   */
+  getInteractionTrace: adminProcedure
+    .input(z.object({ interactionId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const interaction = await ctx.db.aiInteractionHistory.findUnique({
+        where: { id: input.interactionId },
+        select: {
+          id: true,
+          createdAt: true,
+          platform: true,
+          agentId: true,
+          agentName: true,
+          model: true,
+          conversationId: true,
+          workspaceId: true,
+          pageContextType: true,
+          mastraRunId: true,
+          anthropicRequestId: true,
+          promptVersion: true,
+          responseTime: true,
+          hadError: true,
+          errorMessage: true,
+          userMessage: true,
+          aiResponse: true,
+          toolCalls: true,
+          user: { select: { name: true, email: true } },
+          feedback: {
+            where: { feature: "agent_response" },
+            orderBy: { createdAt: "desc" },
+            select: {
+              id: true,
+              rating: true,
+              content: true,
+              metadata: true,
+              createdAt: true,
+              user: { select: { name: true, email: true } },
+            },
+          },
+        },
+      });
+      if (!interaction) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Interaction not found" });
+      }
+
+      const toolCalls = parseToolTrace(interaction.toolCalls);
+      const faultTickets = await findFaultTickets(ctx.db, toolCalls);
+      const logs = agentErrorTraceContext(interaction.mastraRunId ?? undefined, interaction.createdAt);
+
+      return {
+        id: interaction.id,
+        createdAt: interaction.createdAt,
+        platform: interaction.platform,
+        agent: interaction.agentName ?? interaction.agentId,
+        model: interaction.model,
+        conversationId: interaction.conversationId,
+        workspaceId: interaction.workspaceId,
+        pageContextType: interaction.pageContextType,
+        mastraRunId: interaction.mastraRunId,
+        mastraLogsCommand: logs.mastraLogs,
+        anthropicRequestId: interaction.anthropicRequestId,
+        promptVersion: interaction.promptVersion,
+        responseTimeMs: interaction.responseTime,
+        hadError: interaction.hadError,
+        errorMessage: interaction.errorMessage,
+        askedBy: interaction.user,
+        userMessage: interaction.userMessage,
+        aiResponse: interaction.aiResponse,
+        toolCalls,
+        faultTickets,
+        ratings: interaction.feedback.map((f) => {
+          const meta = metadataObject(f.metadata);
+          return {
+            id: f.id,
+            rating: f.rating,
+            note: f.content,
+            reasons: readReasons(f.metadata),
+            createdAt: f.createdAt,
+            ratedBy: f.user,
+            isEvalCandidate: typeof meta.evalCandidateAt === "string",
+          };
+        }),
+      };
+    }),
+
+  /**
+   * Put a rated turn forward for the golden eval set (ticket 961), or take it
+   * back. A flag on the rating, not an `EvalCase` row: those belong to a
+   * judged Thread (`threadScoreId` is required), and the golden cases are
+   * files in the repo. Whoever writes a case file starts from these.
+   */
+  setEvalCandidate: adminProcedure
+    .input(z.object({ feedbackId: z.string(), candidate: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      const feedback = await ctx.db.feedback.findUnique({
+        where: { id: input.feedbackId },
+        select: { id: true, metadata: true, feature: true },
+      });
+      if (!feedback || feedback.feature !== "agent_response") {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Rating not found" });
+      }
+      const { evalCandidateAt: _at, evalCandidateBy: _by, ...rest } = metadataObject(feedback.metadata);
+      await ctx.db.feedback.update({
+        where: { id: feedback.id },
+        data: {
+          metadata: (input.candidate
+            ? { ...rest, evalCandidateAt: new Date().toISOString(), evalCandidateBy: ctx.session.user.id }
+            : rest) as Prisma.InputJsonObject,
+        },
+      });
+      return { success: true, candidate: input.candidate };
     }),
 
   /**
@@ -234,6 +432,7 @@ export const feedbackRouter = createTRPCRouter({
           },
           aiInteraction: {
             select: {
+              id: true,
               userMessage: true,
               aiResponse: true,
               agentName: true,

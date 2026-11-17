@@ -216,6 +216,28 @@ export function isDueForRenotify(
   return Number.isNaN(lastMs) || now.getTime() - lastMs >= renotifyAfterMs;
 }
 
+/**
+ * The URL of the ticket already filed for `issueId` in the platform's bug
+ * product, or null when there is none. Same lookup `ingestSentryBug` dedups
+ * on, for callers that want to point at a fault's ticket without filing.
+ */
+export async function findBugTicketUrl(
+  db: PrismaClient,
+  issueId: string,
+): Promise<string | null> {
+  const productId = process.env.SENTRY_BUG_PRODUCT_ID ?? DEFAULT_BUG_PRODUCT_ID;
+  const ticket = await db.ticket.findFirst({
+    where: { productId, links: { path: ["sentryIssueId"], equals: issueId } },
+    select: {
+      id: true,
+      number: true,
+      product: { select: { slug: true, workspace: { select: { slug: true } } } },
+    },
+  });
+  if (!ticket) return null;
+  return `${getPublicBaseUrlFromEnv()}/w/${ticket.product.workspace.slug}/products/${ticket.product.slug}/tickets/${ticketUrlId(ticket)}`;
+}
+
 export async function ingestSentryBug(
   db: PrismaClient,
   bug: SentryBug,

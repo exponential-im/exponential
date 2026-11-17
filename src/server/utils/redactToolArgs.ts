@@ -8,6 +8,8 @@
  * MUST pass through here first.
  */
 
+import type { ToolErrorKind } from "~/lib/chat/toolErrors";
+
 export interface LoggedToolCall {
   name: string;
   /** Redacted JSON string of the call args, possibly truncated. */
@@ -19,6 +21,14 @@ export interface LoggedToolCall {
   providerExecuted?: boolean;
   /** Set when per-turn budget forced this call's args to be dropped. */
   argsDropped?: boolean;
+  /** What a failed call means (see `~/lib/chat/toolErrors`), classified from the full error text at capture. */
+  errorKind?: ToolErrorKind;
+  /**
+   * Set when the failure was filed as an `agent-tool` Bug: the exact line the
+   * ticket was fingerprinted from, so a low rating on this turn can link to
+   * that ticket. `errorCode` is cut to 200 chars and cannot rebuild it.
+   */
+  faultSummary?: string;
 }
 
 // Suffix-anchored: `apiKey`/`slackToken`/`tokens` redact, but entity-id keys

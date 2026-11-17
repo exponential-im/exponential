@@ -14,6 +14,8 @@ export interface ChatStreamPayload {
   projectId?: string | null;
   conversationId?: string | null;
   platform: string;
+  /** `PageContext.pageType` of the page the chat is on; recorded with the turn. */
+  pageContextType?: string;
 }
 
 export interface ChatStreamUpdate extends ParsedChatStream {

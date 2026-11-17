@@ -12,6 +12,12 @@ import {
 } from "@mantine/core";
 import { IconCheck, IconChevronDown, IconChevronUp } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
+import { Panel } from "~/app/_components/ui";
+import {
+  isLowRating,
+  LOW_RATING_REASONS,
+  type LowRatingReasonId,
+} from "~/lib/feedback/lowRating";
 
 interface AgentMessageFeedbackProps {
   aiInteractionId: string;
@@ -51,6 +57,10 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
   const [improvementSuggestion, setImprovementSuggestion] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [alreadyRated, setAlreadyRated] = useState(false);
+  // A thumbs-down is sent the moment it is tapped, then the person is asked
+  // why. `lowSent` is "the rating has gone, the why-panel is open".
+  const [lowSent, setLowSent] = useState(false);
+  const [reasons, setReasons] = useState<LowRatingReasonId[]>([]);
 
   useEffect(() => {
     setAlreadyRated(getRatedMessages().has(aiInteractionId));
@@ -63,12 +73,35 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
     },
   });
 
+  // The low-rating path: the rating itself, then each reason tap and the
+  // note, all land on the same row (the server keeps one rating per reply).
+  const submitLow = api.feedback.submitAgentFeedback.useMutation({
+    onSuccess: () => markAsRated(aiInteractionId),
+  });
+
   const handleRatingChange = (value: number) => {
     setRating(value);
-    // Auto-expand comment for low ratings
-    if (value <= 2) {
-      setShowComment(true);
+    if (isLowRating(value)) {
+      setShowComment(false);
+      setLowSent(true);
+      submitLow.mutate({ aiInteractionId, rating: value, reasons });
+    } else {
+      setLowSent(false);
     }
+  };
+
+  const toggleReason = (id: LowRatingReasonId) => {
+    const next = reasons.includes(id) ? reasons.filter((r) => r !== id) : [...reasons, id];
+    setReasons(next);
+    submitLow.mutate({ aiInteractionId, rating, reasons: next });
+  };
+
+  const finishLow = () => {
+    const note = comment.trim();
+    if (note) {
+      submitLow.mutate({ aiInteractionId, rating, reasons, comment: note });
+    }
+    setSubmitted(true);
   };
 
   const handleSubmit = () => {
@@ -118,7 +151,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
           size="sm"
           fractions={1}
         />
-        {rating > 0 && !showComment && (
+        {rating > 0 && !lowSent && !showComment && (
           <>
             <Button
               size="compact-xs"
@@ -139,7 +172,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
             </Button>
           </>
         )}
-        {showComment && (
+        {showComment && !lowSent && (
           <Button
             size="compact-xs"
             variant="subtle"
@@ -152,7 +185,43 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
         )}
       </Group>
 
-      <Collapse in={showComment}>
+      <Collapse in={lowSent}>
+        <Panel padding="sm" className="mt-2 space-y-3">
+          <Text size="xs" className="text-text-secondary">
+            Thanks, that is recorded. What went wrong?
+          </Text>
+          <Group gap="xs">
+            {LOW_RATING_REASONS.map((reason) => (
+              <Button
+                key={reason.id}
+                size="compact-xs"
+                variant={reasons.includes(reason.id) ? "filled" : "default"}
+                aria-pressed={reasons.includes(reason.id)}
+                onClick={() => toggleReason(reason.id)}
+              >
+                {reason.label}
+              </Button>
+            ))}
+          </Group>
+          <Textarea
+            placeholder="Anything else? (optional)"
+            aria-label="Note about this response"
+            value={comment}
+            onChange={(e) => setComment(e.currentTarget.value)}
+            size="xs"
+            minRows={2}
+            maxLength={2000}
+            autosize
+          />
+          <Group justify="flex-end">
+            <Button size="xs" variant="subtle" onClick={finishLow}>
+              Done
+            </Button>
+          </Group>
+        </Panel>
+      </Collapse>
+
+      <Collapse in={showComment && !lowSent}>
         <Paper className="mt-2 space-y-3 border border-border-primary bg-surface-secondary p-3">
           <Textarea
             placeholder="Any comments about this response? (optional)"

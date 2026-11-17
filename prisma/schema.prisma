@@ -2224,6 +2224,11 @@ model AiInteractionHistory {
   ipAddress          String?
   anthropicRequestId String?
   promptVersion      String?
+  // The Mastra run that produced this turn: the key its logs are grepped by
+  // (see agentErrorTraceContext). Null on rows older than the column.
+  mastraRunId        String?
+  // PageContext.pageType the chat was opened on ("meeting", "goal", ...).
+  pageContextType    String?
   createdAt          DateTime   @default(now())
   project            Project?   @relation(fields: [projectId], references: [id])
   user               User?      @relation(fields: [systemUserId], references: [id])
