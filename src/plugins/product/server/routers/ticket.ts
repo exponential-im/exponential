@@ -1433,6 +1433,23 @@ export const ticketRouter = createTRPCRouter({
       }
 
       return ctx.db.$transaction(async (tx) => {
+        // Re-check the boundary under a share lock on both Products, so a
+        // concurrent product.moveToWorkspace can't strand this edge across
+        // workspaces: either the move commits first and its new workspace
+        // shows up here, or it waits for this insert and then deletes the
+        // edge itself.
+        const productIds = [...new Set([ticket.productId, dependsOn.productId])];
+        const lockedProducts = await tx.$queryRaw<{ workspaceId: string }[]>`
+          SELECT "workspaceId" FROM "Product"
+          WHERE id IN (${Prisma.join(productIds)})
+          FOR SHARE`;
+        if (new Set(lockedProducts.map((p) => p.workspaceId)).size !== 1) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Dependencies must be within the same workspace.",
+          });
+        }
+
         // Cycle check: would adding ticketId -> dependsOnId let dependsOnId reach ticketId?
         if (await wouldCreateCycle(tx, input.dependsOnId, input.ticketId)) {
           throw new TRPCError({
