@@ -6,7 +6,7 @@
  */
 
 import { db } from "~/server/db";
-import { oauthError, publicJson, publicPreflight, whenOAuthEnabled } from "~/server/mcp/oauth/http";
+import { oauthError, publicJson, publicPreflight, readOAuthForm, whenOAuthEnabled } from "~/server/mcp/oauth/http";
 import { MCP_SCOPE, mcpResource } from "~/server/mcp/oauth/metadata";
 import { redeemAuthorizationCode, redeemRefreshToken } from "~/server/mcp/oauth/tokenGrant";
 import { checkRateLimit, clientIpFrom, tooManyRequestsInit } from "~/server/utils/rateLimit";
@@ -34,21 +34,8 @@ export const POST = whenOAuthEnabled(async (req: Request): Promise<Response> => 
     return oauthError(init.status, "too_many_requests", "Too many token requests from this address.", init.headers);
   }
 
-  const contentType = req.headers.get("content-type") ?? "";
-  if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
-    return oauthError(400, "invalid_request", "Send the token request form-encoded (application/x-www-form-urlencoded).");
-  }
-  if (Number(req.headers.get("content-length") ?? 0) > MAX_BODY_BYTES) {
-    return oauthError(400, "invalid_request", "The token request is too large.");
-  }
-  const text = await req.text();
-  if (text.length > MAX_BODY_BYTES) return oauthError(400, "invalid_request", "The token request is too large.");
-  const form = new URLSearchParams(text);
-
-  // RFC 6749 §3.2: no parameter may appear twice.
-  for (const key of new Set(form.keys())) {
-    if (form.getAll(key).length > 1) return oauthError(400, "invalid_request", `${key} appears more than once.`);
-  }
+  const form = await readOAuthForm(req, MAX_BODY_BYTES);
+  if (form instanceof Response) return form;
 
   const grantType = form.get("grant_type");
   if (grantType !== "authorization_code" && grantType !== "refresh_token") {
