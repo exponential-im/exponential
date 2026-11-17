@@ -48,6 +48,35 @@ export function publicPreflight(methods: string): Response {
 }
 
 /**
+ * The request body as text, or null when it is over `maxBytes`. These
+ * endpoints take unauthenticated requests, so the cap holds while reading: a
+ * declared Content-Length over it is refused before anything is read, and a
+ * body sent without one (chunked) is cut off as soon as it passes the cap,
+ * rather than read whole and measured afterwards.
+ */
+export async function readCappedText(req: Request, maxBytes: number): Promise<string | null> {
+  if (Number(req.headers.get("content-length") ?? 0) > maxBytes) return null;
+  if (!req.body) {
+    const text = await req.text();
+    return Buffer.byteLength(text, "utf8") > maxBytes ? null : text;
+  }
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+/**
  * Read a form-encoded OAuth request body (RFC 6749 §3.2, RFC 7009 §2.1): the
  * parameters, or the 400 to send. Refuses another content type, a body over
  * `maxBytes` and any parameter that appears twice.
@@ -57,11 +86,8 @@ export async function readOAuthForm(req: Request, maxBytes: number): Promise<URL
   if (!contentType.toLowerCase().startsWith("application/x-www-form-urlencoded")) {
     return oauthError(400, "invalid_request", "Send the request form-encoded (application/x-www-form-urlencoded).");
   }
-  if (Number(req.headers.get("content-length") ?? 0) > maxBytes) {
-    return oauthError(400, "invalid_request", "The request is too large.");
-  }
-  const text = await req.text();
-  if (text.length > maxBytes) return oauthError(400, "invalid_request", "The request is too large.");
+  const text = await readCappedText(req, maxBytes);
+  if (text === null) return oauthError(400, "invalid_request", "The request is too large.");
   const form = new URLSearchParams(text);
   for (const key of new Set(form.keys())) {
     if (form.getAll(key).length > 1) return oauthError(400, "invalid_request", `${key} appears more than once.`);
