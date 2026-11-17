@@ -213,3 +213,76 @@ describe("oauthConnection.approve", () => {
     expect(db.oAuthAuthorizationCode.create).not.toHaveBeenCalled();
   });
 });
+
+describe("oauthConnection.approve with a new agent", () => {
+  const NEW_AGENT = { name: "Claude", workspaceIds: ["ws-personal", "ws-team"] };
+
+  beforeEach(() => {
+    db.workspaceUser.findMany.mockResolvedValue([
+      { workspaceId: "ws-personal", role: "owner" },
+      { workspaceId: "ws-team", role: "member" },
+    ] as never);
+    db.user.create.mockResolvedValue({ id: "shadow-new" } as never);
+    db.externalAgent.create.mockResolvedValue({ id: "agent-new" } as never);
+  });
+
+  function expectNothingWritten() {
+    expect(db.$transaction).not.toHaveBeenCalled();
+    expect(db.user.create).not.toHaveBeenCalled();
+    expect(db.externalAgent.create).not.toHaveBeenCalled();
+    expect(db.oAuthConnection.create).not.toHaveBeenCalled();
+    expect(db.oAuthAuthorizationCode.create).not.toHaveBeenCalled();
+  }
+
+  it("creates the agent, its workspaces, the connection and the code in one transaction", async () => {
+    const { redirectTo } = await caller().oauthConnection.approve({ request: REQUEST, newAgent: NEW_AGENT });
+
+    expect(new URL(redirectTo).searchParams.get("code")).toMatch(/^exp_oac_/);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.user.create).toHaveBeenCalledWith({ data: { name: "Claude", isAgent: true } });
+    expect(db.externalAgent.create).toHaveBeenCalledWith({
+      data: { name: "Claude", description: null, ownerId: PERSON, shadowUserId: "shadow-new" },
+    });
+    expect(db.workspaceUser.createMany).toHaveBeenCalledWith({
+      data: [
+        { userId: "shadow-new", workspaceId: "ws-personal", role: "member" },
+        { userId: "shadow-new", workspaceId: "ws-team", role: "member" },
+      ],
+    });
+    expect(db.oAuthConnection.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ agentId: "agent-new" }) as unknown }),
+    );
+    // No key: the connection's OAuth tokens are the agent's only credential.
+    expect(db.externalAgentKey.create).not.toHaveBeenCalled();
+    expect(db.externalAgent.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("refuses a workspace the person cannot delegate, and writes nothing", async () => {
+    db.workspaceUser.findMany.mockResolvedValue([
+      { workspaceId: "ws-personal", role: "owner" },
+      { workspaceId: "ws-team", role: "viewer" },
+    ] as never);
+    db.workspace.findMany.mockResolvedValue([{ name: "Team" }] as never);
+
+    await expectRefused(caller().oauthConnection.approve({ request: REQUEST, newAgent: NEW_AGENT }), "FORBIDDEN");
+    expectNothingWritten();
+  });
+
+  it.each([
+    ["no workspace", { request: REQUEST, newAgent: { name: "Claude", workspaceIds: [] } }],
+    ["a blank name", { request: REQUEST, newAgent: { name: "   ", workspaceIds: ["ws-personal"] } }],
+    ["both an agent and a new agent", { request: REQUEST, agentId: AGENT, newAgent: NEW_AGENT }],
+    ["neither an agent nor a new agent", { request: REQUEST }],
+  ])("refuses %s, and writes nothing", async (_label, input) => {
+    await expectRefused(caller().oauthConnection.approve(input), "BAD_REQUEST");
+    expectNothingWritten();
+  });
+
+  it("refuses a non-admin while MCP_OAUTH_MODE is admin, before creating anything", async () => {
+    await expectRefused(
+      caller({ isAdmin: false }).oauthConnection.approve({ request: REQUEST, newAgent: NEW_AGENT }),
+      "FORBIDDEN",
+    );
+    expectNothingWritten();
+  });
+});

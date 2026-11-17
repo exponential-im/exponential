@@ -73,8 +73,10 @@ and must be able to offer the same sign-in.
 - Four tables (`OAuthClient`, `OAuthConnection`, `OAuthAuthorizationCode`, `OAuthToken`) in one
   migration.
 - Built in steps behind `MCP_OAUTH_MODE`: discovery, registration, consent and the code grant
-  first; refresh rotation, client ID metadata documents and revocation next; the consent screen
-  creating the agent, and the Settings → Agents view of connections, after that.
+  first, where the person picks one of their agents or sets up a new one on the consent screen
+  (created in the same transaction as the connection, with no key); refresh rotation, client ID
+  metadata documents and revocation next; one agent per client reused on reconnect, and the
+  Settings → Agents view of connections, after that.
 - On Vercel previews the issuer resolves to production, so OAuth is exercised locally or on an
   install with `NEXT_PUBLIC_APP_URL` set.
 - Secret scanners can tell the three token kinds apart by prefix, and from agent keys.

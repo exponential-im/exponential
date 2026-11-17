@@ -3,6 +3,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { connection } from "next/server";
+import { canDelegateFromRole } from "~/lib/agentDelegation";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { auth } from "~/server/auth";
 import { db } from "~/server/db";
@@ -61,7 +62,8 @@ function Refused({ message }: { message: string }) {
 /**
  * The OAuth consent page for MCP clients (hosted MCP Agent PRD, D11). An app
  * that got a 401 from `/api/mcp` sends the person here; they choose which of
- * their External agents the app acts as, and approve or deny.
+ * their External agents the app acts as, or set up a new one, and approve or
+ * deny.
  *
  * Outside the `(sidemenu)` group and off the public route list: a signed-out
  * visitor is sent through sign-in by the middleware and returns to this same
@@ -98,36 +100,40 @@ export default async function AuthorizePage({ searchParams }: { searchParams: Se
   if (validation.kind === "redirect-error") redirect(validation.redirectTo);
   const { request } = validation;
 
-  const agents = await db.externalAgent.findMany({
-    where: { ownerId: session.user.id, assistant: { is: null } },
-    orderBy: { createdAt: "asc" },
-    select: {
-      id: true,
-      name: true,
-      shadowUser: { select: { workspaceMemberships: { select: { workspace: { select: { name: true } } } } } },
-    },
-  });
+  const [agents, memberships] = await Promise.all([
+    db.externalAgent.findMany({
+      where: { ownerId: session.user.id, assistant: { is: null } },
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        name: true,
+        shadowUser: { select: { workspaceMemberships: { select: { workspace: { select: { name: true } } } } } },
+      },
+    }),
+    // The workspaces a new agent may be given: the server refuses any other.
+    db.workspaceUser.findMany({
+      where: { userId: session.user.id },
+      select: { role: true, workspace: { select: { id: true, name: true, type: true } } },
+    }),
+  ]);
+  const workspaces = memberships
+    .filter((membership) => canDelegateFromRole(membership.role))
+    .map(({ workspace }) => ({ id: workspace.id, name: workspace.name, isPersonal: workspace.type === "personal" }))
+    .sort((a, b) => Number(b.isPersonal) - Number(a.isPersonal) || a.name.localeCompare(b.name));
 
   return (
     <Shell eyebrow="Connect an app">
       <h1 className="auth-title">Connect {request.client.name}</h1>
-      <p className="auth-sub">
-        {request.client.name} wants to work in {PRODUCT_NAME} through the MCP endpoint. Choose which of your
-        External agents it acts as: it can do what that agent can, in that agent&apos;s workspaces, and its
-        changes are recorded as that agent&apos;s.
-      </p>
-      <p className="auth-note">
-        Approving sends you back to <b>{describeRedirectTarget(request.redirectUri)}</b>. Only continue if you
-        started this from {request.client.name}.
-      </p>
       <AuthorizeForm
         request={params.data}
         clientName={request.client.name}
+        returnTo={describeRedirectTarget(request.redirectUri)}
         agents={agents.map((agent) => ({
           id: agent.id,
           name: agent.name,
           workspaces: agent.shadowUser.workspaceMemberships.map((membership) => membership.workspace.name),
         }))}
+        workspaces={workspaces}
         canApprove={mode === "on" || session.user.isAdmin}
         denyHref={authorizeErrorRedirect(
           request.redirectUri,
