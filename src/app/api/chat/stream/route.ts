@@ -644,7 +644,10 @@ export async function POST(req: Request) {
     // on EVERY call for EVERY user while the agent narrates around it. The
     // daily digest lists those, but nothing asked anyone to fix them: one ran
     // red for six months. File the Bug on first sight instead.
-    const reportToolFault = (toolName: string, rawError: string) => {
+    const reportToolFault = (toolName: string, unmaskedError: string) => {
+      // Masked here, at the sink, not left to each caller: this text is
+      // persisted on a ticket, and error text routinely echoes inputs.
+      const rawError = maskTokenLike(unmaskedError);
       const kind = classifyToolError(rawError);
       if (!isReportableToolError(kind) || reportedToolFaults.has(toolName)) return;
       reportedToolFaults.add(toolName);

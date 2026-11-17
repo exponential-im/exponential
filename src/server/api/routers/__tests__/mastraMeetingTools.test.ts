@@ -121,8 +121,20 @@ describe("mastra meeting tools (woody.spider)", () => {
     });
 
     it("searches inside one Meeting when given its id", async () => {
+      searchMock.mockResolvedValue([
+        {
+          id: "chunk-1",
+          content: "Cyril: two user stories this week.",
+          sourceType: "transcription",
+          sourceId: "meeting-1",
+          chunkIndex: 3,
+          similarity: 0.81,
+          sourceTitle: "Daily Standup",
+          sourceMeta: {},
+        },
+      ]);
       const caller = createMockCaller({ userId: USER_ID, db: dbMock });
-      await caller.mastra.queryMeetingContext({
+      const result = await caller.mastra.queryMeetingContext({
         query: "user stories",
         workspaceId: WS,
         transcriptionId: "meeting-1",
@@ -134,6 +146,83 @@ describe("mastra meeting tools (woody.spider)", () => {
         "user stories",
         expect.objectContaining({ sourceId: "meeting-1", sourceTypes: ["transcription"] }),
       );
+      // Chunks found: no keyword fallback, and the hit is labelled as a Meeting.
+      expect(dbMock.transcriptionSession.findMany).not.toHaveBeenCalled();
+      expect(result.results[0]).toMatchObject({ sourceId: "meeting-1", meetingTitle: "Daily Standup" });
+    });
+
+    describe("keyword fallback", () => {
+      const AGENT_IMPORTED = {
+        id: "meeting-1",
+        title: "Daily Standup",
+        // Owned by the importing agent, not the caller.
+        userId: "agent-user",
+        transcription: "Cyril said he is picking up two user stories this week. Then we moved on.",
+        createdAt: new Date("2026-11-16T09:00:00Z"),
+      };
+      const ACCESS_SCOPED_WHERE = {
+        AND: [
+          buildTranscriptionAccessWhere(USER_ID),
+          { OR: [{ workspaceId: WS }, { workspaceId: null }] },
+          { id: "meeting-1" },
+        ],
+      };
+
+      it("answers a search inside one Meeting from its text when it has no chunks", async () => {
+        // Not embedded, or a Meeting with no workspace: the workspace-scoped
+        // vector search returns nothing, which must not read as "never said".
+        searchMock.mockResolvedValue([]);
+        dbMock.transcriptionSession.findMany.mockResolvedValue([AGENT_IMPORTED] as never);
+        const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+
+        const result = await caller.mastra.queryMeetingContext({
+          query: "user stories",
+          workspaceId: WS,
+          transcriptionId: "meeting-1",
+        });
+
+        // Scoped by who can VIEW the Meeting, not by who owns it.
+        expect(dbMock.transcriptionSession.findMany.mock.calls[0]?.[0]?.where).toEqual(ACCESS_SCOPED_WHERE);
+        expect(result.results).toHaveLength(1);
+        expect(result.results[0]?.content).toContain("two user stories");
+      });
+
+      it("does not fall back for a workspace-wide search with no hits", async () => {
+        searchMock.mockResolvedValue([]);
+        const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+
+        const result = await caller.mastra.queryMeetingContext({ query: "user stories", workspaceId: WS });
+
+        expect(result.results).toEqual([]);
+        expect(dbMock.transcriptionSession.findMany).not.toHaveBeenCalled();
+      });
+
+      it("uses the same access-scoped fallback when vector search throws", async () => {
+        searchMock.mockRejectedValue(new Error("embeddings provider down"));
+        dbMock.transcriptionSession.findMany.mockResolvedValue([AGENT_IMPORTED] as never);
+        const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+
+        const result = await caller.mastra.queryMeetingContext({
+          query: "user stories",
+          workspaceId: WS,
+          transcriptionId: "meeting-1",
+        });
+
+        expect(dbMock.transcriptionSession.findMany.mock.calls[0]?.[0]?.where).toEqual(ACCESS_SCOPED_WHERE);
+        expect(result.results).toHaveLength(1);
+      });
+
+      it("treats the query as plain text, so punctuation cannot break it", async () => {
+        searchMock.mockRejectedValue(new Error("embeddings provider down"));
+        dbMock.transcriptionSession.findMany.mockResolvedValue([
+          { ...AGENT_IMPORTED, transcription: "We ship the c++ (draft bindings next." },
+        ] as never);
+        const caller = createMockCaller({ userId: USER_ID, db: dbMock });
+
+        const result = await caller.mastra.queryMeetingContext({ query: "c++ (draft", workspaceId: WS });
+
+        expect(result.results).toHaveLength(1);
+      });
     });
 
     it("refuses a workspace the caller is not in", async () => {

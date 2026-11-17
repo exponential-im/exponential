@@ -404,7 +404,8 @@ Prisma's shadow database doesn't have pgvector. Solutions:
 
 The `queryMeetingContext` endpoint has graceful fallback:
 1. Attempts vector search using KnowledgeService
-2. If vector search fails (e.g., no embeddings), falls back to keyword search
-3. Returns results in consistent format either way
+2. Falls back to keyword search over transcript text when vector search fails (e.g., no embeddings provider), or when a search inside one Meeting (`transcriptionId`) finds no chunks: that Meeting may not be embedded yet, or may have no workspace, and the workspace-scoped vector search cannot return it
+3. The fallback is scoped like the vector path: Meetings the caller can view (`buildTranscriptionAccessWhere`), in this workspace or with none
+4. Returns results in consistent format either way
 
 This ensures the system works before embeddings are generated while providing better results once they're available.

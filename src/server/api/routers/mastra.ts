@@ -56,6 +56,8 @@ import {
   assertCanEditKeyResult,
 } from "~/server/services/access/resolvers/goalResolver";
 import { buildMeetingTranscriptionsWhere } from "~/server/services/meetings/meetingTranscriptionsWhere";
+import { buildTranscriptionAccessWhere } from "~/server/services/access";
+import type { Prisma } from "@prisma/client";
 import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { filterAgentInstructions } from "~/server/services/agent-routing/agentInstructionFilter";
@@ -1805,6 +1807,81 @@ export const mastraRouter = createTRPCRouter({
         });
       }
 
+      // Keyword search over transcript text. Used when vector search throws
+      // (no embeddings provider, a failed query) and when a search inside one
+      // Meeting finds no chunks: that Meeting may simply not be embedded, or
+      // have no workspace, and "no excerpts" would read as "never said".
+      const keywordSearch = async () => {
+        // Meetings the caller can VIEW, the same rule as the vector path and
+        // getMeetingTranscriptions. Scoping this to `userId` (the owner) hid
+        // every Meeting imported by an agent or a teammate, which is exactly
+        // the Meeting someone has open when they ask about it.
+        //
+        // Workspace: this workspace, plus sessions with none (Personal, or not
+        // yet backfilled), whose chunks the workspace-scoped vector search
+        // cannot return at all.
+        const whereClause: Prisma.TranscriptionSessionWhereInput = {
+          AND: [
+            buildTranscriptionAccessWhere(userId),
+            { OR: [{ workspaceId: input.workspaceId }, { workspaceId: null }] },
+            ...(input.transcriptionId ? [{ id: input.transcriptionId }] : []),
+            ...(input.projectId ? [{ projectId: input.projectId }] : []),
+            ...(input.dateRange
+              ? [{
+                  createdAt: {
+                    gte: new Date(input.dateRange.start),
+                    lte: new Date(input.dateRange.end),
+                  },
+                }]
+              : []),
+          ],
+        };
+
+        const transcriptions = await ctx.db.transcriptionSession.findMany({
+          where: whereClause,
+          orderBy: { createdAt: 'desc' },
+          take: 20,
+        });
+
+        const results = transcriptions
+          .map(t => {
+            const transcript = (t.transcription ?? "").toLowerCase();
+            const query = input.query.toLowerCase();
+            // Plain substring counts: the words are the person's own text, so
+            // building a RegExp from them threw on "c++" or "(draft".
+            const queryWords = query.split(/\s+/).filter(Boolean);
+            if (queryWords.length === 0) return null;
+
+            let relevanceScore = 0;
+            queryWords.forEach(word => {
+              relevanceScore += transcript.split(word).length - 1;
+            });
+
+            if (relevanceScore === 0) return null;
+
+            const sentences = (t.transcription ?? "").split(/[.!?]+/);
+            const relevantSentences = sentences.filter(sentence =>
+              queryWords.some(word => sentence.toLowerCase().includes(word))
+            );
+
+            return {
+              content: relevantSentences.slice(0, 3).join('. '),
+              sourceType: 'transcription' as const,
+              sourceId: t.id,
+              sourceTitle: t.title ?? "",
+              meetingTitle: t.title ?? "",
+              meetingDate: t.createdAt.toISOString(),
+              relevanceScore: relevanceScore / queryWords.length,
+              contextType: determineContextType(relevantSentences.join(' ')),
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => (b?.relevanceScore ?? 0) - (a?.relevanceScore ?? 0))
+          .slice(0, input.topK);
+
+        return { results };
+      };
+
       try {
         // Use KnowledgeService for vector search.
         // We pass userId for further-narrowing — this user-facing
@@ -1850,82 +1927,15 @@ export const mastraRouter = createTRPCRouter({
         const { KnowledgeService } = await import("~/server/services/KnowledgeService");
         const aiContext = KnowledgeService.formatForAIContext(searchResults);
 
+        if (input.transcriptionId && results.length === 0) {
+          return await keywordSearch();
+        }
+
         return { results, aiContext };
       } catch (error) {
         console.error('Error in queryMeetingContext:', error);
-
-        // Fallback to keyword search if vector search fails (e.g., no embeddings yet)
         console.log('[queryMeetingContext] Falling back to keyword search');
-
-        const whereClause: Record<string, unknown> = {
-          userId: userId,
-        };
-
-        if (input.projectId) {
-          whereClause.projectId = input.projectId;
-        }
-
-        if (input.transcriptionId) {
-          whereClause.id = input.transcriptionId;
-        }
-
-        // Mirror the vector-search nullable-tolerant filter: include sessions in this
-        // workspace as well as legacy sessions where workspaceId hasn't been backfilled.
-        if (input.workspaceId) {
-          whereClause.OR = [
-            { workspaceId: input.workspaceId },
-            { workspaceId: null },
-          ];
-        }
-
-        if (input.dateRange) {
-          whereClause.createdAt = {
-            gte: new Date(input.dateRange.start),
-            lte: new Date(input.dateRange.end),
-          };
-        }
-
-        const transcriptions = await ctx.db.transcriptionSession.findMany({
-          where: whereClause,
-          orderBy: { createdAt: 'desc' },
-          take: 20,
-        });
-
-        const results = transcriptions
-          .map(t => {
-            const transcript = (t.transcription ?? "").toLowerCase();
-            const query = input.query.toLowerCase();
-            const queryWords = query.split(' ');
-
-            let relevanceScore = 0;
-            queryWords.forEach(word => {
-              const matches = (transcript.match(new RegExp(word, 'g')) ?? []).length;
-              relevanceScore += matches;
-            });
-
-            if (relevanceScore === 0) return null;
-
-            const sentences = (t.transcription ?? "").split(/[.!?]+/);
-            const relevantSentences = sentences.filter(sentence =>
-              queryWords.some(word => sentence.toLowerCase().includes(word))
-            );
-
-            return {
-              content: relevantSentences.slice(0, 3).join('. '),
-              sourceType: 'transcription' as const,
-              sourceId: t.id,
-              sourceTitle: t.title ?? "",
-              meetingTitle: t.title ?? "",
-              meetingDate: t.createdAt.toISOString(),
-              relevanceScore: relevanceScore / queryWords.length,
-              contextType: determineContextType(relevantSentences.join(' ')),
-            };
-          })
-          .filter(Boolean)
-          .sort((a, b) => (b?.relevanceScore ?? 0) - (a?.relevanceScore ?? 0))
-          .slice(0, input.topK);
-
-        return { results };
+        return keywordSearch();
       }
     }),
 
