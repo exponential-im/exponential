@@ -6,7 +6,14 @@
  */
 
 import { db } from "~/server/db";
-import { oauthError, publicJson, publicPreflight, readOAuthForm, whenOAuthEnabled } from "~/server/mcp/oauth/http";
+import {
+  oauthError,
+  publicJson,
+  publicPreflight,
+  readOAuthForm,
+  TOKEN_ENDPOINT_RATE_LIMIT,
+  whenOAuthEnabled,
+} from "~/server/mcp/oauth/http";
 import { MCP_SCOPE, mcpResource } from "~/server/mcp/oauth/metadata";
 import { redeemAuthorizationCode, redeemRefreshToken } from "~/server/mcp/oauth/tokenGrant";
 import { checkRateLimit, clientIpFrom, tooManyRequestsInit } from "~/server/utils/rateLimit";
@@ -16,19 +23,11 @@ export const runtime = "nodejs";
 /** Largest token request body read, in bytes. */
 const MAX_BODY_BYTES = 8 * 1024;
 
-/** Token requests per IP per minute (Agent PRD, D6). */
-const TOKEN_REQUESTS_PER_MINUTE = 60;
-
 /** RFC 6749 §5.1: token responses must not be cached. */
 const NO_CACHE = { Pragma: "no-cache" };
 
 export const POST = whenOAuthEnabled(async (req: Request): Promise<Response> => {
-  const limit = await checkRateLimit({
-    name: "oauth-token-ip",
-    key: clientIpFrom(req.headers),
-    limit: TOKEN_REQUESTS_PER_MINUTE,
-    windowSeconds: 60,
-  });
+  const limit = await checkRateLimit({ ...TOKEN_ENDPOINT_RATE_LIMIT, key: clientIpFrom(req.headers) });
   if (!limit.success) {
     const init = tooManyRequestsInit(limit);
     return oauthError(init.status, "too_many_requests", "Too many token requests from this address.", init.headers);

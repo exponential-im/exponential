@@ -6,6 +6,12 @@
 
 import { isMcpOAuthEnabled } from "./metadata";
 
+/**
+ * The per-IP budget the token and revocation endpoints share (Agent PRD, D6):
+ * one definition, so the two routes can't enforce one counter differently.
+ */
+export const TOKEN_ENDPOINT_RATE_LIMIT = { name: "oauth-token-ip", limit: 60, windowSeconds: 60 } as const;
+
 const PUBLIC_CORS: Readonly<Record<string, string>> = {
   "Access-Control-Allow-Origin": "*",
 };
