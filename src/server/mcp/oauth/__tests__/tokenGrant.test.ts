@@ -193,6 +193,22 @@ describe("redeemRefreshToken", () => {
     });
   });
 
+  it("treats a replayed refresh token as stolen: every token of the connection goes", async () => {
+    db.oAuthToken.findUnique.mockResolvedValue(tokenRow({ rotatedAt: new Date() }) as never);
+
+    expect(await refresh()).toMatchObject({ ok: false, error: "invalid_grant" });
+    expect(db.oAuthToken.deleteMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" } });
+    expect(db.oAuthToken.create).not.toHaveBeenCalled();
+  });
+
+  it("revokes the connection when it loses a concurrent refresh, the winner's new pair included", async () => {
+    db.oAuthToken.updateMany.mockResolvedValue({ count: 0 });
+
+    expect(await refresh()).toMatchObject({ ok: false, error: "invalid_grant" });
+    expect(db.oAuthToken.create).not.toHaveBeenCalled();
+    expect(db.oAuthToken.deleteMany).toHaveBeenCalledWith({ where: { connectionId: "conn-1" } });
+  });
+
   it.each([
     ["an unknown refresh token", () => db.oAuthToken.findUnique.mockResolvedValue(null), {}],
     ["an expired refresh token", () => db.oAuthToken.findUnique.mockResolvedValue(tokenRow({ refreshExpiresAt: new Date(Date.now() - 1) }) as never), {}],

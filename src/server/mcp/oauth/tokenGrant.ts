@@ -168,7 +168,15 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
     },
   });
   if (!row) return invalidGrant("The refresh token is not valid.");
-  if (row.rotatedAt) return invalidGrant("The refresh token has already been used.");
+
+  // A refresh token presented twice was copied: either the client or someone
+  // holding a stolen token already used it, and the server can't tell which.
+  // Revoke every token of the connection, so both have to sign in again (D8).
+  const refuseReplay = async () => {
+    await db.oAuthToken.deleteMany({ where: { connectionId: row.connection.id } });
+    return invalidGrant("The refresh token has already been used.");
+  };
+  if (row.rotatedAt) return refuseReplay();
   if (row.refreshExpiresAt <= now) return invalidGrant("The refresh token has expired.");
   if (row.connection.clientId !== redemption.clientId) {
     return invalidGrant("The refresh token was issued to another client.");
@@ -187,7 +195,9 @@ export async function redeemRefreshToken(db: GrantDb, redemption: RefreshRedempt
     await pruneExpired(tx, row.connection.id, now);
     return true;
   });
-  if (!issued) return invalidGrant("The refresh token has already been used.");
+  // Losing the claim is a replay too. The winner's transaction has committed by
+  // now (the claim waits on its row lock), so its new pair is revoked as well.
+  if (!issued) return refuseReplay();
 
   return { ok: true, tokens: pair.response };
 }
