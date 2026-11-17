@@ -827,3 +827,121 @@ describe("action.upsertBySource", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
+
+describe("timeEntry.start on a Ticket (the plugin's \"What's this for?\" picker)", () => {
+  const TICKET_ID = "ticket-1";
+  let db: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    vi.mocked(recordActivity).mockClear();
+    withTransaction(db);
+    db.timeEntry.findFirst.mockResolvedValue(null); // no running timer
+    db.timeEntry.create.mockResolvedValue(
+      entryRow({ source: "plugin", status: "CONFIRMED", endedAt: null, createdByAgentId: null }) as never,
+    );
+  });
+
+  function arrangeTicket() {
+    // findTimerTicket (router access) …
+    db.ticket.findFirst.mockResolvedValue({ id: TICKET_ID } as never);
+    // … then the service's own read for title + workspace.
+    db.ticket.findUnique.mockResolvedValue({
+      id: TICKET_ID,
+      title: "Timer can start on a Ticket",
+      product: { workspaceId: WS_ID },
+    } as never);
+  }
+
+  it("first Play creates the person's timer Action on the Ticket, named after it; the typed text is the note", async () => {
+    arrangeTicket();
+    db.action.findFirst.mockResolvedValue(null);
+    db.action.create.mockResolvedValue({ id: ACTION_ID, workspaceId: WS_ID } as never);
+
+    await humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, typedTitle: "  wiring the picker  " });
+
+    expect(db.action.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { ticketId: TICKET_ID, createdById: OWNER_ID, source: "plugin", status: "ACTIVE" },
+      }),
+    );
+    expect(db.action.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          name: "Timer can start on a Ticket",
+          ticketId: TICKET_ID,
+          workspaceId: WS_ID,
+          createdById: OWNER_ID,
+          source: "plugin",
+        }),
+      }),
+    );
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          actionId: ACTION_ID,
+          workspaceId: WS_ID,
+          source: "plugin",
+          note: "wiring the picker",
+        }),
+      }),
+    );
+  });
+
+  it("a later Play reuses that Action instead of adding another row to the Ticket", async () => {
+    arrangeTicket();
+    db.action.findFirst.mockResolvedValue({ id: "action-existing", workspaceId: WS_ID } as never);
+
+    await humanCaller(db).timeEntry.start({ ticketId: TICKET_ID });
+
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ actionId: "action-existing", note: null }),
+      }),
+    );
+  });
+
+  it("a ticket the caller can't reach is NOT_FOUND, and nothing is written", async () => {
+    db.ticket.findFirst.mockResolvedValue(null);
+
+    await expect(humanCaller(db).timeEntry.start({ ticketId: TICKET_ID })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    // Access is scoped through workspace membership via the ticket's product.
+    expect(db.ticket.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          AND: [
+            { id: TICKET_ID },
+            { product: { workspace: { is: expect.objectContaining({ OR: expect.any(Array) }) } } },
+          ],
+        },
+      }),
+    );
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("ticketId with actionId or projectId is BAD_REQUEST", async () => {
+    await expect(
+      humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, actionId: ACTION_ID }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, projectId: "project-1" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("without ticketId the typed-title path is unchanged: a new Action, no note", async () => {
+    db.action.create.mockResolvedValue({ id: ACTION_ID, workspaceId: WS_ID } as never);
+    db.workspaceUser.findUnique.mockResolvedValue({ role: "member" } as never);
+
+    await humanCaller(db).timeEntry.start({ typedTitle: "Inbox zero", workspaceId: WS_ID });
+
+    expect(db.action.findFirst).not.toHaveBeenCalled();
+    const data = (db.timeEntry.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty("note");
+  });
+});
