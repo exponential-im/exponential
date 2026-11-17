@@ -8,13 +8,31 @@
 import { db } from "~/server/db";
 import { oauthError, publicPreflight, readOAuthForm, whenOAuthEnabled } from "~/server/mcp/oauth/http";
 import { revokeToken } from "~/server/mcp/oauth/revocation";
+import { checkRateLimit, clientIpFrom, tooManyRequestsInit } from "~/server/utils/rateLimit";
 
 export const runtime = "nodejs";
 
 /** Largest revocation request body read, in bytes. */
 const MAX_BODY_BYTES = 8 * 1024;
 
+/**
+ * Revocations share the token endpoint's per-IP budget (Agent PRD, D6): the
+ * same clients call both, and an unauthenticated write needs some ceiling.
+ */
+const TOKEN_REQUESTS_PER_MINUTE = 60;
+
 export const POST = whenOAuthEnabled(async (req: Request): Promise<Response> => {
+  const limit = await checkRateLimit({
+    name: "oauth-token-ip",
+    key: clientIpFrom(req.headers),
+    limit: TOKEN_REQUESTS_PER_MINUTE,
+    windowSeconds: 60,
+  });
+  if (!limit.success) {
+    const init = tooManyRequestsInit(limit);
+    return oauthError(init.status, "too_many_requests", "Too many requests from this address.", init.headers);
+  }
+
   const form = await readOAuthForm(req, MAX_BODY_BYTES);
   if (form instanceof Response) return form;
 

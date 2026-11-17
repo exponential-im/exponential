@@ -21,10 +21,15 @@ vi.mock("~/env", async (importOriginal) => {
   };
 });
 
-const { db } = vi.hoisted(() => ({
+const { db, checkRateLimit } = vi.hoisted(() => ({
   db: { oAuthToken: { findUnique: vi.fn(), deleteMany: vi.fn() } },
+  checkRateLimit: vi.fn(),
 }));
 vi.mock("~/server/db", () => ({ db }));
+vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/server/utils/rateLimit")>()),
+  checkRateLimit,
+}));
 
 import { hashOAuthSecret } from "~/server/mcp/oauth/tokens";
 import { OPTIONS, POST } from "../route";
@@ -40,7 +45,7 @@ function revokeRequest(fields: Record<string, string>, headers: Record<string, s
     body: new URLSearchParams(fields).toString(),
   });
   Object.defineProperty(req, "headers", {
-    value: new Headers({ "content-type": "application/x-www-form-urlencoded", ...headers }),
+    value: new Headers({ "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "203.0.113.7", ...headers }),
   });
   return req;
 }
@@ -48,6 +53,7 @@ function revokeRequest(fields: Record<string, string>, headers: Record<string, s
 beforeEach(() => {
   vi.clearAllMocks();
   envOverrides.MCP_OAUTH_MODE = "admin";
+  checkRateLimit.mockResolvedValue({ success: true, retryAfterSeconds: 0 });
   db.oAuthToken.findUnique.mockResolvedValue(ROW);
   db.oAuthToken.deleteMany.mockResolvedValue({ count: 2 });
 });
@@ -118,6 +124,17 @@ describe("POST /api/oauth/revoke", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toMatchObject({ error: "invalid_request" });
     expect(db.oAuthToken.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("shares the token endpoint's per-IP limit: 60 a minute", async () => {
+    await POST(revokeRequest({ token: ACCESS }));
+    expect(checkRateLimit).toHaveBeenCalledWith({ name: "oauth-token-ip", key: "203.0.113.7", limit: 60, windowSeconds: 60 });
+
+    checkRateLimit.mockResolvedValue({ success: false, retryAfterSeconds: 12 });
+    const res = await POST(revokeRequest({ token: ACCESS }));
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("12");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
   });
 
   it("answers a CORS preflight", async () => {
