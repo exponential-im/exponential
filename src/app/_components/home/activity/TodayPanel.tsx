@@ -17,6 +17,7 @@ import {
 import { toPlainText } from '~/lib/content/plainText';
 import { withoutPausedProjects } from '~/lib/actions/pausedProjects';
 import { completeActionPatch, DoneCheckbox } from '~/app/_components/home/shared/DoneCheckbox';
+import { Panel } from "~/app/_components/ui";
 
 const MAX_ROWS = 6;
 
@@ -93,7 +94,7 @@ export function TodayPanel() {
       : dueDate.toLocaleDateString('en-US', { weekday: 'short' });
 
   return (
-    <section className="wsa-card">
+    <Panel as="section" variant="plain" radius="xl" padding="none" className="wsa-card">
       <div className="wsa-card__head">
         <h2 className="wsa-card__title">
           <IconSun size={14} stroke={1.8} />
@@ -181,6 +182,6 @@ export function TodayPanel() {
           )}
         </>
       )}
-    </section>
+    </Panel>
   );
 }
