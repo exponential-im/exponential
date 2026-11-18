@@ -39,6 +39,7 @@ describe("resolveGithubIdentities", () => {
           { userId: "u2", externalUserId: "older" },
         ]),
       },
+      user: { findMany: vi.fn().mockResolvedValue([]) },
     } as unknown as PrismaClient;
 
     const identities = await resolveGithubIdentities(db, "ws-1", ["u1", "u2", "u3"]);
@@ -58,6 +59,7 @@ describe("resolveGithubIdentities", () => {
       integrationUserMapping: {
         findMany: vi.fn().mockResolvedValue([{ userId: "bob", externalUserId: "alice-gh" }]),
       },
+      user: { findMany: vi.fn().mockResolvedValue([]) },
     } as unknown as PrismaClient;
 
     const identities = await resolveGithubIdentities(db, "ws-1", ["alice", "bob"]);
@@ -77,11 +79,50 @@ describe("resolveGithubIdentities", () => {
       integrationUserMapping: {
         findMany: vi.fn().mockResolvedValue([{ userId: "bob", externalUserId: "alice-gh" }]),
       },
+      user: { findMany: vi.fn().mockResolvedValue([]) },
     } as unknown as PrismaClient;
 
     const identities = await resolveGithubIdentities(db, "ws-1", ["bob"]);
 
     expect(identities.size).toBe(0);
+  });
+
+  it("puts a linked GitHub identity first, and it outranks others' weaker links", async () => {
+    const db = {
+      integration: {
+        findMany: vi.fn().mockResolvedValue([
+          { userId: "u1", credentials: [{ key: JSON.stringify({ githubUsername: "u1-account" }) }] },
+          // Bob's integration names a login Carol proved is hers.
+          { userId: "bob", credentials: [{ key: JSON.stringify({ githubUsername: "carol-gh" }) }] },
+        ]),
+      },
+      integrationUserMapping: {
+        findMany: vi.fn().mockResolvedValue([
+          // An admin gave Dave the login Carol linked.
+          { userId: "dave", externalUserId: "Carol-GH" },
+        ]),
+      },
+      user: {
+        findMany: vi.fn().mockResolvedValue([
+          { id: "u1", githubLogin: "u1-linked" },
+          { id: "carol", githubLogin: "carol-gh" },
+        ]),
+      },
+    } as unknown as PrismaClient;
+
+    const identities = await resolveGithubIdentities(db, "ws-1", ["u1", "bob", "dave"]);
+
+    expect(identities.get("u1")).toEqual({ login: "u1-linked", source: "claim" });
+    expect(identities.has("bob")).toBe(false);
+    expect(identities.has("dave")).toBe(false);
+    // Asked for the requested users' claims and for whoever holds the named logins.
+    const where = (db.user.findMany as ReturnType<typeof vi.fn>).mock.calls[0]![0].where;
+    expect(where.OR).toEqual(
+      expect.arrayContaining([
+        { id: { in: ["u1", "bob", "dave"] } },
+        { githubLogin: { equals: "Carol-GH", mode: "insensitive" } },
+      ]),
+    );
   });
 });
 
@@ -89,6 +130,7 @@ describe("setWorkspaceGithubLogin", () => {
   function makeDb(
     installation: { id: string } | null,
     accounts: { userId: string; login: string }[] = [],
+    claimant: { id: string } | null = null,
   ) {
     const db = {
       integration: {
@@ -100,6 +142,7 @@ describe("setWorkspaceGithubLogin", () => {
           })),
         ),
       },
+      user: { findFirst: vi.fn().mockResolvedValue(claimant) },
       integrationUserMapping: {
         deleteMany: vi.fn().mockReturnValue("delete-op"),
         create: vi.fn().mockReturnValue("create-op"),
@@ -141,6 +184,22 @@ describe("setWorkspaceGithubLogin", () => {
         login: "alice-gh",
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses a login another user linked as their GitHub identity", async () => {
+    const db = makeDb({ id: "inst-1" }, [], { id: "carol" });
+    await expect(
+      setWorkspaceGithubLogin(db as unknown as PrismaClient, {
+        workspaceId: "ws-1",
+        userId: "bob",
+        login: "Carol-GH",
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(db.user.findFirst).toHaveBeenCalledWith({
+      where: { id: { not: "bob" }, githubLogin: { equals: "Carol-GH", mode: "insensitive" } },
+      select: { id: true },
+    });
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 

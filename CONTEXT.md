@@ -156,7 +156,7 @@ The second activity-feed filter, beside the **Activity source** switcher: **Ever
 _Avoid_: My activity page, activity inbox.
 
 **GitHub identity claim**:
-An Exponential user's claim to a GitHub login, stored as `User.githubLogin: String?`. Set only via an **OAuth-verified flow** on `/settings/profile` — the **NextAuth GitHub provider** (user signs in with GitHub; we capture the verified login) — **never** free-text, so one user cannot claim another's commits. It **cannot** be derived from the installer login captured at connect (`Integration.providerConfig.githubLogin`) — that's the installing *account/org*, not each member's personal identity. The activity feed joins GitHub events to `User` via `User.githubLogin = githubEvent.author`; unmatched events render with the raw GitHub login and a generic icon. Separate from `IntegrationUserMapping`, which scopes external identities to specific integration installations and is meant for Slack-style "users discovered through this integration." **Deferred** (not built): only needed for "mine" attribution — it gates commits-in-the-**Weekly work digest**, nothing earlier (the feed and PR-merge promotion don't need it).
+An Exponential user's claim to a GitHub login, stored as `User.githubLogin: String?` with GitHub's numeric `User.githubId` (unique — one GitHub account backs at most one user; stable across renames) and `githubLinkedAt`. Set only via an **OAuth-verified flow** started from `/settings/profile` — a dedicated link round trip at `/api/auth/github-identity` (GitHub tells us the login; the token is used once for `GET /user` and dropped) — **never** free-text, so one user cannot claim another's commits. Deliberately **not** a NextAuth provider: linking must not also make GitHub a way to sign in or create an account. Needs `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` (an OAuth App, or the GitHub App's own client credentials) with the callback URL registered. It **cannot** be derived from the installer login captured at connect (`Integration.providerConfig.githubLogin`) — that's the installing *account/org*, not each member's personal identity. The activity feed joins GitHub events to `User` via `User.githubLogin = githubEvent.author`; unmatched events render with the raw GitHub login and a generic icon. Separate from `IntegrationUserMapping`, which scopes external identities to specific integration installations and is meant for Slack-style "users discovered through this integration." **Built** for the Metrics page's per-member PRs/commits and the ceremony standup drafts' commit lines (both via `resolveGithubLogins`), where it outranks the member's own GitHub integration login and a workspace-admin-set username, and a claimed login can't be given to anyone else; commits-in-the-**Weekly work digest** can now use it too.
 _Avoid_: GitHub user mapping, GitHub link (use "GitHub identity claim" or just "claim" in conversation).
 
 **Workspace repository**:
@@ -232,8 +232,8 @@ _Avoid_: Auto-close, auto-merge (it promotes a ticket on *someone else's* merge,
 > the ingestion mechanism — webhook + poll, persisted to `GitHubActivity` via the
 > per-install App token ([ADR-0022](docs/adr/0022-github-activity-ingestion-webhook-poll-persisted.md))
 > — and PR-merge → ticket promotion ([ADR-0021](docs/adr/0021-pr-merge-promotes-ticket-via-app-webhook.md)).
-> **Still undecided / not built:** the **GitHub identity claim** (`User.githubLogin`)
-> and the feed/digest render of the persisted rows. The bullets below reflect the
+> **Still not built:** the feed/digest render of the persisted rows. (The **GitHub
+> identity claim**, `User.githubLogin`, now exists.) The bullets below reflect the
 > ADR-0022 ingestion model, not the retired live-fetch/shared-PAT one.
 
 - A **Workspace** has many **Workspace repositories**.
@@ -243,7 +243,7 @@ _Avoid_: Auto-close, auto-merge (it promotes a ticket on *someone else's* merge,
 - `GitHubActivity` now has **two read consumers** of the same rows: the activity feed/digest **and** `SprintSnapshot` analytics. (Pre-ADR-0022 these were independent — analytics-only, live-fetch panel.)
 - **Meetings** now emit `WorkspaceActivityEvent` rows via `recordActivity` (entityType `meeting`: `created`, then `summarized` once the auto-summary lands) — the internal-data write-path of ADR-0001, so a meeting appears in the workspace feed, the **Aggregated activity feed**, and the **Weekly work digest** from one write.
 - **OKRs** emit `WorkspaceActivityEvent` rows via `recordActivity` for a curated set of human acts — Objective create/delete/lifecycle-status-change (entityType `goal`; `completed` on the transition into completed), Objective updates and comments (`goal_update`, `goal_comment` — the goalService seams, so Zoe's writes per [ADR-0016](docs/adr/0016-agent-activity-writes-reuse-human-path.md) log identically), Key result create/delete/check-in/comment (`key_result`, `key_result_comment`; action `checked_in`), manual status overrides (`status_changed`, only when *setting* — clearing to Auto is silent), and the weekly ritual's submit/complete (`okr_checkin`). Rows are **bare** (metadata carries only the title plus the drawer-target id), personal (non-workspace) Objectives never log, auto-health recomputes never log, and OKR feed rows deep-link to the OKR drawer via a server-computed `drawerParam`. Rendered copy says "objective"/"key result"; stored entity types stay schema-flavoured.
-- **Commit activity** _(decided, not yet built — [ADR-0022](docs/adr/0022-github-activity-ingestion-webhook-poll-persisted.md))_: commits are **persisted** to `GitHubActivity` via the webhook `push` event + the per-install App-token poll (not the retired PAT cron of ADR-0019), per-commit stored but **rendered grouped**, reaching the **Aggregated activity feed** and the digest. Attributing a commit to *you* still needs the **GitHub identity claim** (`User.githubLogin`), which remains unbuilt — so "mine" filtering is the gating dependency for commits in the **Weekly work digest**.
+- **Commit activity** _(decided, not yet built — [ADR-0022](docs/adr/0022-github-activity-ingestion-webhook-poll-persisted.md))_: commits are **persisted** to `GitHubActivity` via the webhook `push` event + the per-install App-token poll (not the retired PAT cron of ADR-0019), per-commit stored but **rendered grouped**, reaching the **Aggregated activity feed** and the digest. Attributing a commit to *you* uses the **GitHub identity claim** (`User.githubLogin`), now built — so "mine" filtering for commits in the **Weekly work digest** is unblocked.
 
 ### Daily planning
 
@@ -364,6 +364,22 @@ _Avoid_: Orphan project (only in conversation/code, never UI copy). Also avoid u
 **Ticket**:
 A unit of engineering work inside a Product, stored as `Ticket`. Has its own status enum (`BACKLOG`, `NEEDS_REFINEMENT`, … `DEPLOYED`, `ARCHIVED`), type (`BUG`, `FEATURE`, `CHORE`, …), optional `assignee`, optional `cycle`. Strictly **distinct from Action** — Tickets are product-management artefacts; Actions are meeting-extracted tasks. A Ticket may have many child Actions (`Ticket.actions`), but they are not the same entity. User-facing word is always "ticket" inside the product surface.
 _Avoid_: Task, story, item, issue.
+
+**Cycle**:
+A fixed timebox of delivery for one **Product** — usually two weeks — that **Tickets** are committed to. It carries a **cycle goal** (what the cycle aims for) and **achievements** (what it delivered). Stored as a `List` row with `listType: SPRINT`.
+_Avoid_: Sprint (in UI copy), iteration, List (the legacy table name).
+
+**Cycle brief**:
+One public, plain-language page per **Cycle** for people outside the team: a product owner, users, funders. It has two halves written at different times: the **plan**, written at cycle planning and signed off by the product owner, and the **release notes**, written when the cycle closes. The closed brief is the cycle's release notes; there is no second artifact.
+_Avoid_: Sprint report, cycle summary, changelog (the change log is the raw, PR-level list), Workspace update (workspace-wide, weekly, backward-looking only).
+
+**Product owner**:
+The one or more people accountable for what a **Product** aims for, set on the Product. They sign off its **Cycle briefs**: the plan's first publish, any later change to its **Cycle outcomes**, and the release notes. Always people, never Assistants or External agents.
+_Avoid_: Position (routes work, can be held by agents), reviewer (the **Workspace update** approver list), product manager, PO (in UI copy).
+
+**Cycle outcome**:
+One aim in a **Cycle brief**'s plan, written by hand in plain language ("The Sudan team uses CLEAR every week"). A person sets its status (on track, at risk, done) at the weekly check-in; it is never derived from tickets, because closing every ticket does not mean the aim was met. It always carries a plain-language **why** for the reader, and may link to **Features** and to at most one **Objective** for the team. When the Cycle closes, a person gives it a final result: Achieved, Partly or Missed. It never rolls into the next brief by itself; the **Product owner** carries it over or drops it.
+_Avoid_: Objective (a strategic, multi-cycle outcome), goal, sprint goal, deliverable.
 
 **Sentry bug**:
 An error captured by Sentry, filed into Exponential as a **Ticket** with `type: BUG` in the **Exponential** Product, landing in `BACKLOG` for human triage. Created by a signed inbound Sentry webhook (`/api/webhooks/sentry`) — **one Ticket per Sentry _issue_**, deduped on the Sentry issue id stored in `Ticket.links`, authored by the **Errol** system user. An *engineering* Ticket — strictly distinct from a **Problem** (the product-strategy artefact the glossary keeps bug-free). The write-in sibling of **Ticket promotion on merge** ([ADR-0021](docs/adr/0021-pr-merge-promotes-ticket-via-app-webhook.md)): both are external webhooks that write back to a `Ticket`. See [ADR-0027](docs/adr/0027-sentry-errors-as-bug-tickets.md).

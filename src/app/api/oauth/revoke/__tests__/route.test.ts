@@ -38,6 +38,7 @@ vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
 
 import { hashOAuthSecret } from "~/server/mcp/oauth/tokens";
 import { OPTIONS, POST } from "../route";
+import { endlessRequest } from "~/test/endlessBody";
 
 const ACCESS = "exp_oat_access-token";
 const REFRESH = "exp_ort_refresh-token";
@@ -158,6 +159,17 @@ describe("POST /api/oauth/revoke", () => {
     envOverrides.MCP_OAUTH_MODE = mode;
 
     expect((await POST(revokeRequest({ token: ACCESS }))).status).toBe(404);
+    expect(db.oAuthToken.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("cuts off a chunked body with no Content-Length instead of reading it whole", async () => {
+    const endless = endlessRequest({ "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "203.0.113.7" });
+
+    const res = await POST(endless.request);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_request" });
+    expect(endless.cancelled()).toBe(true);
     expect(db.oAuthToken.deleteMany).not.toHaveBeenCalled();
   });
 });

@@ -14,6 +14,7 @@ import { DateCell } from "./cells/DateCell";
 import { PersonCell } from "./cells/PersonCell";
 import { RelationCell } from "./cells/RelationCell";
 import type { RelationTarget, RowRelations } from "~/lib/databases/relations";
+import { PROPERTY_TYPE_ICONS } from "./propertyMeta";
 import styles from "./DatabaseBlock.module.css";
 
 const TEXT_EDITED = new Set(["text", "number", "url"]);
@@ -121,9 +122,13 @@ function PropertyField({
     control = <span className={text ? styles.cellText : styles.cellEmpty}>{text || "—"}</span>;
   }
 
+  const TypeIcon = PROPERTY_TYPE_ICONS[def.type];
   return (
     <div className={styles.field} data-property-id={def.id}>
-      <span className={styles.fieldLabel}>{def.name}</span>
+      <span className={styles.fieldLabel}>
+        <TypeIcon size={16} stroke={1.5} aria-hidden />
+        {def.name}
+      </span>
       <span className={styles.fieldValue}>{control}</span>
     </div>
   );

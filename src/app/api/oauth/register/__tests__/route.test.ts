@@ -31,6 +31,7 @@ vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
 }));
 
 import { OPTIONS, POST } from "../route";
+import { endlessRequest } from "~/test/endlessBody";
 
 const CREATED_AT = new Date("2026-11-16T12:00:00.000Z");
 
@@ -143,6 +144,17 @@ describe("POST /api/oauth/register", () => {
 
     expect(res.status).toBe(404);
     expect(checkRateLimit).not.toHaveBeenCalled();
+    expect(db.oAuthClient.create).not.toHaveBeenCalled();
+  });
+
+  it("cuts off a chunked body with no Content-Length instead of reading it whole", async () => {
+    const endless = endlessRequest({ "content-type": "application/json", "x-forwarded-for": "203.0.113.7" });
+
+    const res = await POST(endless.request);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_client_metadata" });
+    expect(endless.cancelled()).toBe(true);
     expect(db.oAuthClient.create).not.toHaveBeenCalled();
   });
 });

@@ -3,16 +3,11 @@
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useParams, usePathname, useRouter } from "next/navigation";
 import {
-  IconHome,
-  IconLayoutList,
   IconBulb,
   IconCalendarClock,
   IconClipboardList,
-  IconFlag,
   IconSettings,
   IconPlus,
-  IconAffiliate,
-  IconTargetArrow,
   IconMicrophone,
   IconTicket,
 } from "@tabler/icons-react";
@@ -31,21 +26,13 @@ import { api } from "~/trpc/react";
 import { FavoriteButton } from "~/app/_components/shared/FavoriteButton";
 import { useRegisterTopbarCrumbs } from "~/app/_components/layout/TopbarCrumbs";
 import { CreateTicketModal } from "~/app/_components/product/CreateTicketModal";
+import { PRODUCT_TABS } from "~/app/_components/product/productTabs";
 import { buildProductFavoriteTarget } from "./favoriteTarget";
 import { buildProductPageTitle } from "./productPageTitle";
 import { ProductDetailTitleProvider, useProductDetailTitleState } from "./ProductDetailTitle";
 import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 
-const tabs = [
-  { value: "overview", href: "", label: "Overview", icon: IconHome },
-  { value: "backlog", href: "/tickets", label: "Backlog", icon: IconLayoutList },
-  { value: "features", href: "/features", label: "Features", icon: IconBulb },
-  { value: "graph", href: "/graph", label: "Graph", icon: IconAffiliate },
-  { value: "cycles", href: "/cycles", label: "Cycles", icon: IconCalendarClock },
-  { value: "insights", href: "/insights", label: "Insights", icon: IconTargetArrow },
-  { value: "decisions", href: "/decisions", label: "Decisions", icon: IconFlag },
-  { value: "retro", href: "/retrospectives", label: "Retro", icon: IconClipboardList },
-] as const;
+const tabs = PRODUCT_TABS;
 
 export default function ProductLayout({
   children,

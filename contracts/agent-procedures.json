@@ -16,12 +16,19 @@
             "type": "array",
             "items": {
               "type": "string"
+            },
+            "default": []
+          },
+          "emails": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email"
             }
           }
         },
         "required": [
-          "actionId",
-          "userIds"
+          "actionId"
         ]
       }
     },
@@ -1729,6 +1736,14 @@
               "microsoft"
             ],
             "default": "google"
+          },
+          "recurrence": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^RRULE:[A-Z0-9=;,:+-]+$"
+            },
+            "maxItems": 2
           }
         },
         "required": [
@@ -3772,6 +3787,10 @@
             "type": "number",
             "minimum": 0,
             "maximum": 100
+          },
+          "period": {
+            "type": "string",
+            "pattern": "^(Q[1-4]|H[12]|Annual)-\\d{4}$"
           }
         },
         "required": [
@@ -4471,6 +4490,28 @@
         "required": [
           "email",
           "workspaceId"
+        ]
+      }
+    },
+    "user.getTimezone": {
+      "type": "query",
+      "inputOptional": true,
+      "input": null
+    },
+    "user.updateTimezone": {
+      "type": "mutation",
+      "inputOptional": false,
+      "input": {
+        "type": "object",
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "timezone"
         ]
       }
     }

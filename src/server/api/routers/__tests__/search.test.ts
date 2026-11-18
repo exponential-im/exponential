@@ -118,6 +118,7 @@ function stubEmptyResults(dbMock: DeepMockProxy<PrismaClient>) {
   dbMock.ticket.findMany.mockResolvedValue([]);
   dbMock.feature.findMany.mockResolvedValue([]);
   dbMock.epic.findMany.mockResolvedValue([]);
+  dbMock.list.findMany.mockResolvedValue([]);
   dbMock.knowledgePage.findMany.mockResolvedValue([]);
   dbMock.transcriptionSession.findMany.mockResolvedValue([]);
   dbMock.crmContact.findMany.mockResolvedValue([]);
@@ -201,6 +202,115 @@ describe("search router — global (mocked)", () => {
     // Access scoping comes from buildWorkspaceAccessWhere (direct OR
     // team-based membership), not a hand-rolled direct-members-only copy.
     expect(epicWhere?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
+  });
+
+  it("finds cycles: SPRINT lists only, workspace-membership gate, product-nested url", async () => {
+    dbMock.list.findMany
+      // Active cycles first…
+      .mockResolvedValueOnce([
+        {
+          id: "c20",
+          name: "Cycle 20",
+          status: "ACTIVE",
+          startDate: new Date("2026-11-13T00:00:00Z"),
+          endDate: new Date("2026-11-25T00:00:00Z"),
+          workspace: workspaceRef,
+          product: { slug: "clear", name: "CLEAR" },
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any)
+      // …then the rest.
+      .mockResolvedValueOnce([
+        {
+          id: "c22",
+          name: "Cycle 22",
+          status: "PLANNED",
+          startDate: new Date("2026-12-11T00:00:00Z"),
+          endDate: new Date("2026-12-23T00:00:00Z"),
+          workspace: workspaceRef,
+          product: { slug: "clear", name: "CLEAR" },
+        },
+        {
+          id: "legacy",
+          name: "Cycle 3",
+          status: "COMPLETED",
+          startDate: null,
+          endDate: null,
+          workspace: workspaceRef,
+          product: null,
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "cycle", limit: 5 });
+
+    const [activeArgs, restArgs] = dbMock.list.findMany.mock.calls.map((c) => c[0]);
+    const [shared, activeOnly] = (activeArgs?.where?.AND ?? []) as Record<string, unknown>[];
+    // Generic curated lists share the table; only sprints are cycles.
+    expect(shared?.listType).toBe("SPRINT");
+    expect(shared?.name).toEqual({ contains: "cycle", mode: "insensitive" });
+    expect(shared?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
+    expect(activeOnly).toEqual({ status: "ACTIVE" });
+    expect(activeArgs?.take).toBe(5);
+
+    const cycles = res.results.filter((r) => r.type === "cycle");
+    expect(cycles.map((c) => c.id)).toEqual(["c20", "c22", "legacy"]);
+    expect(cycles[0]?.url).toBe("/w/clear/products/clear/cycles/c20");
+    expect(cycles[0]?.subtitle).toBe("CLEAR · ACTIVE · 2026-11-13 → 2026-11-25");
+    // A workspace-shared cycle has no product route to point at.
+    expect(cycles[2]?.url).toBeNull();
+    expect(cycles[2]?.subtitle).toBe("COMPLETED");
+    // The non-active query only fills what the active ones left of the limit.
+    expect(restArgs?.where?.AND?.[1]).toEqual({ status: { not: "ACTIVE" } });
+    expect(restArgs?.take).toBe(4);
+  });
+
+  it("keeps the active cycle when upcoming cycles alone would fill the limit", async () => {
+    const cycle = (id: string, status: string, start: string) => ({
+      id,
+      name: `Cycle ${id}`,
+      status,
+      startDate: new Date(start),
+      endDate: null,
+      workspace: workspaceRef,
+      product: { slug: "clear", name: "CLEAR" },
+    });
+    dbMock.list.findMany
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce([cycle("20", "ACTIVE", "2026-11-13T00:00:00Z")] as any)
+      .mockResolvedValueOnce(
+        ["25", "24", "23", "22"].map((n) =>
+          cycle(n, "PLANNED", `2027-0${Number(n) - 21}-01T00:00:00Z`),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ) as any,
+      );
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "cycle", limit: 5 });
+
+    const ids = res.results.filter((r) => r.type === "cycle").map((c) => c.id);
+    expect(ids).toEqual(["20", "25", "24", "23", "22"]);
+  });
+
+  it("skips the second cycle query when active cycles fill the limit", async () => {
+    dbMock.list.findMany.mockResolvedValueOnce(
+      Array.from({ length: 2 }, (_, i) => ({
+        id: `a${i}`,
+        name: `Cycle ${i}`,
+        status: "ACTIVE",
+        startDate: null,
+        endDate: null,
+        workspace: workspaceRef,
+        product: { slug: "clear", name: "CLEAR" },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      })) as any,
+    );
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.search.global({ query: "cycle", limit: 2 });
+
+    expect(dbMock.list.findMany).toHaveBeenCalledTimes(1);
   });
 
   it("workspace-scoped search filters projects/goals to the workspace for members", async () => {

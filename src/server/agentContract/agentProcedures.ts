@@ -49,4 +49,6 @@ export const AGENT_PROCEDURES = [
   "transcription.generateDraftFeatures",
   "transcription.getById",
   "transcriptionSessionParticipant.getHistory",
+  "user.getTimezone",
+  "user.updateTimezone",
 ] as const;

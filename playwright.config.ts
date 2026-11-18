@@ -33,7 +33,12 @@ const SHARED_VIEW_PREFS_SPECS = [
  * Specs that start their own Mastra stub on E2E_MASTRA_STUB_URL. One port, so
  * they run one file at a time.
  */
-const MASTRA_STUB_SPECS = ["agent-run.spec.ts", "billing-usage.spec.ts"];
+const MASTRA_STUB_SPECS = [
+  "agent-run.spec.ts",
+  "billing-usage.spec.ts",
+  "chat-tool-card.spec.ts",
+  "low-rating-trace.spec.ts",
+];
 
 export default defineConfig({
   testDir: "./e2e",
@@ -104,6 +109,12 @@ export default defineConfig({
       // may make (the model-key ones). Same value as E2E_MASTRA_SERVER_KEY in
       // e2e/fixture-data.ts.
       MASTRA_SERVER_API_KEY: "e2e-mastra-server-key",
+      // The ops room is the same stub port: low-rating-trace.spec.ts answers
+      // the Matrix send there and reads what was posted. With no stub up the
+      // send fails and is swallowed, as it is on any install without Matrix.
+      MATRIX_HOMESERVER_URL: E2E_MASTRA_STUB_URL,
+      MATRIX_ACCESS_TOKEN: "e2e-matrix-token",
+      MATRIX_SENTRY_ROOM_ID: "!e2e-ops:localhost",
     },
   },
 });

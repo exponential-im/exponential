@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
   ActionIcon,
@@ -28,6 +28,7 @@ import {
   IconShieldExclamation,
   IconTags,
   IconTrash,
+  IconUserCheck,
   IconX,
 } from "@tabler/icons-react";
 import { modals } from "@mantine/modals";
@@ -51,9 +52,11 @@ import {
   type SidebarGroup,
 } from "~/app/_components/settings/SettingsShell";
 import { NotionSyncSettings } from "~/app/_components/products/NotionSyncSettings";
+import { ProductOwnersSettings } from "~/app/_components/products/ProductOwnersSettings";
 
 type SectionId =
   | "general"
+  | "owners"
   | "flow"
   | "areas"
   | "labels"
@@ -415,7 +418,11 @@ export default function ProductSettingsPage() {
     { enabled: !!workspaceId && !!productSlug },
   );
 
-  const [section, setSection] = useState<SectionId>("general");
+  // `?section=owners` deep-links from the cycle brief's "set a Product owner" prompt.
+  const searchParams = useSearchParams();
+  const [section, setSection] = useState<SectionId>(
+    searchParams.get("section") === "owners" ? "owners" : "general",
+  );
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [description, setDescription] = useState("");
@@ -656,6 +663,7 @@ export default function ProductSettingsPage() {
       title: "Product",
       items: [
         { id: "general", label: "General", icon: IconSettings },
+        { id: "owners", label: "Product owners", icon: IconUserCheck },
         { id: "flow", label: "Delivery Flow", icon: IconRefresh },
         { id: "areas", label: "Areas", icon: IconMap2 },
         { id: "labels", label: "Labels", icon: IconTags },
@@ -941,6 +949,16 @@ export default function ProductSettingsPage() {
               />
             </SettingsSection>
           </>
+        )}
+
+        {section === "owners" && (
+          <SettingsSection
+            icon={IconUserCheck}
+            title="Product owners"
+            description="The people accountable for what this product aims for. They sign off its Cycle briefs: the plan's first publish, later changes to its outcomes, and carry-overs."
+          >
+            <ProductOwnersSettings productId={product.id} />
+          </SettingsSection>
         )}
 
         {section === "areas" && (

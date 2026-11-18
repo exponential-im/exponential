@@ -36,6 +36,7 @@ import crypto from "crypto";
 import { testFirefliesConnection } from "./integration";
 import { pageRouter } from "./page";
 import { ticketRouter } from "~/plugins/product/server/routers/ticket";
+import { okrPeriodSchema, periodChangeData } from "~/plugins/okr/server/keyResultPeriod";
 import { applyTicketLabels } from "~/server/services/tags/ticketLabels";
 import { GoogleCalendarService } from "~/server/services/GoogleCalendarService";
 import { decryptBufferSafe, encryptString, encryptToBase64 } from "~/server/utils/encryption";
@@ -2615,8 +2616,26 @@ export const mastraRouter = createTRPCRouter({
         displayName: z.string().optional(),
       })).optional(),
       provider: z.enum(['google', 'microsoft']).default('google'),
+      // A repeating event: iCalendar RRULE lines. One event that repeats, not
+      // one event per day, so the person can move or stop the whole series.
+      recurrence: z.array(z.string().regex(/^RRULE:[A-Z0-9=;,:+-]+$/)).max(2).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Dropping the rule would create a single event and report a series.
+      if (input.recurrence?.length && input.provider !== 'google') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Repeating events are only supported for Google Calendar for now',
+        });
+      }
+      // A repeating event with no zone is expanded in UTC and drifts by an
+      // hour at every daylight-saving change.
+      if (input.recurrence?.length && !input.start.timeZone) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'A repeating event needs start.timeZone',
+        });
+      }
       const service = getCalendarService(input.provider);
 
       const createdEvent = await service.createEvent(
@@ -2628,6 +2647,7 @@ export const mastraRouter = createTRPCRouter({
           end: input.end,
           location: input.location,
           attendees: input.attendees,
+          ...(input.recurrence?.length ? { recurrence: input.recurrence } : {}),
         }
       );
 
@@ -3634,6 +3654,8 @@ export const mastraRouter = createTRPCRouter({
       unitLabel: z.string().optional(),
       status: z.enum(["not-started", "on-track", "at-risk", "off-track", "achieved"]).optional(),
       confidence: z.number().min(0).max(100).optional(),
+      // Move the key result to another quarter, half or year.
+      period: okrPeriodSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -3653,7 +3675,10 @@ export const mastraRouter = createTRPCRouter({
 
       const keyResult = await ctx.db.keyResult.update({
         where: { id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...periodChangeData(existing.period, updateData.period),
+        },
         include: {
           goal: { select: { id: true, title: true } },
         },
@@ -3667,6 +3692,7 @@ export const mastraRouter = createTRPCRouter({
           currentValue: keyResult.currentValue,
           status: keyResult.status,
           confidence: keyResult.confidence,
+          period: keyResult.period,
           goal: keyResult.goal,
         },
       };

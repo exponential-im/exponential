@@ -131,7 +131,7 @@ export function useCanvasEngagement({
       } else {
         // Retry reuses the trailing (failed/incomplete) bubble — reset its text
         // and clear the failure/tool markers so the re-stream renders cleanly.
-        patchTrailingAi({ agentName, content: '', failure: undefined, toolCalls: undefined });
+        patchTrailingAi({ agentName, content: '', failure: undefined, toolCalls: undefined, answerOffset: undefined });
       }
 
       if (isNewEngagement) {
@@ -209,6 +209,7 @@ export function useCanvasEngagement({
               streamedChars = update.rawLength;
               patchTrailingAi({
                 content: update.displayText,
+                answerOffset: update.answerOffset,
                 ...(update.toolCalls.length > 0 ? { toolCalls: update.toolCalls } : {}),
               });
             },

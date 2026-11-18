@@ -4,11 +4,32 @@ import { useMemo, useState, memo, type ReactNode } from 'react';
 import { Collapse, Loader, UnstyledButton } from '@mantine/core';
 import { IconCheck, IconChevronDown, IconChevronRight, IconX, IconAlertTriangle } from '@tabler/icons-react';
 import type { ToolCall } from '~/providers/AgentModalProvider';
-import { TOOL_DISPLAY, humanizeToolName, type ToolDisplay } from './toolDisplayNames';
-import { classifyToolError, toolErrorSentence } from '~/lib/chat/toolErrors';
+import { TOOL_DISPLAY, humanizeToolName, isHiddenTool, type ToolDisplay } from './toolDisplayNames';
+import { classifyToolError, isRecoveredToolFailure, toolErrorSentence } from '~/lib/chat/toolErrors';
+import { MarkdownRenderer } from '~/app/_components/shared/MarkdownRenderer';
 
 interface ToolActivityProps {
   calls: ToolCall[];
+  /**
+   * What the agent wrote between its tool calls ("Let me look that up…").
+   * Kept out of the reply and shown here, behind the toggle (`splitTurnText`).
+   */
+  working?: string;
+  /**
+   * The turn has ended. The steps then fold into one summary row, so a long
+   * turn leaves one line above its answer instead of a list.
+   */
+  finished?: boolean;
+}
+
+const CARD_CLASS = 'mb-2 space-y-1 rounded-md border border-border-primary bg-surface-secondary px-2 py-1.5';
+const ROW_BUTTON_CLASS = 'flex w-full items-center gap-2 rounded px-2 py-1 hover:bg-surface-hover';
+
+// The folded card's one line: how many steps, and how many failed.
+export function toolSummaryLabel(stepCount: number, failedCount: number): string {
+  if (stepCount === 0) return 'Working notes';
+  const steps = `Used ${stepCount} ${stepCount === 1 ? 'tool' : 'tools'}`;
+  return failedCount > 0 ? `${steps} · ${failedCount} failed` : steps;
 }
 
 interface ToolGroup {
@@ -137,7 +158,7 @@ const ToolGroupRow = memo(function ToolGroupRow({ group }: { group: ToolGroup })
         <div>
           <UnstyledButton
             onClick={() => setOpen((v) => !v)}
-            className="flex w-full items-center gap-2 rounded px-2 py-1 hover:bg-surface-hover"
+            className={ROW_BUTTON_CLASS}
           >
             {headerIcon}
             {headerLabel}
@@ -165,7 +186,7 @@ const ToolGroupRow = memo(function ToolGroupRow({ group }: { group: ToolGroup })
     <div>
       <UnstyledButton
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 rounded px-2 py-1 hover:bg-surface-hover"
+        className={ROW_BUTTON_CLASS}
       >
         {headerIcon}
         {headerLabel}
@@ -196,15 +217,71 @@ const ToolGroupRow = memo(function ToolGroupRow({ group }: { group: ToolGroup })
   );
 });
 
-export const ToolActivity = memo(function ToolActivity({ calls }: ToolActivityProps) {
-  const groups = useMemo(() => groupCalls(calls), [calls]);
-  if (groups.length === 0) return null;
+export const ToolActivity = memo(function ToolActivity({ calls, working, finished = false }: ToolActivityProps) {
+  // A failure the assistant got past in the same turn is noise next to a reply
+  // that says "Done". Hide it from the person; an admin (the only one who
+  // receives raw error text) still sees every call. Plumbing steps (tool
+  // search) are hidden from everyone.
+  const visible = useMemo(
+    () =>
+      calls.filter((call, i) => {
+        if (isHiddenTool(call.name)) return false;
+        if (call.errorMsg) return true;
+        const kind = call.errorKind ?? classifyToolError(call.errorMsg);
+        return !isRecoveredToolFailure({ ...call, errorKind: kind }, calls.slice(i + 1));
+      }),
+    [calls],
+  );
+  const groups = useMemo(() => groupCalls(visible), [visible]);
+  const [open, setOpen] = useState(false);
+  const notes = working?.trim() ?? '';
 
+  const rows = groups.map((group, idx) => (
+    <ToolGroupRow key={`${group.toolName}-${idx}`} group={group} />
+  ));
+
+  // While the turn runs, and for a finished turn with one step and nothing
+  // written along the way, the steps show as they are.
+  if (!finished || (visible.length <= 1 && notes === '')) {
+    if (groups.length === 0) return null;
+    return (
+      <div className={CARD_CLASS}>
+        {rows}
+      </div>
+    );
+  }
+
+  const failedCount = visible.filter((c) => c.status === 'error').length;
   return (
-    <div className="mb-2 space-y-1 rounded-md border border-border-primary bg-surface-secondary px-2 py-1.5">
-      {groups.map((group, idx) => (
-        <ToolGroupRow key={`${group.toolName}-${idx}`} group={group} />
-      ))}
+    <div className={CARD_CLASS}>
+      <UnstyledButton
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className={ROW_BUTTON_CLASS}
+      >
+        {failedCount > 0 ? (
+          <IconAlertTriangle size={14} className="text-red-500" />
+        ) : (
+          <IconCheck size={14} className="text-brand-primary" />
+        )}
+        <span className="text-text-secondary text-xs">{toolSummaryLabel(visible.length, failedCount)}</span>
+        <span className="ml-auto text-text-muted">
+          {open ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+        </span>
+      </UnstyledButton>
+      <Collapse in={open}>
+        {rows.length > 0 && <div className="space-y-1">{rows}</div>}
+        {notes !== '' && (
+          // Sized like the step rows: each paragraph inline in a small muted line.
+          <div className="space-y-1 px-2 pt-1 pb-1 text-xs leading-5 text-text-muted">
+            {notes.split(/\n{2,}/).map((paragraph, i) => (
+              <p key={i}>
+                <MarkdownRenderer content={paragraph} variant="inline" />
+              </p>
+            ))}
+          </div>
+        )}
+      </Collapse>
     </div>
   );
 });

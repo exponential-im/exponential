@@ -59,7 +59,7 @@ test("/database inserts a block; cells persist; the row is a page", async ({ pag
   await expect(block.getByRole("columnheader", { name: /Status/ })).toBeVisible();
 
   // Add a row and type its title.
-  await block.getByRole("button", { name: "+ New" }).click();
+  await block.getByRole("button", { name: "New page" }).click();
   const titleInput = block.getByRole("textbox", { name: "Name" });
   await expect(titleInput).toBeVisible();
   await titleInput.fill("Alert latency");
