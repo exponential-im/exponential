@@ -61,7 +61,7 @@ Run a real chat before calling it done: "Running a real agent chat locally" in `
 | Broken-tool tickets | A tool call the app rejects, or whose output fails its schema, is filed as `agent-tool: <tool>: …` on first sight, one ticket per tool and fault (`src/lib/chat/toolErrors.ts`) | Live |
 | Tool canary | Calls every read tool daily against a non-production app, files failures, posts to the ops room | Merged; off until a non-production target is configured |
 | Daily agent-health digest | Posts the day's failed turns and most-failing tools to the ops room | Live |
-| Thumbs-down with trace | A low rating posts to the ops room with a link to the full turn and tool trace | Ticket 960 `bronze.tide`, in review |
+| Thumbs-down with trace | A low rating posts to the ops room with a link to the full turn and tool trace | Merged (PR 1186, ticket 960 `bronze.tide`); first production post not yet confirmed |
 | Golden eval set | 20 to 30 real questions graded on tool trajectory and on the answer | Ticket 961 `blue.arrow`, not started |
 | Live smoke test on a capped dev key | One real agent turn, locally and in CI | Ticket 962 `loud.spruce`, in review; needs the key |
 
