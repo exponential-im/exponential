@@ -2,8 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { MultiSelect, Select, UnstyledButton } from "@mantine/core";
-import { pillTint } from "~/app/_components/listPage/pillTint";
-import type { PropertyDef, SelectOption } from "~/lib/databases/schema";
+import type { PillColor, PropertyDef, SelectOption } from "~/lib/databases/schema";
 import styles from "../DatabaseBlock.module.css";
 
 const CREATE_PREFIX = "__create__:";
@@ -21,9 +20,48 @@ interface SelectCellProps {
   onCreateOption?: (name: string) => Promise<string | null>;
 }
 
-function Pill({ option }: { option: SelectOption }) {
+/**
+ * A database option's colours, as Notion draws them: the palette's light
+ * tint behind text that is mostly the page's own text colour, so the label
+ * stays readable in both themes (the list pages' `pillTint` puts the
+ * palette's filled shade on its own tint, which washes out at 14px).
+ * `PillColor` is the stored option colour, validated against Mantine's
+ * palette names, so every variable named here exists in the theme.
+ */
+export function databasePillTint(color: PillColor): React.CSSProperties {
+  return {
+    backgroundColor: `var(--mantine-color-${color}-light)`,
+    color:
+      color === "gray"
+        ? "var(--color-text-primary)"
+        : `color-mix(in srgb, var(--mantine-color-${color}-filled) 40%, var(--color-text-primary))`,
+  };
+}
+
+/**
+ * Exponential has no status property type, so a single-select column named
+ * "Status" is drawn the way Notion draws its status type: a rounded pill led
+ * by a dot in the option's colour.
+ */
+export function isStatusColumn(def: PropertyDef): boolean {
+  return def.type === "select" && def.name.trim().toLowerCase() === "status";
+}
+
+function Pill({ option, status }: { option: SelectOption; status: boolean }) {
   return (
-    <span className={styles.pill} style={pillTint(option.color)}>
+    <span
+      className={styles.pill}
+      data-variant={status ? "status" : undefined}
+      style={databasePillTint(option.color)}
+      title={option.name}
+    >
+      {status ? (
+        <span
+          className={styles.pillDot}
+          style={{ backgroundColor: `var(--mantine-color-${option.color}-filled)` }}
+          aria-hidden
+        />
+      ) : null}
       {option.name}
     </span>
   );
@@ -78,7 +116,7 @@ export function SelectCell({ def, value, editable, onCommit, onCreateOption }: S
         {selected.length === 0 ? (
           <span className={styles.cellEmpty}>—</span>
         ) : (
-          selected.map((o) => <Pill key={o.id} option={o} />)
+          selected.map((o) => <Pill key={o.id} option={o} status={isStatusColumn(def)} />)
         )}
       </UnstyledButton>
     );

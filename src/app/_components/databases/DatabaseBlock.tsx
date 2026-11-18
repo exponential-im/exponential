@@ -6,7 +6,7 @@ import {
   ReactNodeViewRenderer,
   type NodeViewProps,
 } from "@tiptap/react";
-import { UnstyledButton } from "@mantine/core";
+import { Button, UnstyledButton } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconTable, IconUpload } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
@@ -94,6 +94,8 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
   const updateDatabase = api.database.update.useMutation();
   const [renaming, setRenaming] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  /** A row the toolbar's "New" made, whose title the table opens for typing. */
+  const [newRowId, setNewRowId] = useState<string | null>(null);
   const database = databaseQuery.data;
   const liveName = database?.name;
 
@@ -360,6 +362,7 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
         relatableDatabases={relatableDatabases}
         onSearchRelation={searchRelation}
         onCreateOption={onCreateOption}
+        editTitleOf={newRowId}
       />
     );
   }
@@ -373,11 +376,10 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
       aria-busy={updateRow.isPending}
       contentEditable={false}
     >
-      <div className={styles.header}>
-        <IconTable size={16} className="shrink-0 text-text-muted" />
+      <div className={styles.titleRow}>
         {renaming !== null ? (
           <input
-            className={styles.nameInput}
+            className={`${styles.name} ${styles.nameInput}`}
             value={renaming}
             autoFocus
             aria-label="Database name"
@@ -403,6 +405,12 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
             {name}
           </span>
         )}
+      </div>
+      <div className={styles.header}>
+        <span className={styles.viewTab}>
+          <IconTable size={16} stroke={1.5} aria-hidden />
+          Table
+        </span>
         {typeof rowCount === "number" ? (
           <span className={styles.meta}>
             {rowCount} row{rowCount === 1 ? "" : "s"}
@@ -418,7 +426,7 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
         ) : null}
         {database && editable && databaseId ? (
           <UnstyledButton
-            className={styles.headerButton}
+            className={styles.controlButton}
             aria-label="Import CSV"
             title="Import rows from a CSV"
             onClick={(e) => {
@@ -426,8 +434,22 @@ function DatabaseBlock({ node, editor, updateAttributes, selected }: NodeViewPro
               setImporting(true);
             }}
           >
-            <IconUpload size={14} /> Import
+            <IconUpload size={16} stroke={1.5} />
           </UnstyledButton>
+        ) : null}
+        {database && editable && databaseId ? (
+          <Button
+            size="xs"
+            color="brand"
+            ml={4}
+            loading={createRow.isPending}
+            onClick={(e) => {
+              e.stopPropagation();
+              void addRow().then((id) => setNewRowId(id));
+            }}
+          >
+            New
+          </Button>
         ) : null}
       </div>
       {body}
