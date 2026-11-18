@@ -14,6 +14,7 @@ import {
 } from "~/server/services/cycleBriefs/types";
 
 import { SignOffReviewModal } from "./SignOffReviewModal";
+import { NotThisCycleSection } from "./NotThisCycleSection";
 
 const PENDING_LABEL = {
   new: "Not public yet",
@@ -163,6 +164,11 @@ export function CycleBriefPanel({
     onError,
   });
   const requestRemove = api.product.cycleBrief.requestRemoveOutcome.useMutation({ onSuccess: invalidate, onError });
+  const upsertExclusion = api.product.cycleBrief.upsertExclusion.useMutation({ onError });
+  const requestRemoveExclusion = api.product.cycleBrief.requestRemoveExclusion.useMutation({
+    onSuccess: invalidate,
+    onError,
+  });
   const setStatus = api.product.cycleBrief.setStatus.useMutation({ onSuccess: invalidate, onError });
 
   if (!data?.canHaveBrief) return null;
@@ -329,6 +335,24 @@ export function CycleBriefPanel({
         )}
       </Stack>
 
+      <NotThisCycleSection
+        rows={brief.exclusions}
+        insights={linkOptions?.insights ?? []}
+        isSaving={upsertExclusion.isPending}
+        onSave={(draft, done) =>
+          upsertExclusion.mutate(
+            { briefId: brief.id, ...draft },
+            {
+              onSuccess: () => {
+                done();
+                void invalidate();
+              },
+            },
+          )
+        }
+        onRemove={(exclusionId, remove) => requestRemoveExclusion.mutate({ exclusionId, remove })}
+      />
+
       <Group justify="space-between" className="mt-4">
         {hasProductOwner ? (
           <Text size="xs" className="text-text-muted">
@@ -361,15 +385,26 @@ export function CycleBriefPanel({
         isFirstSignOff={!isPublic}
         isSigningOff={signOff.isPending}
         onSignOff={() => signOff.mutate({ briefId: brief.id })}
-        rows={brief.outcomes.map((o, i) => ({
-          id: o.id,
-          label: `Outcome ${i + 1}`,
-          draftText: o.draftText,
-          draftWhy: o.draftWhy,
-          publicText: o.publicText,
-          publicWhy: o.publicWhy,
-          pendingChange: isPublic ? o.pendingChange : o.pendingChange === "removed" ? null : "new",
-        }))}
+        rows={[
+          ...brief.outcomes.map((o, i) => ({
+            id: o.id,
+            label: `Outcome ${i + 1}`,
+            draftText: o.draftText,
+            draftWhy: o.draftWhy,
+            publicText: o.publicText,
+            publicWhy: o.publicWhy,
+            pendingChange: o.pendingChange,
+          })),
+          ...brief.exclusions.map((x) => ({
+            id: x.id,
+            label: "Not this cycle",
+            draftText: x.draftText,
+            draftWhy: x.draftReason,
+            publicText: x.publicText,
+            publicWhy: x.publicReason,
+            pendingChange: x.pendingChange,
+          })),
+        ]}
       />
     </Panel>
   );

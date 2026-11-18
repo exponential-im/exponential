@@ -23,6 +23,12 @@ export interface PublicCycleOutcome {
   changedAt: Date | null;
 }
 
+/** A "Not this cycle" item (D-0095). The linked Insight is never shown. */
+export interface PublicExclusion {
+  text: string;
+  reason: string;
+}
+
 export interface PublicCycleBrief {
   cycleName: string;
   cycleSlug: string;
@@ -30,6 +36,7 @@ export interface PublicCycleBrief {
   endDate: Date | null;
   signedOffAt: Date;
   outcomes: PublicCycleOutcome[];
+  exclusions: PublicExclusion[];
 }
 
 export interface PublicProduct {
@@ -51,6 +58,12 @@ export interface BriefProjectionInput {
     status: string | null;
     statusSetAt: Date | null;
     changedAt: Date | null;
+  }>;
+  exclusions?: Array<{
+    position: number;
+    publicText: string | null;
+    publicReason: string | null;
+    removedAt: Date | null;
   }>;
 }
 
@@ -80,6 +93,10 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
     endDate: brief.cycle.endDate,
     signedOffAt: brief.planSignedOffAt,
     outcomes,
+    exclusions: (brief.exclusions ?? [])
+      .filter((x) => x.publicText !== null && x.removedAt === null)
+      .sort((a, b) => a.position - b.position)
+      .map((x) => ({ text: x.publicText ?? "", reason: x.publicReason ?? "" })),
   };
 }
 
@@ -96,6 +113,9 @@ const PROJECTION_SELECT = {
       statusSetAt: true,
       changedAt: true,
     },
+  },
+  exclusions: {
+    select: { position: true, publicText: true, publicReason: true, removedAt: true },
   },
 } as const;
 

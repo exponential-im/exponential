@@ -62,6 +62,23 @@ export default async function PublicBriefPage({ params }: Params) {
             </li>
           ))}
         </ol>
+
+        {brief.exclusions.length > 0 && (
+          <section className="mt-12">
+            <h2 className="mb-4 text-lg font-semibold text-text-primary">Not this cycle</h2>
+            <ul className="space-y-4">
+              {brief.exclusions.map((item, index) => (
+                <li key={index}>
+                  <p className="text-base text-text-primary">{item.text}</p>
+                  <p className="mt-1 text-sm text-text-secondary">
+                    <span className="text-text-muted">Because: </span>
+                    {item.reason}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </article>
     </BriefShell>
   );

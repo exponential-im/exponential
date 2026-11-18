@@ -33,6 +33,10 @@ function row(overrides: Partial<BriefProjectionInput> = {}): BriefProjectionInpu
     planSignedOffAt: new Date("2030-03-02T09:00:00Z"),
     cycle: { name: "Cycle 21", slug: "cycle-21", startDate: new Date("2030-03-02"), endDate: new Date("2030-03-16") },
     outcomes: [outcome],
+    exclusions: [
+      { position: 0, publicText: "Arabic UI", publicReason: "Not enough users yet", removedAt: null, insightId: "insight_cuid_1", draftText: SECRET_DRAFT },
+      { position: 1, publicText: null, publicReason: null, removedAt: null, draftText: SECRET_DRAFT },
+    ],
     planSignedOffById: "user_cuid_owner",
     ...overrides,
   } as BriefProjectionInput;
@@ -64,11 +68,16 @@ describe("projectPublicBrief", () => {
       "outcome_cuid_1",
       "feature_cuid_1",
       "Ticket 1234",
+      "insight_cuid_1",
       "goalId",
       "statusSetById",
     ]) {
       expect(json).not.toContain(secret);
     }
+  });
+
+  it("shows only signed-off Not this cycle items, with their reason", () => {
+    expect(projectPublicBrief(row())?.exclusions).toEqual([{ text: "Arabic UI", reason: "Not enough users yet" }]);
   });
 
   it("hides outcomes that were never signed off or whose removal was signed off", () => {

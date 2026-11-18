@@ -338,3 +338,49 @@ describe("cycleBrief outcome links", () => {
     }
   });
 });
+
+describe("cycleBrief Not this cycle", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("requires a reason, links an Insight of the product, and goes public with the plan", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const insight = await db.insight.create({
+      data: { productId: product.id, createdById: owner.id, type: "FEEDBACK", title: "Arabic please", source: "Noah, Sudan" },
+    });
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Aim", why: "Because" });
+
+    await expect(
+      caller.product.cycleBrief.upsertExclusion({ briefId: brief.id, text: "Arabic UI", reason: "" }),
+    ).rejects.toThrow(/reason is required/i);
+
+    await caller.product.cycleBrief.upsertExclusion({
+      briefId: brief.id,
+      text: "Arabic UI",
+      reason: "Too few users read Arabic yet",
+      insightId: insight.id,
+    });
+    const readPublic = () =>
+      createUnauthenticatedCaller().product.cycleBrief.publicGet({
+        workspaceSlug: ws.slug,
+        productSlug: product.slug,
+        cycleSlug: cycle.slug,
+      });
+
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    const result = await readPublic();
+    expect(result?.brief.exclusions).toEqual([{ text: "Arabic UI", reason: "Too few users read Arabic yet" }]);
+    const json = JSON.stringify(result);
+    expect(json).not.toContain(insight.id);
+    expect(json).not.toContain("Noah");
+  });
+});

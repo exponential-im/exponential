@@ -228,6 +228,11 @@ export const cycleBriefRouter = createTRPCRouter({
                 goal: { select: { id: true, title: true } },
               },
             },
+            exclusions: {
+              where: { removedAt: null },
+              orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+              include: { insight: { select: { id: true, title: true } } },
+            },
           },
         }),
         cycle.productId
@@ -241,6 +246,10 @@ export const cycleBriefRouter = createTRPCRouter({
           : 0,
       ]);
       const outcomes = (brief?.outcomes ?? []).map((o) => ({ ...o, pendingChange: pendingChange(o) }));
+      const exclusions = (brief?.exclusions ?? []).map((x) => ({
+        ...x,
+        pendingChange: pendingChange({ ...x, draftWhy: x.draftReason, publicWhy: x.publicReason }),
+      }));
       return {
         /** Legacy workspace-shared cycles get no brief. */
         canHaveBrief: cycle.productId !== null,
@@ -248,9 +257,12 @@ export const cycleBriefRouter = createTRPCRouter({
         /** No Product owner means nobody can sign off (open decision 2): the UI prompts to set one. */
         hasProductOwner: ownerCount > 0,
         cycleGoal: cycle.cycleGoal,
-        brief: brief ? { ...brief, outcomes } : null,
+        brief: brief ? { ...brief, outcomes, exclusions } : null,
         /** Something the next sign-off would change on the public brief. */
-        hasPendingChanges: !brief?.planSignedOffAt || outcomes.some((o) => o.pendingChange !== null),
+        hasPendingChanges:
+          !brief?.planSignedOffAt ||
+          outcomes.some((o) => o.pendingChange !== null) ||
+          exclusions.some((x) => x.pendingChange !== null),
       };
     }),
 
@@ -349,7 +361,7 @@ export const cycleBriefRouter = createTRPCRouter({
     .input(z.object({ briefId: z.string() }))
     .query(async ({ ctx, input }) => {
       const brief = await loadBriefWithAccess(ctx.db, ctx.session.user.id, input.briefId, "view");
-      const [features, objectives] = await Promise.all([
+      const [features, objectives, insights] = await Promise.all([
         ctx.db.feature.findMany({
           where: { productId: brief.productId, status: { not: "ARCHIVED" } },
           select: { id: true, name: true },
@@ -360,8 +372,14 @@ export const cycleBriefRouter = createTRPCRouter({
           select: { id: true, title: true },
           orderBy: { title: "asc" },
         }),
+        ctx.db.insight.findMany({
+          where: { productId: brief.productId, status: { not: "DISMISSED" }, duplicateOfId: null },
+          select: { id: true, title: true },
+          orderBy: { createdAt: "desc" },
+          take: 200,
+        }),
       ]);
-      return { features, objectives };
+      return { features, objectives, insights };
     }),
 
   /**
@@ -383,6 +401,81 @@ export const cycleBriefRouter = createTRPCRouter({
       }
       await ctx.db.cycleOutcome.update({
         where: { id: outcome.id },
+        data: { removeRequested: input.remove },
+      });
+      return { deleted: false };
+    }),
+
+  /**
+   * Add or edit a "Not this cycle" item (D-0095): what the team is not doing
+   * this cycle, with a required reason and, optionally, the feedback Insight
+   * it answers. Signed off with the plan.
+   */
+  upsertExclusion: protectedProcedure
+    .input(
+      z.object({
+        briefId: z.string(),
+        exclusionId: z.string().optional(),
+        text: requiredText("Item", TEXT_LIMITS.SHORT),
+        reason: requiredText("Reason", TEXT_LIMITS.SHORT),
+        insightId: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const brief = await loadBriefWithAccess(ctx.db, ctx.session.user.id, input.briefId, "edit");
+      if (input.insightId) {
+        const insight = await ctx.db.insight.findUnique({
+          where: { id: input.insightId },
+          select: { productId: true },
+        });
+        if (insight?.productId !== brief.productId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "An item can only link to an Insight of the same product",
+          });
+        }
+      }
+      const data = {
+        draftText: input.text,
+        draftReason: input.reason,
+        ...(input.insightId !== undefined ? { insightId: input.insightId } : {}),
+      };
+      if (input.exclusionId) {
+        const existing = await ctx.db.cycleBriefExclusion.findUnique({
+          where: { id: input.exclusionId },
+          select: { briefId: true, removedAt: true },
+        });
+        if (existing?.briefId !== brief.id || existing.removedAt) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Item not found" });
+        }
+        return ctx.db.cycleBriefExclusion.update({ where: { id: input.exclusionId }, data });
+      }
+      const last = await ctx.db.cycleBriefExclusion.findFirst({
+        where: { briefId: brief.id },
+        orderBy: { position: "desc" },
+        select: { position: true },
+      });
+      return ctx.db.cycleBriefExclusion.create({
+        data: { briefId: brief.id, position: (last?.position ?? -1) + 1, ...data },
+      });
+    }),
+
+  /** Remove a "Not this cycle" item; like outcomes, a public one waits for sign-off. */
+  requestRemoveExclusion: protectedProcedure
+    .input(z.object({ exclusionId: z.string(), remove: z.boolean().default(true) }))
+    .mutation(async ({ ctx, input }) => {
+      const row = await ctx.db.cycleBriefExclusion.findUnique({
+        where: { id: input.exclusionId },
+        select: { id: true, briefId: true, publicText: true, removedAt: true },
+      });
+      if (!row || row.removedAt) throw new TRPCError({ code: "NOT_FOUND", message: "Item not found" });
+      await loadBriefWithAccess(ctx.db, ctx.session.user.id, row.briefId, "edit");
+      if (input.remove && row.publicText === null) {
+        await ctx.db.cycleBriefExclusion.delete({ where: { id: row.id } });
+        return { deleted: true };
+      }
+      await ctx.db.cycleBriefExclusion.update({
+        where: { id: row.id },
         data: { removeRequested: input.remove },
       });
       return { deleted: false };
@@ -423,6 +516,19 @@ export const cycleBriefRouter = createTRPCRouter({
         });
       }
 
+      const exclusions = await ctx.db.cycleBriefExclusion.findMany({
+        where: { briefId: brief.id, removedAt: null },
+        select: {
+          id: true,
+          draftText: true,
+          draftReason: true,
+          publicText: true,
+          publicReason: true,
+          removeRequested: true,
+          removedAt: true,
+        },
+      });
+
       const now = new Date();
       const isFirstSignOff = brief.planSignedOffAt === null;
       await ctx.db.$transaction([
@@ -440,6 +546,18 @@ export const cycleBriefRouter = createTRPCRouter({
                 publicWhy: o.draftWhy,
                 ...(isFirstSignOff ? {} : { changedAt: now }),
               },
+            }),
+          ];
+        }),
+        ...exclusions.flatMap((x) => {
+          if (x.removeRequested) {
+            return [ctx.db.cycleBriefExclusion.update({ where: { id: x.id }, data: { removedAt: now } })];
+          }
+          if (x.publicText === x.draftText && x.publicReason === x.draftReason) return [];
+          return [
+            ctx.db.cycleBriefExclusion.update({
+              where: { id: x.id },
+              data: { publicText: x.draftText, publicReason: x.draftReason },
             }),
           ];
         }),
