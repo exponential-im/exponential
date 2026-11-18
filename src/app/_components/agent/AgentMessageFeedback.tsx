@@ -254,6 +254,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
             placeholder="Any comments about this response? (optional)"
             value={comment}
             onChange={(e) => setComment(e.currentTarget.value)}
+            maxLength={2000}
             size="xs"
             minRows={2}
             autosize
@@ -264,6 +265,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
               placeholder="What could have made this response better?"
               value={improvementSuggestion}
               onChange={(e) => setImprovementSuggestion(e.currentTarget.value)}
+              maxLength={2000}
               size="xs"
               minRows={2}
               autosize
@@ -271,7 +273,12 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
             />
           )}
 
-          <Group justify="flex-end">
+          <Group justify="flex-end" gap="sm">
+            {submitFeedback.isError && (
+              <Text size="xs" className="text-error-text" role="alert">
+                That did not save. Try again.
+              </Text>
+            )}
             <Button
               size="xs"
               onClick={handleSubmit}
