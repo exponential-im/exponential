@@ -13,7 +13,7 @@
  * (see CLAUDE.md "Test database safety").
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
@@ -98,13 +98,37 @@ const KR_ROW = {
 };
 
 describe("periodChangeData", () => {
+  const NOW = new Date("2026-11-18T12:00:00Z");
+
   it("clears the explicit range only when the period actually moves", () => {
-    expect(periodChangeData("Q4-2026", "Q1-2027")).toEqual({
+    expect(periodChangeData("Q4-2026", "Q1-2027", NOW)).toEqual({
       periodStart: null,
       periodEnd: null,
     });
-    expect(periodChangeData("Q4-2026", "Q4-2026")).toEqual({});
-    expect(periodChangeData("Q4-2026", undefined)).toEqual({});
+    expect(periodChangeData("Q4-2026", "Q4-2026", NOW)).toEqual({});
+    expect(periodChangeData("Q4-2026", undefined, NOW)).toEqual({});
+  });
+
+  it("allows a move from last year through two years ahead", () => {
+    for (const period of ["Q1-2025", "Annual-2026", "H2-2028"]) {
+      expect(periodChangeData("Q4-2026", period, NOW)).toEqual({
+        periodStart: null,
+        periodEnd: null,
+      });
+    }
+  });
+
+  it.each(["Q1-2206", "Q4-2024", "Annual-2029", "Annual-0999"])(
+    "refuses a move to %s, outside the reachable years",
+    (period) => {
+      expect(() => periodChangeData("Q4-2026", period, NOW)).toThrow(
+        expect.objectContaining({ code: "BAD_REQUEST" }) as unknown as Error,
+      );
+    },
+  );
+
+  it("never range-checks an unchanged period, however old", () => {
+    expect(periodChangeData("Q2-2019", "Q2-2019", NOW)).toEqual({});
   });
 });
 
@@ -127,6 +151,10 @@ describe.each([
   let db: DeepMockProxy<PrismaClient>;
 
   beforeEach(() => {
+    // The reachable-year window is relative to now; pin it so the cases
+    // below mean the same thing every year.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-18T12:00:00Z"));
     db = getDbMock();
     mockReset(db);
     db.keyResult.findFirst.mockResolvedValue(KR_ROW as never);
@@ -137,6 +165,10 @@ describe.each([
       ...args.data,
       goal: { id: 42, title: "Grow the product" },
     })) as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("moves the key result and clears the stale range", async () => {
@@ -174,6 +206,15 @@ describe.each([
     const data = db.keyResult.update.mock.calls[0]?.[0].data;
     expect(data).not.toHaveProperty("period");
     expect(data).not.toHaveProperty("periodStart");
+  });
+
+  it("refuses a move to a year nobody can reach, without writing", async () => {
+    const caller = createMockCaller({ userId: OWNER_ID, db });
+
+    await expect(
+      update(caller, { id: KR_ID, period: "Q1-2206" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.keyResult.update).not.toHaveBeenCalled();
   });
 
   it.each(["Q5-2026", "2027-Q1", "Annual 2027", ""])(
