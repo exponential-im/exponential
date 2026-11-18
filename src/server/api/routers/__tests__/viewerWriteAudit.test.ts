@@ -663,6 +663,8 @@ describe("a viewer who owns the key result (mocked)", () => {
     roleGateCases({
       arrange: (db) => {
         stubKeyResult(db, callerId);
+        // No links yet, so there is no project to check (calm.daisy).
+        db.keyResultProject.findMany.mockResolvedValue([] as never);
         db.keyResultProject.deleteMany.mockResolvedValue({ count: 1 } as never);
       },
       act: (caller) => caller.okr.updateLinkedProjects({ keyResultId, projectIds: [] }),

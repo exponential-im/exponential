@@ -92,6 +92,59 @@ export async function assertCanEditGoal(
 }
 
 /**
+ * Assert the user may change every goal in `goalIds`: the gate for a write
+ * that links something to goals it names by id (a new project's `goalIds`).
+ * Linking is a change to the goal, so it follows {@link assertCanEditGoal}.
+ *
+ * One lookup for the set. An id with no row behind it is refused like a goal
+ * the user has no standing on, so the answer does not say which ids exist.
+ */
+export async function assertCanEditGoals(
+  db: PrismaClient,
+  userId: string,
+  goalIds: number[],
+): Promise<void> {
+  const ids = [...new Set(goalIds)];
+  if (ids.length === 0) return;
+
+  // `NaN` is what a non-numeric id parses to; it names no goal.
+  const lookupIds = ids.filter((id) => Number.isInteger(id));
+  const goals = lookupIds.length
+    ? await db.goal.findMany({
+        where: { id: { in: lookupIds } },
+        select: { id: true, userId: true, driUserId: true, workspaceId: true },
+      })
+    : [];
+  const byId = new Map(goals.map((goal) => [goal.id, goal]));
+  for (const id of ids) {
+    await assertCanEditGoal(db, userId, byId.get(id) ?? null);
+  }
+}
+
+/**
+ * Assert the user may change every key result in `keyResultIds`. The batch
+ * form of {@link assertCanEditKeyResult}, as {@link assertCanEditGoals} is
+ * for goals.
+ */
+export async function assertCanEditKeyResults(
+  db: PrismaClient,
+  userId: string,
+  keyResultIds: string[],
+): Promise<void> {
+  const ids = [...new Set(keyResultIds)];
+  if (ids.length === 0) return;
+
+  const keyResults = await db.keyResult.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, userId: true, workspaceId: true },
+  });
+  const byId = new Map(keyResults.map((keyResult) => [keyResult.id, keyResult]));
+  for (const id of ids) {
+    await assertCanEditKeyResult(db, userId, byId.get(id) ?? null);
+  }
+}
+
+/**
  * Assert the user may change this key result. Same rule as
  * {@link assertCanEditGoal}; a key result has an owner and no DRI path.
  */

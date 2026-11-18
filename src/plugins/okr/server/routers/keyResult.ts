@@ -11,6 +11,7 @@ import {
 import {
   getProjectAccess,
   canEditProject,
+  assertCanEditProjects,
 } from "~/server/services/access/resolvers/projectResolver";
 import { computeGoalHealth } from "~/server/services/goalService";
 import { resolveGoalProgress } from "~/server/services/goalProgress";
@@ -796,6 +797,30 @@ export const keyResultRouter = createTRPCRouter({
       // Owning the key result is not enough inside a workspace the caller
       // only views.
       await assertCanEditKeyResult(ctx.db, ctx.session.user.id, keyResult);
+
+      // The projects are checked too. This used to link any project id it was
+      // given, where linkProject and unlinkProject each ask for edit access
+      // to the one project they touch. The batch form is those two, many at a
+      // time: every link it adds and every link it removes needs edit access
+      // to that project. A link that stays is not re-checked, because the
+      // modal posts the full set on every save and a link someone else made,
+      // to a project this caller cannot edit, must not block the rest.
+      const currentLinks = await ctx.db.keyResultProject.findMany({
+        where: { keyResultId: input.keyResultId },
+        select: { projectId: true },
+      });
+      const current = new Set(currentLinks.map((link) => link.projectId));
+      const requested = new Set(input.projectIds);
+      const changed = [
+        ...input.projectIds.filter((projectId) => !current.has(projectId)),
+        ...[...current].filter((projectId) => !requested.has(projectId)),
+      ];
+      await assertCanEditProjects(
+        ctx.db,
+        ctx.session.user.id,
+        changed,
+        "You don't have permission to link or unlink one of these projects",
+      );
 
       // Use transaction to ensure atomicity
       await ctx.db.$transaction(async (tx) => {

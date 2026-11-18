@@ -118,6 +118,27 @@ export function isPersonCredential(tokenType: string | undefined): boolean {
   return tokenType === undefined || Object.hasOwn(HUMAN_SURFACES, tokenType);
 }
 
+/** The surfaces that are a chat gateway, as opposed to Zoe in chat or voice. */
+const GATEWAY_SURFACES: ReadonlySet<PrincipalSurface> = new Set(["whatsapp", "telegram", "matrix"]);
+
+/**
+ * Whether a credential of this token type is a chat gateway's own JWT
+ * (`whatsapp-gateway`, `telegram-gateway`, `matrix-gateway`).
+ *
+ * These are minted only server-side, for a person who connected the gateway,
+ * and handed to the gateway directly (`whatsappGateway.initiateLogin`, the
+ * shared-secret refresh routes): a browser, an API token or an agent key
+ * never holds one. So this is the gate for a procedure that only the gateway
+ * itself may call (`mastra.recordChannelSummary`), where the user the token
+ * names is who connected the gateway, not who is asking. Pure, like
+ * {@link isPersonCredential}.
+ */
+export function isGatewayCredential(tokenType: string | undefined): boolean {
+  if (tokenType === undefined) return false;
+  const surface = AGENT_FOR_HUMAN_SURFACES[tokenType];
+  return surface !== undefined && GATEWAY_SURFACES.has(surface);
+}
+
 function agentSurface(tokenType: string | undefined, runId: string | undefined): PrincipalSurface {
   if (tokenType === "agent-key") return "agent-key";
   if (tokenType === "agent-context") return runId ? "agent-run" : "agent-context";

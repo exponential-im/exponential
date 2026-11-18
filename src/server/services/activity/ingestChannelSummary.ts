@@ -16,6 +16,11 @@
  *
  * Takes an explicit `db` handle so it is callable from the endpoint and
  * unit-testable with a mocked Prisma client.
+ *
+ * It does NOT look at who is calling: the link alone decides where a summary
+ * lands and whose name it carries. The caller gate is the endpoint's, which
+ * admits only a chat gateway's own credential (`isGatewayCredential`). Do not
+ * call this from a procedure an ordinary signed-in user can reach.
  */
 import type { Prisma, PrismaClient } from "@prisma/client";
 

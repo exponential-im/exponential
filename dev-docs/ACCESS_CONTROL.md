@@ -143,6 +143,19 @@ A user can **edit** a project if ANY of these are true:
    `viewer` gets view through workspace membership, never edit. On a
    restricted project only `owner`/`admin` qualify (the escape hatch).
 
+A user can **create** a project with no workspace (it is their own), or in a
+workspace where they hold a write role (`assertWorkspaceWriteRole`). The other
+ids `project.create` takes are each checked against the caller before the
+first write, so a refusal leaves nothing behind (see "Ids a write names"):
+
+| Input | Rule | Helper |
+|---|---|---|
+| `teamId` | The caller belongs to the team | `assertTeamMembership` |
+| `driId` | The DRI belongs to the project's workspace; with no workspace, only the caller | `assertAssignableDri` |
+| `goalIds` | The caller may change every goal | `assertCanEditGoals` |
+| `keyResultIds` | The caller may change every key result | `assertCanEditKeyResults` |
+| `productId` | The product is in the project's workspace | `assertProductInWorkspace` (in the router) |
+
 **Restricted projects** (`Project.isRestricted = true`): paths 3 and 4 above
 are revoked — only the creator, explicit `ProjectMember`s, and workspace
 owners/admins (escape hatch) retain access. Members of the owning team do
@@ -265,9 +278,61 @@ Filing a goal into a workspace (create, or move) needs a write role there
 workspace; `mastra.createOkrKeyResult` ignores the workspace the tool
 forwards.
 
+Creating a goal also checks the two ids it names (`assertGoalCreateRefs` in
+`goalService`, shared by `goal.createGoal` and the `createGoal` service the
+Assistant uses): the DRI must belong to the goal's workspace, or be the caller
+on a personal goal (`assertAssignableDri`), and the caller must be able to
+edit the project it links.
+
+**Linking a project to a key result needs both sides**: the caller may change
+the key result, and can edit the project. Removing the link needs the same.
+That holds for one project (`okr.linkProject`, `okr.unlinkProject`,
+`mastra.linkProjectToKeyResult`, `mastra.unlinkProjectFromKeyResult`) and for
+the batch form, `okr.updateLinkedProjects`, which checks every link it adds or
+removes (`assertCanEditProjects`). A link that stays is not re-checked: the
+modal posts the full set on every save, and a link someone else made, to a
+project this caller cannot edit, must not block the rest.
+
 ### OKR Check-ins
 
 Team-based access. All team members can view and participate. Only the facilitator, team owner, or team admin can start/complete meetings.
+
+### Ids a write names
+
+Being allowed to write a row does not make every id in the input yours to use.
+An id the input names is a second access question, and it is answered against
+the caller before anything is written:
+
+| The input names | Ask | Helper |
+|---|---|---|
+| A workspace to file into | Write role there | `assertWorkspaceWriteRole` |
+| A team | The caller is in it | `assertTeamMembership` |
+| A person (assignee, owner, DRI) | They could already read the row | `assertAssignableUser`, `assertAssignableDri` |
+| A project to link | The caller can edit it | `canEditProject`, `assertCanEditProjects` |
+| A goal or key result to link | The caller may change it | `assertCanEditGoal(s)`, `assertCanEditKeyResult(s)` |
+| An epic, feature, cycle or scope | It is in the same workspace | `assertWorkspaceScopedRefs` |
+
+Two things go wrong when one is skipped. The write reaches something the
+caller cannot otherwise touch: a project filed under a team they are not in, a
+link planted on someone else's goal. And it opens a read: the row's `include`
+returns the pointed-at row's fields, so naming an arbitrary user as DRI reads
+their name and email back.
+
+A person named on a row is refused with NOT_FOUND, so the answer does not
+confirm that an id is a real user. A batch of ids is refused as a whole.
+
+### Gateway-only procedures
+
+`mastra.recordChannelSummary` (ADR-0023) is called by the chat gateway, not by
+a person or an agent tool. It routes a summary by its `ChannelLink` into that
+link's workspace feed, under the link creator's name, and never looks at who
+sent it. So the gate is the credential: `isGatewayCredential(ctx.tokenType)`
+in `principal.ts` admits only a `whatsapp-gateway`, `telegram-gateway` or
+`matrix-gateway` JWT. Those are minted server-side for the person who
+connected the gateway and handed to the gateway directly; a cookie session, an
+API token, an agent key and Zoe's agent-context JWT are all refused. The user
+the gateway token names is not checked against the link's workspace: the
+gateway is the trusted party and the link decides where a summary goes.
 
 ---
 
@@ -433,7 +498,9 @@ archive: protectedProcedure
 | `src/server/services/access/resolvers/projectResolver.ts` | Multi-path project access resolution |
 | `src/server/services/access/resolvers/resourceResolver.ts` | Resources shared through a Project: `buildSharedResourceWhere()`, `listSharedResourceProjectIds()` |
 | `src/server/services/access/resolvers/actionResolver.ts` | Action access + `buildActionAccessWhere()` (read) / `buildActionEditWhere()` / `buildActionDeleteWhere()` (write) |
-| `src/server/services/access/resolvers/goalResolver.ts` | Goal and key result write rule: `assertCanEditGoal()`, `assertCanEditKeyResult()` |
+| `src/server/services/access/resolvers/goalResolver.ts` | Goal and key result write rule: `assertCanEditGoal()`, `assertCanEditKeyResult()`, and their batch forms for ids a write names |
+| `src/server/services/access/assignability.ts` | Who may be named on a row: `assertAssignableUser()`, `assertAssignableDri()`, `canAssignToUnscopedAction()` |
+| `src/server/services/access/principal.ts` | Person, agent, or agent acting for a person: `resolvePrincipal()`, `isPersonCredential()`, `isGatewayCredential()` |
 
 ---
 
@@ -470,12 +537,33 @@ write; one that takes a `workspaceId` and checks nothing lets anyone write.
 
 ### Known gaps
 
-None known. The second pass (ticket sage.blade) closed the paths listed here
-after the first: `project.create` and `mastra.createProject`, which checked
-nothing about the workspace they were given; the writes gated on view access
-or bare membership; and the goal and key result writes that ownership, or any
+The second pass (ticket sage.blade) closed the viewer paths listed here after
+the first: `project.create` and `mastra.createProject`, which checked nothing
+about the workspace they were given; the writes gated on view access or bare
+membership; and the goal and key result writes that ownership, or any
 membership, was enough for. Add a line here when a new one is found, and
 remove it when its path is fixed.
+
+Found while fixing the create paths (ticket calm.daisy) and not yet fixed
+(ticket blue.flask). One is a viewer path; the rest are ids a write names
+(see "Ids a write names"), on the update twins of the create paths that are
+now checked:
+
+- `channelLink.link` and `channelLink.unlink` (`channelLinkService`) ask for
+  bare membership, so a `viewer` can link a channel to the workspace and
+  unlink one.
+- `project.update` writes `driId`, `goalIds` and `keyResultIds` as given, and
+  moves the project to any `workspaceId` without asking for a write role in
+  the workspace it lands in. `project.create` checks all four.
+- `project.assignToTeam` connects any `teamId`.
+- `goal.updateGoal` (`goalService.updateGoal`) writes `driUserId` and the
+  project links (`projectId`, `projectIds`) as given.
+- `okr.create` and `okr.update` write a key result's `driUserId` as given.
+
+The update paths need one decision the create paths did not: the forms post
+every field on every save, so a check must cover only what the call changes,
+as `okr.updateLinkedProjects` does, or an existing link to something the
+caller cannot edit would block every save.
 
 ---
 
@@ -489,7 +577,7 @@ The centralized service is in place. Routers are being incrementally migrated:
 - [ ] `action.getKanbanActions` — still creator-only (should include assignee/team access)
 - [ ] `workspace.ts` — still uses inline role checks
 - [ ] `team.ts` — still uses inline role checks
-- [x] `project.ts` — writes use `canEditProject` / `canManageProjectMembers`; `create` uses `assertWorkspaceWriteRole` for the workspace it files into; `updateDates` is edit, not view
+- [x] `project.ts` — writes use `canEditProject` / `canManageProjectMembers`; `create` uses `assertWorkspaceWriteRole` for the workspace it files into and checks the team, DRI, goals and key results it names; `updateDates` is edit, not view. `update` and `assignToTeam` still write the ids they name unchecked (see "Known gaps")
 - [x] `goal.ts`, `goalService.ts`, `goalUpdate.ts` and the OKR plugin's `keyResult.ts` — every write uses `assertCanEditGoal` / `assertCanEditKeyResult`; reads and comments use `verifyGoalAccess` or an inline membership lookup
 - [x] `pipeline.ts` `create`, `knowledgeChunk.ts` `ingestTranscription` / `deleteForSource` — `assertWorkspaceWriteRole`
 - [x] `transcription.ts` `createManualTranscription` / `startSession` — `canEditProject` for a project, `assertWorkspaceWriteRole` for a bare workspace
@@ -498,7 +586,8 @@ The centralized service is in place. Routers are being incrementally migrated:
 - [x] `crmContact.ts` / `crmOrganization.ts` — every write uses `assertWorkspaceWriteRole` (reads still use an inline membership lookup)
 - [x] `tag.ts` — `create`, `update`, `setTicketTags`, `setFeatureTags` and `setEntityTags` (ticket, feature, epic) use `assertWorkspaceWriteRole`; tagging an action follows the action edit rule
 - [x] `mastra.ts` CRM callbacks (`createCrmContact`, `createFullCrmContact`, `updateCrmContact`, `addCrmInteraction`, `createCrmOrganization`) — need a write role; the workspace they write to comes from `resolveWritableWorkspace`, whose fallback never picks one the user only views and finds one reached only through a team
-- [x] `mastra.ts` project and OKR callbacks — `createProject` and `bulkCreateStructure` use `assertWorkspaceWriteRole`; `updateProject` uses `canEditProject`; the objective and key result callbacks use `assertCanEditGoal` / `assertCanEditKeyResult`
+- [x] `mastra.ts` project and OKR callbacks — `createProject` and `bulkCreateStructure` use `assertWorkspaceWriteRole`; `updateProject` uses `canEditProject`; the objective and key result callbacks use `assertCanEditGoal` / `assertCanEditKeyResult`; `unlinkProjectFromKeyResult` also needs `canEditProject`, as `okr.unlinkProject` does
+- [x] `mastra.ts` `recordChannelSummary` — gateway credential only (`isGatewayCredential`)
 - [ ] `okrCheckin.ts` — still uses inline team membership checks
 - [x] `epic.ts` — reads use `assertWorkspaceMembership`; writes use `assertWorkspaceWriteRole` (delete also needs admin+ or epic owner)
 - [x] `document.ts` — reads use `assertWorkspaceMembership`; create/ingest/delete use `assertWorkspaceWriteRole`

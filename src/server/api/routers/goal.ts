@@ -30,6 +30,7 @@ import {
   verifyGoalAccess,
   verifyGoalWriteAccess,
   setGoalParent,
+  assertGoalCreateRefs,
 } from "~/server/services/goalService";
 
 export const goalRouter = createTRPCRouter({
@@ -188,6 +189,10 @@ export const goalRouter = createTRPCRouter({
           });
         }
       }
+
+      // The DRI and the project are checked against the caller too, by the
+      // same function the createGoal service uses.
+      await assertGoalCreateRefs(ctx.db, ctx.session.user.id, input);
 
       // Enforce max nesting depth of 5 levels for sub-goals
       if (input.parentGoalId) {
