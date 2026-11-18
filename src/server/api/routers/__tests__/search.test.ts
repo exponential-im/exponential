@@ -118,6 +118,7 @@ function stubEmptyResults(dbMock: DeepMockProxy<PrismaClient>) {
   dbMock.ticket.findMany.mockResolvedValue([]);
   dbMock.feature.findMany.mockResolvedValue([]);
   dbMock.epic.findMany.mockResolvedValue([]);
+  dbMock.list.findMany.mockResolvedValue([]);
   dbMock.knowledgePage.findMany.mockResolvedValue([]);
   dbMock.transcriptionSession.findMany.mockResolvedValue([]);
   dbMock.crmContact.findMany.mockResolvedValue([]);
@@ -201,6 +202,56 @@ describe("search router — global (mocked)", () => {
     // Access scoping comes from buildWorkspaceAccessWhere (direct OR
     // team-based membership), not a hand-rolled direct-members-only copy.
     expect(epicWhere?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
+  });
+
+  it("finds cycles: SPRINT lists only, workspace-membership gate, active first, product-nested url", async () => {
+    dbMock.list.findMany.mockResolvedValue([
+      {
+        id: "c22",
+        name: "Cycle 22",
+        status: "PLANNED",
+        startDate: new Date("2026-12-11T00:00:00Z"),
+        endDate: new Date("2026-12-23T00:00:00Z"),
+        workspace: workspaceRef,
+        product: { slug: "clear", name: "CLEAR" },
+      },
+      {
+        id: "c20",
+        name: "Cycle 20",
+        status: "ACTIVE",
+        startDate: new Date("2026-11-13T00:00:00Z"),
+        endDate: new Date("2026-11-25T00:00:00Z"),
+        workspace: workspaceRef,
+        product: { slug: "clear", name: "CLEAR" },
+      },
+      {
+        id: "legacy",
+        name: "Cycle 3",
+        status: "COMPLETED",
+        startDate: null,
+        endDate: null,
+        workspace: workspaceRef,
+        product: null,
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ] as any);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "cycle" });
+
+    const where = dbMock.list.findMany.mock.calls[0]?.[0]?.where;
+    // Generic curated lists share the table; only sprints are cycles.
+    expect(where?.listType).toBe("SPRINT");
+    expect(where?.name).toEqual({ contains: "cycle", mode: "insensitive" });
+    expect(where?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
+
+    const cycles = res.results.filter((r) => r.type === "cycle");
+    expect(cycles.map((c) => c.id)).toEqual(["c20", "c22", "legacy"]);
+    expect(cycles[0]?.url).toBe("/w/clear/products/clear/cycles/c20");
+    expect(cycles[0]?.subtitle).toBe("CLEAR · ACTIVE · 2026-11-13 → 2026-11-25");
+    // A workspace-shared cycle has no product route to point at.
+    expect(cycles[2]?.url).toBeNull();
+    expect(cycles[2]?.subtitle).toBe("COMPLETED");
   });
 
   it("workspace-scoped search filters projects/goals to the workspace for members", async () => {

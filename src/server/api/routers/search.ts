@@ -37,6 +37,7 @@ export interface SearchResult {
     | "ticket"
     | "feature"
     | "epic"
+    | "cycle"
     | "page"
     | "meeting"
     | "contact"
@@ -344,6 +345,60 @@ async function searchEpics({ db, userId, q, workspaceId, limit }: SearchArgs): P
   }));
 }
 
+// A cycle is a `List` row with listType SPRINT. Mirrors the cycle router's
+// gate: direct or team-based workspace membership (assertWorkspaceAccess
+// "view", guests denied). The current cycle is the one you most often look
+// for, so active cycles come first; the rest stay newest-first.
+const CYCLE_STATUS_RANK: Record<string, number> = { ACTIVE: 0, PLANNED: 1, COMPLETED: 2, ARCHIVED: 3 };
+
+/** "2026-11-13 → 2026-11-25", or null when the cycle is undated. */
+function cycleDates(start: Date | null, end: Date | null): string | null {
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  if (start && end) return `${day(start)} → ${day(end)}`;
+  if (start) return `from ${day(start)}`;
+  return null;
+}
+
+async function searchCycles({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
+  const cycles = await db.list.findMany({
+    where: {
+      listType: "SPRINT",
+      ...(workspaceId ? { workspaceId } : {}),
+      workspace: { is: buildWorkspaceAccessWhere(userId) },
+      name: insensitive(q),
+    },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      startDate: true,
+      endDate: true,
+      workspace: { select: { id: true, slug: true, name: true } },
+      product: { select: { slug: true, name: true } },
+    },
+    orderBy: [{ startDate: "desc" }, { createdAt: "desc" }],
+    take: limit,
+  });
+  return cycles
+    .sort((a, b) => (CYCLE_STATUS_RANK[a.status] ?? 9) - (CYCLE_STATUS_RANK[b.status] ?? 9))
+    .map((c) => ({
+      type: "cycle" as const,
+      id: c.id,
+      title: c.name,
+      // Cycle names repeat across products and restarts ("Cycle 3" more than
+      // once), so the subtitle carries what tells two of them apart.
+      subtitle: [c.product?.name, c.status, cycleDates(c.startDate, c.endDate)]
+        .filter(Boolean)
+        .join(" · "),
+      workspace: c.workspace,
+      // The detail route is product-nested. A legacy workspace-shared cycle
+      // (productId null) has no product to sit under, so it stays unlinked.
+      url: c.product
+        ? `/w/${c.workspace.slug}/products/${c.product.slug}/cycles/${c.id}`
+        : null,
+    }));
+}
+
 // Mirrors page.list (buildKnowledgePageAccessWhere, ADR-0033).
 async function searchPages({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
   const pages = await db.knowledgePage.findMany({
@@ -547,6 +602,7 @@ export const searchRouter = createTRPCRouter({
       searchTickets(args),
       searchFeatures(args),
       searchEpics(args),
+      searchCycles(args),
       searchPages(args),
       searchMeetings(args),
       searchContacts(args),

@@ -39,6 +39,7 @@ import {
   IconBuilding,
   IconNotebook,
   IconLink,
+  IconCalendarClock,
 } from '@tabler/icons-react';
 import { api } from '~/trpc/react';
 import type { RouterOutputs } from '~/trpc/react';
@@ -50,6 +51,7 @@ import { useWikiBridge } from '~/lib/wiki/useWikiBridge';
 import { pageTitle, wikiHref, WIKI_ROUTE } from '~/lib/wiki/wikiLinks';
 import styles from '../home/WorkspaceHomeConceptD.module.css';
 import { onCommandPaletteOpen } from '~/lib/commandPalette';
+import { matchProductTabs } from './productTabNav';
 
 type Mode = 'all' | 'projects' | 'tasks' | 'goals' | 'ai';
 
@@ -95,14 +97,15 @@ const WORKSPACE_SECTIONS: {
 // How each entity type from search.global is presented, in the order the
 // sections appear. One of the router's types is deliberately absent:
 // `workspace`, because a matching workspace already surfaces below with all of
-// its sub-pages. Epics are listed but an epic still awaiting a product returns
-// a null url and is dropped by the filter below, same as any other routeless
-// row.
+// its sub-pages. Epics and cycles are listed, but one with no product (an epic
+// awaiting its backfill, a legacy workspace-shared cycle) returns a null url
+// and is dropped by the filter below, same as any other routeless row.
 const RESULT_SECTIONS: { type: SearchType; label: string; icon: React.ElementType }[] = [
   { type: 'project', label: 'Projects', icon: IconStack2 },
   { type: 'action', label: 'Tasks', icon: IconSquareRoundedCheck },
   { type: 'ticket', label: 'Tickets', icon: IconTicket },
   { type: 'epic', label: 'Epics', icon: IconBolt },
+  { type: 'cycle', label: 'Cycles', icon: IconCalendarClock },
   { type: 'goal', label: 'Goals', icon: IconTarget },
   { type: 'keyResult', label: 'Key results', icon: IconTrophy },
   { type: 'feature', label: 'Features', icon: IconBulb },
@@ -282,6 +285,27 @@ export function CommandPalette() {
     });
     return map;
   }, [workspacesData, pluginResults]);
+
+  // The products of the workspace you are in, so the palette can offer each
+  // product's tabs ("CLEAR - Cycles") as somewhere to go.
+  const currentProductEnabled = workspaceId
+    ? productEnabledByWorkspaceId.get(workspaceId) ?? false
+    : false;
+  const { data: currentProducts } = api.product.product.list.useQuery(
+    { workspaceId: workspaceId ?? '' },
+    {
+      enabled: isOpen && !!workspaceId && currentProductEnabled && q.length > 0,
+      staleTime: 5 * 60 * 1000,
+    },
+  );
+
+  const productNav = useMemo(
+    () =>
+      q && workspaceSlug && currentProducts
+        ? matchProductTabs(q, currentProducts, workspaceSlug)
+        : [],
+    [q, workspaceSlug, currentProducts],
+  );
 
   // Workspace sections split by where they belong in the list: the workspace
   // you are in sits with the other navigation at the top, every other
@@ -475,6 +499,16 @@ export function CommandPalette() {
           accent: true,
         }),
       ),
+      ...productNav.map((p) =>
+        row({
+          key: p.key,
+          label: p.label,
+          sub: 'Navigate',
+          icon: p.icon,
+          href: p.href,
+          accent: true,
+        }),
+      ),
     ];
     if (navRows.length > 0) {
       sections.push({ key: 'navigate', heading: 'Navigate', rows: navRows });
@@ -571,7 +605,7 @@ export function CommandPalette() {
     }
 
     return sections;
-  }, [filteredPages, currentWorkspaceNav, otherWorkspaceNav, resultsByType, shownKnowledge, wikiRows, workspaceId]);
+  }, [filteredPages, currentWorkspaceNav, productNav, otherWorkspaceNav, resultsByType, shownKnowledge, wikiRows, workspaceId]);
 
   const allResults = useMemo(
     () => resultSections.flatMap((section) => section.rows),
