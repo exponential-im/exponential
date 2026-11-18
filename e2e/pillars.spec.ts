@@ -331,4 +331,14 @@ test.describe("Pillars", () => {
 
     await trpc(page.request, "tag.setPillarArchived", { tagId: seeded.tagId, archived: false });
   });
+
+  test("the ticket board groups by Pillar, counting an epic's Pillar for its tickets", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/products/${fixture.productSlug}/tickets?group=pillar`);
+    await expect(page.getByText(names.ticket).first()).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(page.getByText(/No pillar/i).first()).toBeVisible();
+    // The Pillar's group holds the ticket carrying it and the one inside the Pillar's epic.
+    await expect(page.getByText(names.pillar, { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(names.epicTicket).first()).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("ticket-board-by-pillar.png"), fullPage: true });
+  });
 });

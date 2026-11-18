@@ -50,6 +50,7 @@ import { uploadToBlob } from "~/lib/blob";
 import { ticketRefWhere } from "../services/ticketRef";
 import { searchTicketsIdFirst } from "../services/ticketTextSearch";
 import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
 const prosemirrorDoc = z.record(z.string(), z.unknown());
 
@@ -154,8 +155,11 @@ const ticketListInput = z.object({
   epicId: z.string().optional(),
   cycleId: z.string().optional(),
   assigneeId: z.string().optional(),
-  // Area filter: a Tag CUID (category = "area"). Constrains results to
-  // tickets carrying that Area tag. No-op when omitted.
+  // Pillar filter: a Pillar's Tag CUID (ADR-0085). Constrains results to
+  // tickets under that Pillar, carried by the ticket or by its epic.
+  pillarTagId: z.string().optional(),
+  // Deprecated alias of pillarTagId, from when the board grouped by the
+  // retired "area" tag category; CLI and MCP clients may still send it.
   areaTagId: z.string().optional(),
 });
 
@@ -170,9 +174,15 @@ function ticketListWhere(
     ...(input.epicId ? { epicId: input.epicId } : {}),
     ...(input.cycleId ? { cycleId: input.cycleId } : {}),
     ...(input.assigneeId ? { assigneeId: input.assigneeId } : {}),
-    ...(input.areaTagId
-      ? { tags: { some: { tagId: input.areaTagId } } }
-      : {}),
+    ...pillarFilter(input.pillarTagId ?? input.areaTagId),
+  };
+}
+
+/** Tickets under a Pillar: carrying it themselves, or through their epic. */
+function pillarFilter(tagId: string | undefined): Prisma.TicketWhereInput {
+  if (!tagId) return {};
+  return {
+    OR: [{ tags: { some: { tagId } } }, { epic: { tags: { some: { tagId } } } }],
   };
 }
 
@@ -231,6 +241,16 @@ function withBlockerCounts<
   });
 }
 
+/** A ticket's epic with the epic's Pillars, for the board's "group by Pillar" (ADR-0085). */
+const TICKET_EPIC_WITH_PILLARS = {
+  id: true,
+  name: true,
+  tags: {
+    where: { tag: { category: PILLAR_CATEGORY } },
+    select: { tag: { select: { id: true, name: true, category: true } } },
+  },
+} satisfies Prisma.EpicSelect;
+
 /**
  * The columns a list view renders (backlog table, list and board, a Feature's
  * ticket list, the Decision pickers). Leaves out the body, its ProseMirror
@@ -249,7 +269,7 @@ const TICKET_SUMMARY_SELECT = {
   createdAt: true,
   assignee: { select: { id: true, name: true, image: true } },
   feature: { select: { id: true, name: true } },
-  epic: { select: { id: true, name: true } },
+  epic: { select: TICKET_EPIC_WITH_PILLARS },
   cycle: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
   tags: {
     select: {
@@ -389,7 +409,7 @@ export const ticketRouter = createTRPCRouter({
         include: {
           assignee: { select: { id: true, name: true, image: true } },
           feature: { select: { id: true, name: true } },
-          epic: { select: { id: true, name: true } },
+          epic: { select: TICKET_EPIC_WITH_PILLARS },
           cycle: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           tags: { include: { tag: true } },
           depsOut: { select: { dependsOnId: true, dependsOn: { select: { status: true } } } },

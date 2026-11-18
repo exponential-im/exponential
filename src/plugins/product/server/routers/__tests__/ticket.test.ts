@@ -95,7 +95,10 @@ import { createMockCaller } from "~/test/trpc-helpers";
 const callerId = "user-1";
 const workspaceId = "ws-1";
 const productId = "prod-1";
-const areaTagId = "tag-clear-api";
+const pillarTagId = "tag-devops";
+const underPillar = {
+  OR: [{ tags: { some: { tagId: pillarTagId } } }, { epic: { tags: { some: { tagId: pillarTagId } } } }],
+};
 
 /** Stub the workspace-membership probe that `assertWorkspaceAccess` runs. */
 function stubMembership(dbMock: DeepMockProxy<PrismaClient>, isMember: boolean) {
@@ -147,7 +150,7 @@ function findManyWhere(dbMock: DeepMockProxy<PrismaClient>) {
   return call?.where;
 }
 
-describe("ticket router — list Area filter (mocked)", () => {
+describe("ticket router — list Pillar filter (mocked)", () => {
   let dbMock: DeepMockProxy<PrismaClient>;
 
   beforeEach(() => {
@@ -159,30 +162,35 @@ describe("ticket router — list Area filter (mocked)", () => {
     dbMock.ticket.findMany.mockResolvedValue([]);
   });
 
-  it("adds a tags.some constraint when areaTagId is supplied", async () => {
+  it("keeps tickets under the Pillar, carried by the ticket or by its epic", async () => {
     const caller = createMockCaller({ userId: callerId, db: dbMock });
-    await caller.product.ticket.list({ productId, areaTagId });
+    await caller.product.ticket.list({ productId, pillarTagId });
 
-    expect(findManyWhere(dbMock)).toMatchObject({
-      productId,
-      tags: { some: { tagId: areaTagId } },
-    });
+    expect(findManyWhere(dbMock)).toMatchObject({ productId, ...underPillar });
   });
 
-  it("is a no-op when areaTagId is omitted (no tags constraint)", async () => {
+  it("still accepts areaTagId as a deprecated alias of pillarTagId", async () => {
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.product.ticket.list({ productId, areaTagId: pillarTagId });
+
+    expect(findManyWhere(dbMock)).toMatchObject({ productId, ...underPillar });
+  });
+
+  it("is a no-op when no Pillar is given (no tags constraint)", async () => {
     const caller = createMockCaller({ userId: callerId, db: dbMock });
     await caller.product.ticket.list({ productId });
 
     const where = findManyWhere(dbMock);
     expect(where).toMatchObject({ productId });
     expect(where).not.toHaveProperty("tags");
+    expect(where).not.toHaveProperty("OR");
   });
 
-  it("composes the Area filter with status / type / featureId / epicId / cycleId", async () => {
+  it("composes the Pillar filter with status / type / featureId / epicId / cycleId", async () => {
     const caller = createMockCaller({ userId: callerId, db: dbMock });
     await caller.product.ticket.list({
       productId,
-      areaTagId,
+      pillarTagId,
       status: "IN_PROGRESS",
       type: "BUG",
       featureId: "feat-1",
@@ -197,11 +205,11 @@ describe("ticket router — list Area filter (mocked)", () => {
       featureId: "feat-1",
       epicId: "epic-1",
       cycleId: "cycle-1",
-      tags: { some: { tagId: areaTagId } },
+      ...underPillar,
     });
   });
 
-  it("only returns tickets carrying the Area tag (filtering is delegated to Prisma)", async () => {
+  it("only returns tickets under the Pillar (filtering is delegated to Prisma)", async () => {
     // The router passes the constraint to Prisma; with the mock returning the
     // matching ticket we assert the result flows through and is shaped (no depsOut).
     dbMock.ticket.findMany.mockResolvedValue([
@@ -210,12 +218,12 @@ describe("ticket router — list Area filter (mocked)", () => {
     ]);
 
     const caller = createMockCaller({ userId: callerId, db: dbMock });
-    const result = await caller.product.ticket.list({ productId, areaTagId });
+    const result = await caller.product.ticket.list({ productId, pillarTagId });
 
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ id: "t1", openBlockerCount: 0, isBlocked: false });
     expect(result[0]).not.toHaveProperty("depsOut");
-    expect(findManyWhere(dbMock)).toMatchObject({ tags: { some: { tagId: areaTagId } } });
+    expect(findManyWhere(dbMock)).toMatchObject(underPillar);
   });
 });
 
@@ -246,7 +254,7 @@ describe("ticket router — listSummaries (mocked)", () => {
     const caller = createMockCaller({ userId: callerId, db: dbMock });
     const input = {
       productId,
-      areaTagId,
+      pillarTagId,
       status: "IN_PROGRESS" as const,
       featureId: "feat-1",
       assigneeId: "user-2",
