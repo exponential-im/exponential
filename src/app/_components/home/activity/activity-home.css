@@ -54,7 +54,7 @@
 /* --------------------------------------------------------------------------
    Shared card chrome
    -------------------------------------------------------------------------- */
-/* Surface, border and radius come from <Panel radius="xl"> (ADR-0073); this
+/* Surface, border and radius come from <Panel radius="xl"> (ADR-0084); this
    class only carries the dashboard's padding and the __head/__title/__count
    parts below. Modifiers that need a different surface (.wsa-week,
    .wsa-digest) are written as .wsa-card.wsa-x so they beat Panel's utility

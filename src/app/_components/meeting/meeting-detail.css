@@ -183,7 +183,7 @@
 
 /* ============ DECISIONS / QUESTIONS ============ */
 .mp-twocard { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-/* Surface, border and radius come from <Panel variant="muted" radius="md"> (ADR-0073). */
+/* Surface, border and radius come from <Panel variant="muted" radius="md"> (ADR-0084). */
 .mp-card { padding: 16px 18px; }
 .mp-card__label { display: inline-flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; margin-bottom: 12px; }
 .mp-card__label--decision { color: var(--accent-crm); }

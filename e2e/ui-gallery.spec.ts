@@ -1,7 +1,7 @@
 /**
  * Visual regression target for the design system: /dev/ui renders every
  * shape token and every primitive variant. The assertions pin the wiring
- * (ADR-0073): the tokens resolve on :root, Tailwind, Mantine and the
+ * (ADR-0084): the tokens resolve on :root, Tailwind, Mantine and the
  * primitives read the same numbers, and no variant has silently lost its
  * radius. Light and dark screenshots are attached for human review (see
  * dev-docs/AGENT_VISUAL_TESTING.md).
