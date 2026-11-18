@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useEffect, useState } from "react";
 import { ActionIcon, Group, Text } from "@mantine/core";
 import { useLocalStorage } from "@mantine/hooks";
 import { IconX } from "@tabler/icons-react";
@@ -40,7 +41,12 @@ function Hint({
     defaultValue: false,
     getInitialValueInEffect: false,
   });
-  if (dismissed) return null;
+  // The dismissal lives in this browser only. Render nothing until mounted, so
+  // the server's HTML and the first client render agree (no hydration
+  // mismatch) and a dismissed hint never flashes.
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted || dismissed) return null;
 
   return (
     <Panel
