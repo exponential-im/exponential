@@ -36,9 +36,30 @@ export function databasePillTint(color: string): React.CSSProperties {
   };
 }
 
-function Pill({ option }: { option: SelectOption }) {
+/**
+ * Exponential has no status property type, so a single-select column named
+ * "Status" is drawn the way Notion draws its status type: a rounded pill led
+ * by a dot in the option's colour.
+ */
+export function isStatusColumn(def: PropertyDef): boolean {
+  return def.type === "select" && def.name.trim().toLowerCase() === "status";
+}
+
+function Pill({ option, status }: { option: SelectOption; status: boolean }) {
   return (
-    <span className={styles.pill} style={databasePillTint(option.color)} title={option.name}>
+    <span
+      className={styles.pill}
+      data-variant={status ? "status" : undefined}
+      style={databasePillTint(option.color)}
+      title={option.name}
+    >
+      {status ? (
+        <span
+          className={styles.pillDot}
+          style={{ backgroundColor: `var(--mantine-color-${option.color}-filled)` }}
+          aria-hidden
+        />
+      ) : null}
       {option.name}
     </span>
   );
@@ -93,7 +114,7 @@ export function SelectCell({ def, value, editable, onCommit, onCreateOption }: S
         {selected.length === 0 ? (
           <span className={styles.cellEmpty}>—</span>
         ) : (
-          selected.map((o) => <Pill key={o.id} option={o} />)
+          selected.map((o) => <Pill key={o.id} option={o} status={isStatusColumn(def)} />)
         )}
       </UnstyledButton>
     );

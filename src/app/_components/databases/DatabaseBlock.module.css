@@ -173,7 +173,23 @@
 }
 
 /* An empty cell reads as empty, as in Notion; the row page keeps its dash. */
-.table .cellEmpty {
+.table /* A "Status" column's option, as Notion's status type: rounded, led by a dot. */
+.pill[data-variant='status'] {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 7px;
+  border-radius: var(--radius-full);
+}
+
+.pillDot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+}
+
+.cellEmpty {
   visibility: hidden;
 }
 
