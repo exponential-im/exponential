@@ -14,6 +14,7 @@ import type { EffortUnit } from "~/types/effort";
 import { notifications } from "@mantine/notifications";
 import { useActionAttachments } from "~/hooks/useActionAttachments";
 import { buildCreateActionPayload } from "~/lib/actions/createActionPayload";
+import { assistantOnItToast } from "~/lib/actions/assistantOnIt";
 import { useIdleImport } from "~/hooks/useIdleImport";
 
 // The create form (rich-text editor, date and dependency pickers) is only
@@ -108,6 +109,7 @@ export function GlobalAddTaskButton({ variant = "icon" }: { variant?: "icon" | "
         sourceId: null,
         lastUpdatedBy: null,
         lastUpdatedSource: null,
+        occurrenceId: null,
         syncs: [],
         assignees: [],
         tags: [],
@@ -134,16 +136,6 @@ export function GlobalAddTaskButton({ variant = "icon" }: { variant?: "icon" | "
         createdAt: new Date(),
         epicId: newAction.epicId ?? null,
         effortEstimate: newAction.effortEstimate ?? null,
-        // Bounty fields (defaults for non-bounty actions)
-        isBounty: false,
-        bountyAmount: null,
-        bountyToken: null,
-        bountyStatus: null,
-        bountyDifficulty: null,
-        bountySkills: [],
-        bountyDeadline: null,
-        bountyMaxClaimants: 1,
-        bountyExternalUrl: null,
         ticketId: null,
         epic: null,
         // A just-created action has no Agent run yet (ADR-0067).
@@ -251,6 +243,12 @@ export function GlobalAddTaskButton({ variant = "icon" }: { variant?: "icon" | "
 
       // This submission's own selections. See useActionAttachments.
       attachments.apply(variables, data.id);
+
+      // An Assistant picked as assignee starts an Agent run on create
+      // (ADR-0067); the modal is already closed, so the toast is the only
+      // place the user learns work began. Same rule as CreateActionModal.
+      const onIt = assistantOnItToast(data);
+      if (onIt) notifications.show({ ...onIt, color: "green" });
     },
   });
 

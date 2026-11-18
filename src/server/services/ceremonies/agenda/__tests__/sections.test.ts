@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { Ceremony, CeremonyOccurrence, PrismaClient } from "@prisma/client";
-import { mockDeep } from "vitest-mock-extended";
+import { mockDeep, type DeepMockProxy } from "vitest-mock-extended";
 import { blockersSection } from "../sections/blockers";
 import { carriedOverSection } from "../sections/carried_over";
 import { getSectionModule } from "../sections";
 import type { SectionContext } from "../types";
+import { notInPausedProjectWhere } from "~/server/services/actions/myActionsWhere";
+import { matchesWhere } from "~/test/prismaWhere";
 
 const now = new Date("2026-09-10T08:00:00Z");
 function ctx(db: PrismaClient, overrides: Partial<SectionContext> = {}): SectionContext {
@@ -23,10 +25,10 @@ function ctx(db: PrismaClient, overrides: Partial<SectionContext> = {}): Section
 }
 
 describe("section registry", () => {
-  it("knows all thirteen section types", () => {
+  it("knows all fifteen section types", () => {
     const types = [
       "okr_review", "blockers", "carried_over", "cycle_progress", "retro_actions", "free_text", "decisions_pending", "project_state",
-      "yesterday", "todays_meetings", "todays_actions", "up_next", "dri_projects",
+      "yesterday", "todays_meetings", "todays_actions", "up_next", "dri_projects", "occurrence_actions", "decisions_made",
     ];
     expect(types.map((t) => getSectionModule(t)?.type)).toEqual(types);
     expect(getSectionModule("nope")).toBeUndefined();
@@ -75,11 +77,96 @@ describe("blockers section", () => {
     const where = db.action.findMany.mock.calls[0]![0]!.where!;
     expect(where).toMatchObject({ projectId: { in: ["prj-1"] } });
   });
+
+  it("with participants but no project, counts only actions assigned to a participant", async () => {
+    const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([] as never);
+    await blockersSection.run(ctx(db), { key: "blk", type: "blockers", title: "Blockers" });
+    const where = db.action.findMany.mock.calls[0]![0]!.where!;
+    expect(where.projectId).toBeUndefined();
+    expect(where.AND).toEqual([
+      { OR: [{ assignees: { some: { userId: { in: ["u-1", "u-2"] } } } }] },
+      notInPausedProjectWhere(),
+    ]);
+  });
+
+  it("inside a project, also counts actions participants created and actions nobody owns", async () => {
+    const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([] as never);
+    await blockersSection.run(ctx(db, { projectIds: ["prj-1"] }), { key: "blk", type: "blockers", title: "Blockers" });
+    const where = db.action.findMany.mock.calls[0]![0]!.where!;
+    expect(where.AND).toEqual([
+      {
+        OR: [
+          { assignees: { some: { userId: { in: ["u-1", "u-2"] } } } },
+          { createdById: { in: ["u-1", "u-2"] } },
+          { assignees: { none: {} } },
+        ],
+      },
+    ]);
+  });
+
+  // The mocked findMany evaluates the section's real `where` against
+  // in-memory rows, so these assert which actions the agenda lists.
+  describe("paused projects (On hold, Completed, Cancelled)", () => {
+    const PAUSED = ["ON_HOLD", "COMPLETED", "CANCELLED"];
+    const overdue = new Date("2026-09-08T00:00:00Z");
+
+    /** An ACTIVE overdue action in ws-1 assigned to u-1, in a project with `projectStatus` (or none). */
+    function row(id: string, projectStatus: string | null, projectId = projectStatus ? `p-${id}` : null) {
+      return {
+        id,
+        name: id,
+        status: "ACTIVE",
+        workspaceId: "ws-1",
+        dueDate: overdue,
+        createdAt: overdue,
+        createdById: "u-1",
+        depsOut: [],
+        projectId,
+        project: projectStatus ? { status: projectStatus, goals: [] } : null,
+        assignees: [{ userId: "u-1", user: { id: "u-1", name: "Andi" } }],
+      };
+    }
+
+    function serve(db: DeepMockProxy<PrismaClient>, rows: ReturnType<typeof row>[]) {
+      db.action.findMany.mockImplementation(((args: { where?: Record<string, unknown> }) =>
+        Promise.resolve(rows.filter((r) => matchesWhere(r, args.where ?? {})))) as never);
+    }
+
+    it("with no project linked, leaves a paused project's actions off the participants' blockers", async () => {
+      const db = mockDeep<PrismaClient>();
+      serve(db, [row("loose", null), row("live", "ACTIVE"), ...PAUSED.map((s) => row(s.toLowerCase(), s))]);
+
+      const items = await blockersSection.run(ctx(db), { key: "blk", type: "blockers", title: "Blockers" });
+
+      expect(items.map((i) => i.refId).sort()).toEqual(["live", "loose"]);
+    });
+
+    it("with a project linked, still lists that project's blockers while it is paused", async () => {
+      const db = mockDeep<PrismaClient>();
+      serve(db, [
+        ...PAUSED.map((s) => row(`held-${s.toLowerCase()}`, s, "prj-held")),
+        row("elsewhere", "ON_HOLD", "prj-other"),
+      ]);
+
+      const items = await blockersSection.run(
+        ctx(db, { projectIds: ["prj-held"] }),
+        { key: "blk", type: "blockers", title: "Blockers" },
+      );
+
+      expect(items.map((i) => i.refId).sort()).toEqual(["held-cancelled", "held-completed", "held-on_hold"]);
+    });
+  });
 });
 
 describe("carried_over section", () => {
   it("copies the previous occurrence's unresolved items with carriedFromOccurrenceId, skipping resolved ones", async () => {
     const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([{ id: "a-1", status: "ACTIVE" }] as never);
+    // Every referenced Decision still exists and is open.
+    db.decision.findMany.mockImplementation(((args: { where: { id: { in: string[] } } }) =>
+      Promise.resolve(args.where.id.in.map((id) => ({ id, status: "OPEN" })))) as never);
     const previous = {
       id: "occ-0",
       scheduledStart: new Date("2026-09-09T08:00:00Z"),
@@ -106,6 +193,10 @@ describe("carried_over section", () => {
 
   it("emits one item per record when the same record is unresolved in two previous sections, keeping the higher carry count", async () => {
     const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([{ id: "a-1", status: "ACTIVE" }] as never);
+    // Every referenced Decision still exists and is open.
+    db.decision.findMany.mockImplementation(((args: { where: { id: { in: string[] } } }) =>
+      Promise.resolve(args.where.id.in.map((id) => ({ id, status: "OPEN" })))) as never);
     const previous = {
       id: "occ-0",
       scheduledStart: new Date("2026-09-09T08:00:00Z"),
@@ -128,8 +219,79 @@ describe("carried_over section", () => {
     expect(items[0]!.order).toBe(0);
   });
 
+  it("does not carry a deleted or accepted Decision, and carries an open one", async () => {
+    const db = mockDeep<PrismaClient>();
+    db.decision.findMany.mockResolvedValue([{ id: "d-open", status: "OPEN" }, { id: "d-acc", status: "ACCEPTED" }] as never);
+    const previous = {
+      id: "occ-0",
+      agenda: {
+        version: 1,
+        generatedAt: "x",
+        sections: [
+          { key: "dec", type: "free_text", title: "D", items: [
+            { id: "dec:hand:1", sectionKey: "dec", title: "Open", refType: "decision", refId: "d-open", order: 0, addedByUserId: "u-1" },
+            { id: "dec:hand:2", sectionKey: "dec", title: "Accepted", refType: "decision", refId: "d-acc", order: 1, addedByUserId: "u-1" },
+            { id: "dec:hand:3", sectionKey: "dec", title: "Deleted", refType: "decision", refId: "d-gone", order: 2, addedByUserId: "u-1" },
+          ] },
+        ],
+      },
+    } as unknown as CeremonyOccurrence;
+    const items = await carriedOverSection.run(ctx(db, { previousOccurrence: previous }), { key: "carry", type: "carried_over", title: "Carried over" });
+    expect(items.map((i) => i.refId)).toEqual(["d-open"]);
+  });
+
+  it("does not carry an Action completed elsewhere though its line was never ticked", async () => {
+    const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([{ id: "a-1", status: "COMPLETED" }, { id: "a-3", status: "ACTIVE" }] as never);
+    const previous = {
+      id: "occ-0",
+      agenda: {
+        version: 1,
+        generatedAt: "x",
+        sections: [
+          { key: "act", type: "free_text", title: "Action points", items: [
+            { id: "act:hand:1", sectionKey: "act", title: "Done elsewhere", refType: "action", refId: "a-1", order: 0, addedByUserId: "u-1" },
+            { id: "act:hand:2", sectionKey: "act", title: "Deleted", refType: "action", refId: "a-2", order: 1, addedByUserId: "u-1" },
+            { id: "act:hand:3", sectionKey: "act", title: "Still open", refType: "action", refId: "a-3", order: 2, addedByUserId: "u-1" },
+          ] },
+        ],
+      },
+    } as unknown as CeremonyOccurrence;
+    const items = await carriedOverSection.run(ctx(db, { previousOccurrence: previous }), { key: "carry", type: "carried_over", title: "Carried over" });
+    expect(items.map((i) => i.refId)).toEqual(["a-3"]);
+  });
+
   it("is empty without a previous agenda", async () => {
     const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([{ id: "a-1", status: "ACTIVE" }] as never);
+    // Every referenced Decision still exists and is open.
+    db.decision.findMany.mockImplementation(((args: { where: { id: { in: string[] } } }) =>
+      Promise.resolve(args.where.id.in.map((id) => ({ id, status: "OPEN" })))) as never);
     expect(await carriedOverSection.run(ctx(db), { key: "c", type: "carried_over", title: "C" })).toEqual([]);
+  });
+  it("skips a record another section of this agenda produced (producedRefIds)", async () => {
+    const db = mockDeep<PrismaClient>();
+    db.action.findMany.mockResolvedValue([{ id: "a-1", status: "ACTIVE" }] as never);
+    // Every referenced Decision still exists and is open.
+    db.decision.findMany.mockImplementation(((args: { where: { id: { in: string[] } } }) =>
+      Promise.resolve(args.where.id.in.map((id) => ({ id, status: "OPEN" })))) as never);
+    const previous = {
+      id: "occ-0",
+      agenda: {
+        version: 1,
+        generatedAt: "x",
+        sections: [
+          { key: "dec", type: "decisions_pending", title: "Decisions pending", items: [
+            { id: "dec:decision:d-150", sectionKey: "dec", title: "D-0150", refType: "decision", refId: "d-150", order: 0, carryCount: 3 },
+            { id: "dec:decision:d-151", sectionKey: "dec", title: "D-0151", refType: "decision", refId: "d-151", order: 1 },
+          ] },
+        ],
+      },
+    } as unknown as CeremonyOccurrence;
+    const items = await carriedOverSection.run(
+      ctx(db, { previousOccurrence: previous, producedRefIds: new Set(["decision:d-150"]) }),
+      { key: "carry", type: "carried_over", title: "Carried over" },
+    );
+    expect(items.map((i) => i.refId)).toEqual(["d-151"]);
   });
 });

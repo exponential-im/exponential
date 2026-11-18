@@ -22,7 +22,10 @@ const CATEGORY_ORDER = [
   'meeting_participant_added',
   'agenda_ready',
   'update_review',
+  'page_shared',
   'agent_run',
+  'position_assigned',
+  'billing',
 ] as const;
 type Category = (typeof CATEGORY_ORDER)[number];
 
@@ -38,7 +41,10 @@ const CATEGORY_LABELS: Record<Category, string> = {
   meeting_participant_added: 'Added to a meeting',
   agenda_ready: 'Agenda ready',
   update_review: 'Workspace update to review',
+  page_shared: 'Page shared with you',
   agent_run: 'Assistant runs',
+  position_assigned: 'Your Assistant given a Position',
+  billing: 'Billing and Assistant usage',
 };
 
 const CHANNEL_LABELS: Record<Channel, string> = {

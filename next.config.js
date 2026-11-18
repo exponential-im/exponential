@@ -5,6 +5,10 @@
 import "./src/env.js";
 import { withSentryConfig } from "@sentry/nextjs";
 import { readFileSync } from "node:fs";
+import {
+  contentSecurityPolicyReportOnly,
+  sentryCspReportUri,
+} from "./src/lib/csp/contentSecurityPolicy.js";
 
 /**
  * Docs pages that moved (Docs v2, Phase 1). Old URLs are in links, emails and
@@ -31,49 +35,20 @@ const docsRedirects = JSON.parse(
  * `script-src 'unsafe-inline'` is required by Next.js's inline bootstrap
  * scripts until a nonce strategy is adopted; 'unsafe-eval' is dev-only
  * (eval sourcemaps). Origins listed: Google Analytics (@next/third-parties),
- * the OpenAI realtime voice session, and Loom embeds. Sentry and Vercel
+ * the OpenAI realtime voice session, Loom embeds, and PostHog session replay
+ * (*.i.posthog.com: the ingest host and the recorder script it loads). Sentry and Vercel
  * Analytics both go through same-origin paths (/monitoring tunnel,
  * /_vercel/insights), so 'self' covers them.
  */
 const isDev = process.env.NODE_ENV !== "production";
 
-/**
- * Sentry ingests CSP violation reports on its `security` endpoint, derived
- * from the public DSN (https://<key>@<host>/<projectId>).
- */
-function sentryCspReportUri() {
-  const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
-  if (!dsn) return null;
-  try {
-    const url = new URL(dsn);
-    const projectId = url.pathname.replace(/^\//, "");
-    if (!url.username || !projectId) return null;
-    return `https://${url.host}/api/${projectId}/security/?sentry_key=${url.username}`;
-  } catch {
-    return null;
-  }
-}
-
-function contentSecurityPolicyReportOnly() {
-  const reportUri = sentryCspReportUri();
-  const directives = [
-    "default-src 'self'",
-    `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""} https://www.googletagmanager.com`,
-    "style-src 'self' 'unsafe-inline'",
-    // Published pages and CRM avatars embed images from arbitrary origins.
-    "img-src 'self' blob: data: https:",
-    "font-src 'self' data:",
-    "connect-src 'self' https://api.openai.com wss://api.openai.com https://*.google-analytics.com https://*.analytics.google.com https://www.googletagmanager.com",
-    "media-src 'self' blob: data: https:",
-    "frame-src 'self' https://www.loom.com https://www.youtube.com https://www.youtube-nocookie.com",
-    "worker-src 'self' blob:",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-  ];
-  if (reportUri) directives.push(`report-uri ${reportUri}`);
-  return directives.join("; ");
-}
+// The policy itself lives in src/lib/csp/contentSecurityPolicy.js (unit-tested).
+// The Vercel toolbar's origins are allowed on preview deploys only.
+const CSP_REPORT_ONLY = contentSecurityPolicyReportOnly({
+  isDev,
+  vercelEnv: process.env.VERCEL_ENV,
+  reportUri: sentryCspReportUri(process.env.NEXT_PUBLIC_SENTRY_DSN),
+});
 
 // Enforced from day one: nothing in the app can trip these, and
 // frame-ancestors deliberately agrees with X-Frame-Options: SAMEORIGIN.
@@ -92,6 +67,16 @@ const config = {
     webpackMemoryOptimizations: true,
     cpus: 2,
   },
+  // The sitemap renders per request and reads the Markdown under content/ at
+  // runtime. Tracing missed content/learn, so production served a sitemap
+  // without a single /learn article. Ship all of content/ with the route.
+  // Keys are matched against the entry's normalised path, which is
+  // /app/sitemap.xml or /app/sitemap depending on how Next names the metadata
+  // route; "/sitemap*" matches both (and no other route), so the include
+  // cannot silently miss.
+  outputFileTracingIncludes: {
+    "/sitemap*": ["./content/**/*"],
+  },
   turbopack: {
     resolveAlias: {
       "markdown-it": "markdown-it/dist/index.cjs.js",
@@ -105,12 +90,30 @@ const config = {
         destination,
         permanent: true,
       })),
+      // The Exponential Method's short address. Temporary (307), so /method can
+      // become its own page later without browsers having cached a 308.
+      {
+        source: "/method",
+        destination: "/docs/method",
+        permanent: false,
+      },
       // Renamed so it stops competing with /features/weekly-plan in search.
       {
         source: "/features/weekly-planning",
         destination: "/features/team-weekly-review",
         permanent: true,
       },
+      // There was never capacity planning behind this page; it now covers
+      // the delivery metrics that exist.
+      {
+        source: "/features/team-capacity",
+        destination: "/features/team-metrics",
+        permanent: true,
+      },
+      // The public bounty board was retired (Nov 2026). Its pages and blog post
+      // were indexed, so send visitors somewhere useful instead of a 404.
+      { source: "/explore/:path*", destination: "/", permanent: true },
+      { source: "/blog/bounty-board-machine-readable", destination: "/blog", permanent: true },
     ];
   },
 
@@ -123,7 +126,7 @@ const config = {
           { key: 'Content-Security-Policy', value: CSP_ENFORCED },
           {
             key: 'Content-Security-Policy-Report-Only',
-            value: contentSecurityPolicyReportOnly(),
+            value: CSP_REPORT_ONLY,
           },
           { key: 'X-Frame-Options', value: 'SAMEORIGIN' },
           { key: 'X-Content-Type-Options', value: 'nosniff' },

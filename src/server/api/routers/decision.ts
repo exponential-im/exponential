@@ -1,7 +1,13 @@
+import { DECISION_REJECT_REASON_CODES } from "~/lib/draft-reject-reasons";
 import { z } from "zod";
+import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
-import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
+import {
+  createTRPCRouter,
+  humanOnlyProcedure,
+  protectedProcedure,
+} from "~/server/api/trpc";
 import {
   buildActionAccessWhere,
   buildDecisionAccessWhere,
@@ -21,6 +27,7 @@ import {
   deleteDraft,
   linkEntity,
   listForAdr,
+  listForFeature,
   listForMeeting,
   listForWorkspace,
   rejectDraft,
@@ -28,9 +35,11 @@ import {
   unlinkEntity,
   updateDecision,
 } from "~/server/services/decisions/decisionService";
-import { formatDecisionLabel } from "~/lib/decision-label";
+import { formatDecisionLabel, parseDecisionLabel } from "~/lib/decision-label";
+import { resolvePrincipal } from "~/server/services/access/principal";
 import { buildAdrDraft } from "~/server/services/decisions/renderAdrMarkdown";
 import { settleDraftReviewNotification } from "~/server/services/decisions/settleDraftReviewNotification";
+import { kickOutboundPostsForSubject } from "~/server/services/outboundPosts/deliver";
 import { TranscriptionProcessingService } from "~/server/services/TranscriptionProcessingService";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { parseTranscript, type TranscriptTurn } from "~/lib/transcript";
@@ -43,6 +52,12 @@ import type { DecisionEvidenceTurn } from "~/lib/decision-evidence";
  * - `protectedProcedure`, deliberately NOT human-only: Zoe logs decisions
  *   through the same service seam (ADR-0016). The `adr` router stays
  *   human-only and read-only; nothing here touches ADR content.
+ * - an agent may propose, never publish: a decision created by an agent
+ *   principal (`resolvePrincipal`: an agent, or Zoe/a gateway acting for a
+ *   person) or with `source: AGENT` is born a draft, and `confirmDraft` is
+ *   human-only, so a person always stands behind a confirmed decision. Nor
+ *   may an agent move a confirmed decision's status or rewrite what it says
+ *   (`setStatus`, `updateDecision`; record integrity, ADR-0071).
  * - reads gate at workspace `view` (viewers may read what the resolver lets
  *   them see); writes gate at workspace `edit` plus the per-row resolver
  *   check (meeting edit access for meeting-linked rows).
@@ -84,13 +99,26 @@ const accessSubjectSelect = {
   },
 } as const;
 
+/**
+ * Load the row a procedure acts on, by id or by its `D-0006` label (any
+ * case, any zero padding). A label resolves within the workspace and
+ * includes drafts — the caller still runs `ensureDecisionAccess`, which is
+ * what keeps a draft to the people who may confirm it. Rejected rows are
+ * never resolved by label: a label is something people read and pass
+ * around, and a rejected draft is a refusal, not a decision. Always hand
+ * the service `subject.id`, never the raw reference.
+ */
 async function loadDecisionSubject(
   db: PrismaClient,
   workspaceId: string,
-  decisionId: string,
+  decisionRef: string,
 ) {
+  const number = parseDecisionLabel(decisionRef);
   const decision = await db.decision.findFirst({
-    where: { id: decisionId, workspaceId },
+    where:
+      number !== null
+        ? { workspaceId, number, reviewState: { not: "REJECTED" } }
+        : { id: decisionRef, workspaceId },
     select: accessSubjectSelect,
   });
   if (!decision) {
@@ -178,6 +206,16 @@ async function ensureDecisionAccess(
  *
  * Unresolvable turns are dropped, not fatal: a decision worth logging should
  * not be lost because one quote was wrong.
+ *
+ * A quote whose words are verbatim but whose index is wrong is re-anchored to
+ * the turn that really holds them (the nearest one to the claimed index).
+ * Agents read meetings as flat transcript text — no tool hands them this
+ * parser's turn numbering — so their indices are guesses, and checking the
+ * index alone rejected every quote of real, correctly quoted words ("Every
+ * evidence turn failed transcript verification"). The words are still the
+ * test: re-anchoring only uses the forward match (the turn contains the
+ * whole quote), never the looser reverse one, so a quote found nowhere is
+ * still dropped.
  */
 function validateEvidenceAgainstTranscript(
   evidence: Array<{ turnIndex: number; speaker?: string | null; startTime?: number | null; text: string }>,
@@ -186,22 +224,29 @@ function validateEvidenceAgainstTranscript(
   const kept: DecisionEvidenceTurn[] = [];
   let dropped = 0;
   const seen = new Set<number>();
+  // Normalised once per call, and only if some quote needs re-anchoring:
+  // each re-anchor scans every turn, so per-quote normalisation would be
+  // O(quotes x transcript) regex passes on a long meeting.
+  let normalizedTurns: string[] | undefined;
+  const getNormalizedTurns = () =>
+    (normalizedTurns ??= turns.map((t) => normalizeQuoteText(t.text)));
   for (const turn of evidence) {
-    const actual = turns[turn.turnIndex];
-    if (!actual || seen.has(turn.turnIndex)) {
-      dropped += 1;
-      continue;
-    }
     // The words must be the transcript's, not the model's recollection of
     // them. Compared loosely (case, punctuation and whitespace) so a quote
     // that is genuinely from this turn survives normalisation differences.
-    if (!quoteMatchesTurn(turn.text, actual.text)) {
+    const claimed = turns[turn.turnIndex];
+    const turnIndex =
+      claimed && quoteMatchesTurn(turn.text, claimed.text)
+        ? turn.turnIndex
+        : findTurnContainingQuote(turn.text, getNormalizedTurns, turn.turnIndex);
+    const actual = turnIndex === undefined ? undefined : turns[turnIndex];
+    if (turnIndex === undefined || !actual || seen.has(turnIndex)) {
       dropped += 1;
       continue;
     }
-    seen.add(turn.turnIndex);
+    seen.add(turnIndex);
     kept.push({
-      turnIndex: turn.turnIndex,
+      turnIndex,
       // Attribution comes from the transcript, never from the caller.
       speaker: actual.speaker,
       startTime: actual.startTime,
@@ -211,9 +256,34 @@ function validateEvidenceAgainstTranscript(
   return { kept, dropped };
 }
 
-/** Loose containment: normalised quote must appear in the normalised turn. */
-function quoteMatchesTurn(quote: string, turnText: string): boolean {
-  const normalize = (value: string) =>
+/** Shortest normalised quote that may be re-anchored to another turn. */
+const MIN_REANCHOR_QUOTE_CHARS = 12;
+
+/**
+ * Index of the turn whose text contains the whole quote, nearest to the
+ * index the caller claimed; undefined when no turn does, or the quote is too
+ * short to place unambiguously ("yes", "ok").
+ */
+function findTurnContainingQuote(
+  quote: string,
+  getNormalizedTurns: () => string[],
+  claimedIndex: number,
+): number | undefined {
+  const q = normalizeQuoteText(quote);
+  if (q.length < MIN_REANCHOR_QUOTE_CHARS) return undefined;
+  const normalized = getNormalizedTurns();
+  let best: number | undefined;
+  for (let i = 0; i < normalized.length; i++) {
+    if (!normalized[i]!.includes(q)) continue;
+    if (best === undefined || Math.abs(i - claimedIndex) < Math.abs(best - claimedIndex)) {
+      best = i;
+    }
+  }
+  return best;
+}
+
+function normalizeQuoteText(value: string): string {
+  return (
     value
       .toLowerCase()
       // Apostrophes vanish rather than splitting a word, so "Let's" and
@@ -221,9 +291,14 @@ function quoteMatchesTurn(quote: string, turnText: string): boolean {
       .replace(/['\u2018\u2019]/g, "")
       .replace(/[^\p{L}\p{N}\s]/gu, " ")
       .replace(/\s+/g, " ")
-      .trim();
-  const q = normalize(quote);
-  const t = normalize(turnText);
+      .trim()
+  );
+}
+
+/** Loose containment: normalised quote must appear in the normalised turn. */
+function quoteMatchesTurn(quote: string, turnText: string): boolean {
+  const q = normalizeQuoteText(quote);
+  const t = normalizeQuoteText(turnText);
   if (q.length === 0) return false;
   if (t.includes(q)) return true;
   // The reverse direction lets a quote spanning several turns cite the first
@@ -277,6 +352,20 @@ async function settleDraftReviewAfter(
   }
 }
 
+/**
+ * Deliver whatever the service just enqueued for a decision (ADR-0075), once the
+ * response is on its way (`runAfterResponse` falls back to a detached run outside
+ * a request scope). Delivery records its own outcome on each row, so nothing here
+ * can fail the mutation.
+ */
+function kickDecisionPosts(db: PrismaClient, decisionId: string): void {
+  runAfterResponse(() =>
+    kickOutboundPostsForSubject(db, { kind: "decision", subjectId: decisionId }).catch(
+      () => undefined,
+    ),
+  );
+}
+
 export const decisionRouter = createTRPCRouter({
   /**
    * Confirmed decisions the caller may read, for the Decision Log. Drafts
@@ -293,6 +382,12 @@ export const decisionRouter = createTRPCRouter({
         /** With a real productId: ALSO include null-product decisions. */
         includeWorkspaceWide: z.boolean().optional(),
         projectId: z.string().optional(),
+        /**
+         * Only the decisions logged from this ceremony occurrence. Narrows the
+         * caller's visible set; an occurrence from another workspace matches
+         * nothing, since the resolver already scopes to `workspaceId`.
+         */
+        occurrenceId: z.string().optional(),
         search: z.string().max(200).optional(),
         /** One decision by its workspace sequence number — `D-0003` → 3. */
         number: z.number().int().min(1).optional(),
@@ -311,6 +406,7 @@ export const decisionRouter = createTRPCRouter({
           productId: input.productId,
           includeWorkspaceWide: input.includeWorkspaceWide,
           projectId: input.projectId,
+          occurrenceId: input.occurrenceId,
           search: input.search,
           number: input.number,
           limit: input.limit,
@@ -473,9 +569,11 @@ export const decisionRouter = createTRPCRouter({
     }),
 
   /**
-   * Log a confirmed decision — by hand from the Decision Log or a meeting
-   * page, or by Zoe (source AGENT). Meeting-linked decisions need edit
-   * access to the meeting; the label comes from the workspace sequence.
+   * Log a decision — confirmed when a person logs it by hand from the
+   * Decision Log or a meeting page; a draft labelled AGENT when an agent
+   * principal logs it, Zoe acting for a person included (decided by the
+   * credential, not by `source`). Meeting-linked decisions need edit access
+   * to the meeting; the label comes from the workspace sequence.
    */
   create: protectedProcedure
     .input(
@@ -580,11 +678,19 @@ export const decisionRouter = createTRPCRouter({
         actionIds,
         evidence,
         createdById: ctx.session.user.id,
+        // An agent proposes; a person confirms (`confirmDraft`). Zoe acting
+        // for a person is drafted by her credential, not by `source`.
+        principal: await resolvePrincipal(ctx),
       });
+      // A draft enqueued nothing; a confirmed create may have.
+      if (decision.reviewState === "CONFIRMED") kickDecisionPosts(ctx.db, decision.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
     }),
 
-  /** Edit content and scope. Status changes go through `setStatus`. */
+  /**
+   * Edit content and scope. Status changes go through `setStatus`. An agent
+   * principal may not rewrite what a confirmed decision says.
+   */
   update: protectedProcedure
     .input(
       z.object({
@@ -610,6 +716,8 @@ export const decisionRouter = createTRPCRouter({
         decisionId: subject.id,
         workspaceId,
         userId: ctx.session.user.id,
+        // Agents may not rewrite a confirmed decision (record integrity).
+        principal: await resolvePrincipal(ctx),
         patch,
       });
       return { ...decision, label: formatDecisionLabel(decision.number) };
@@ -624,6 +732,22 @@ export const decisionRouter = createTRPCRouter({
         ctx.db,
         buildDecisionAccessWhere(ctx.session.user.id, input.workspaceId),
         input.adrDocumentId,
+      );
+    }),
+
+  /**
+   * Decisions linked "implemented by" one feature, for the feature page.
+   * Same visibility as `list`: confirmed only, through the resolver. An OPEN
+   * decision linked here reads as a question raised on the feature.
+   */
+  listForFeature: protectedProcedure
+    .input(z.object({ workspaceId: z.string(), featureId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      return listForFeature(
+        ctx.db,
+        buildDecisionAccessWhere(ctx.session.user.id, input.workspaceId),
+        input.featureId,
       );
     }),
 
@@ -720,7 +844,8 @@ export const decisionRouter = createTRPCRouter({
 
   /**
    * Lifecycle transition. SUPERSEDED requires `supersededById`, which must
-   * be a decision the caller may read in the same workspace.
+   * be a decision the caller may read in the same workspace. A person's act:
+   * agent principals, Zoe included, are refused by the service.
    */
   setStatus: protectedProcedure
     .input(
@@ -735,6 +860,7 @@ export const decisionRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
       await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "edit");
+      let supersededById = input.supersededById ?? null;
       if (input.status === "SUPERSEDED" && input.supersededById) {
         const successor = await loadDecisionSubject(
           ctx.db,
@@ -742,41 +868,117 @@ export const decisionRouter = createTRPCRouter({
           input.supersededById,
         );
         await ensureDecisionAccess(ctx.db, ctx.session.user.id, successor, "view");
+        // The successor may have been named by label; the service takes ids.
+        supersededById = successor.id;
       }
       const decision = await setStatus(ctx.db, {
         decisionId: subject.id,
         workspaceId: input.workspaceId,
         userId: ctx.session.user.id,
         status: input.status,
-        supersededById: input.supersededById ?? null,
+        supersededById,
+        // Only a person moves a confirmed decision (record integrity), and
+        // accepting makes them the decider. Agents, Zoe included, are refused.
+        principal: await resolvePrincipal(ctx),
       });
+      kickDecisionPosts(ctx.db, decision.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
     }),
 
-  /** Publish a draft into the log (the seam V2's review card will call). */
-  confirmDraft: protectedProcedure
-    .input(z.object({ workspaceId: z.string(), decisionId: z.string() }))
+  /**
+   * Publish a draft into the log. Human-only: confirming is the person
+   * standing behind the decision, so an agent cannot confirm its own (or any)
+   * draft. An optional `status` moves it in the same call ("confirm as
+   * accepted"); on an already-confirmed row only that status change applies.
+   * A person accepting through their own login becomes the decider when no
+   * person is one yet. Zoe and the gateways never get here: their tokens are
+   * agent credentials (`resolvePrincipal`), which `humanOnlyProcedure` refuses.
+   */
+  confirmDraft: humanOnlyProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        decisionId: z.string(),
+        status: decisionStatusSchema.optional(),
+      }),
+    )
     .use(requireWorkspaceMembership("edit"))
     .mutation(async ({ ctx, input }) => {
+      if (input.status === "SUPERSEDED") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "A decision is superseded by choosing its successor — confirm it first, then change its status",
+        });
+      }
       const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
       await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "edit");
       const decision = await confirmDraft(ctx.db, {
         decisionId: subject.id,
         workspaceId: input.workspaceId,
         userId: ctx.session.user.id,
+        status: input.status,
+        principal: await resolvePrincipal(ctx),
       });
       await settleDraftReviewAfter(ctx.db, subject);
+      // A plain confirm emits for the confirmed row; a resolution draft emits for its
+      // target, which is what the service returns. Kick both ids when they differ so
+      // neither depends on a later act (the sweep would catch it, but not promptly).
+      kickDecisionPosts(ctx.db, decision.id);
+      if (decision.id !== subject.id) kickDecisionPosts(ctx.db, subject.id);
       return { ...decision, label: formatDecisionLabel(decision.number) };
+    }),
+
+  /**
+   * Where this decision has been posted (ADR-0075): the "Posted to #leadership · 2m
+   * ago" line. Gated on viewing the decision itself, so a restricted project's room
+   * is not revealed to someone who cannot see the decision. Never a credential.
+   */
+  outboundPosts: protectedProcedure
+    .input(z.object({ workspaceId: z.string(), decisionId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
+      await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "view");
+      const rows = await ctx.db.outboundPost.findMany({
+        where: { workspaceId: input.workspaceId, kind: "decision", subjectId: subject.id },
+        select: {
+          id: true,
+          event: true,
+          provider: true,
+          externalId: true,
+          status: true,
+          sentAt: true,
+          createdAt: true,
+          channelLink: { select: { displayName: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return rows.map(({ channelLink, ...row }) => ({
+        ...row,
+        roomName: channelLink?.displayName ?? row.externalId,
+      }));
     }),
 
   /** Reject a draft. Confirmed decisions are deprecated, never rejected. */
   rejectDraft: protectedProcedure
-    .input(z.object({ workspaceId: z.string(), decisionId: z.string() }))
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        decisionId: z.string(),
+        /** Why, when the reviewer says (optional). */
+        reason: z.enum(DECISION_REJECT_REASON_CODES).optional(),
+      }),
+    )
     .use(requireWorkspaceMembership("edit"))
     .mutation(async ({ ctx, input }) => {
       const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
       await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "edit");
-      const result = await rejectDraft(ctx.db, { decisionId: subject.id, workspaceId: input.workspaceId, userId: ctx.session.user.id });
+      const result = await rejectDraft(ctx.db, {
+        decisionId: subject.id,
+        workspaceId: input.workspaceId,
+        userId: ctx.session.user.id,
+        reason: input.reason,
+      });
       await settleDraftReviewAfter(ctx.db, subject);
       return result;
     }),

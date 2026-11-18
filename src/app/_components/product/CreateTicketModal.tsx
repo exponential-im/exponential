@@ -16,7 +16,6 @@ import {
   IconDots,
   IconFlag3,
   IconLink,
-  IconUser,
   IconX,
   IconCategory,
   IconClock,
@@ -34,7 +33,10 @@ import { useWorkspaceEffortUnit } from "~/hooks/useWorkspaceEffortUnit";
 import { effortOptions, effortPillLabel } from "~/types/effort";
 import { SizeSuggestionChip } from "~/app/_components/product/SizeSuggestionChip";
 import { STATUS_OPTIONS, type TicketStatus } from "~/lib/ticket-statuses";
+import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { PersonPicker } from "~/app/_components/shared/PersonPicker";
 import "@mantine/tiptap/styles.css";
+import { invalidateTicketLists } from "~/app/_components/product/invalidateTicketLists";
 
 // ---------------------------------------------------------------------------
 // Option data
@@ -108,7 +110,6 @@ interface CreateTicketModalProps {
   features?: { id: string; name: string }[];
   cycles?: { id: string; name: string }[];
   epics?: { id: string; name: string }[];
-  members?: { id: string; name: string | null }[];
 }
 
 export function CreateTicketModal({
@@ -120,9 +121,9 @@ export function CreateTicketModal({
   features,
   cycles,
   epics,
-  members,
 }: CreateTicketModalProps) {
   const router = useRouter();
+  const { workspaceId } = useWorkspace();
   const utils = api.useUtils();
 
   // core
@@ -161,7 +162,7 @@ export function CreateTicketModal({
 
   const createTicket = api.product.ticket.create.useMutation({
     onSuccess: async (ticket) => {
-      await utils.product.ticket.listSummaries.invalidate({ productId });
+      await invalidateTicketLists(utils, { productId });
       resetForm();
       onClose();
       router.push(`${basePath}/${ticket.id}`);
@@ -228,9 +229,6 @@ export function CreateTicketModal({
     ? PRIORITY_OPTIONS.find((o) => o.value === priority)?.label ?? "Priority"
     : "Priority";
   const typeLabel = TYPE_OPTIONS.find((o) => o.value === type)?.label ?? "Type";
-  const assigneeLabel = assigneeId
-    ? members?.find((m) => m.id === assigneeId)?.name ?? "Assignee"
-    : "Assignee";
   const cycleLabel = cycleId
     ? cycles?.find((c) => c.id === cycleId)?.name ?? "Cycle"
     : "Cycle";
@@ -345,23 +343,12 @@ export function CreateTicketModal({
           </Pill>
 
           {/* Assignee */}
-          <Pill icon={<IconUser size={14} />} label={assigneeLabel}>
-            {members && members.length > 0 ? (
-              members.map((m) => (
-                <Menu.Item key={m.id} onClick={() => setAssigneeId(m.id)}>
-                  {m.name ?? "Unknown"}
-                </Menu.Item>
-              ))
-            ) : (
-              <Menu.Item disabled>No members</Menu.Item>
-            )}
-            {assigneeId && (
-              <>
-                <Menu.Divider />
-                <Menu.Item onClick={() => setAssigneeId(null)}>Clear</Menu.Item>
-              </>
-            )}
-          </Pill>
+          <PersonPicker
+            label="Assignee"
+            workspaceId={workspaceId}
+            value={assigneeId}
+            onChange={(id) => setAssigneeId(id)}
+          />
 
           {/* Type */}
           <Pill icon={<IconCategory size={14} />} label={typeLabel}>

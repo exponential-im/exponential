@@ -4,12 +4,14 @@ import { safeSignatureEquals } from '~/server/utils/webhookSignature';
 import { type Prisma } from '@prisma/client';
 import { db } from '~/server/db';
 import { attachMeetingToOccurrence } from '~/server/services/ceremonies/autoAttach';
+import { fileFirefliesImport } from '~/server/services/meetings/firefliesDefaultWorkspace';
 import { FirefliesService, type FirefliesTranscript } from '~/server/services/FirefliesService';
 import { getEmbeddingTriggerService } from '~/server/services/embedding';
 import { decryptFromBase64 } from '~/server/utils/encryption';
 import { resolveCredential } from '~/server/utils/credentialHelper';
 import { emitNotification } from '~/server/services/notifications/emit/emitNotification';
 import { NOTIFICATION_CATEGORIES } from '~/server/services/notifications/emit/constants';
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 // import { ActionProcessorFactory } from '~/server/services/processors/ActionProcessorFactory';
 // import { NotificationServiceFactory } from '~/server/services/notifications/NotificationServiceFactory';
 
@@ -447,6 +449,14 @@ async function handleTranscriptionCompleted(meetingId: string, clientReferenceId
       // Ceremony auto-attach (ADR-0059): by title alias against the user's
       // workspaces' occurrences around the meeting date. Never throws.
       await attachMeetingToOccurrence(db, transcriptionSession);
+      // Still unplaced → the integration's opt-in default workspace, if set.
+      // Before the embedding trigger below, so chunks get the right scope.
+      // Never throws.
+      await fileFirefliesImport(db, {
+        meetingId: transcriptionSession.id,
+        ownerUserId: user.id,
+        integrationId: firefliesIntegration.integrationId,
+      });
     }
 
     // 5. Create notification for new transcriptions
@@ -479,14 +489,19 @@ async function handleTranscriptionCompleted(meetingId: string, clientReferenceId
       // ready (ADR-0045) — the scheduledNotification above only reaches the
       // owner. Only fires when a summary actually landed and there are member
       // (userId) participants; a freshly-imported meeting with none is a safe
-      // no-op. Owner is the actor and is dropped downstream. Fire-and-forget.
+      // no-op. Owner is the actor and is dropped downstream. Runs after the response.
       if (sessionData.summary) {
-        void emitNotification({
-          db,
-          category: NOTIFICATION_CATEGORIES.MEETING_READY,
-          actorUserId: user.id,
-          subject: { sessionId: transcriptionSession.id },
-        });
+        emitAfterResponse("webhooks.fireflies.meetingReady", () =>
+          emitNotification({
+            db,
+            category: NOTIFICATION_CATEGORIES.MEETING_READY,
+            actorUserId: user.id,
+            subject: { sessionId: transcriptionSession.id },
+          }),
+          // sessionId is our TranscriptionSession row (as at the transcription.ts
+          // sites); firefliesMeetingId is Fireflies' own id for the same meeting.
+          { sessionId: transcriptionSession.id, firefliesMeetingId: meetingId },
+        );
       }
     }
 

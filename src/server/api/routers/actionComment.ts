@@ -1,20 +1,14 @@
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
-import { getActionAccess } from "~/server/services/access";
+import { getActionAccess, canViewAction } from "~/server/services/access";
 import { createActionComment } from "~/server/services/actions/comments";
-import { resumeWaitingRunsOnOwnerReply } from "~/server/services/agentRuns/enqueue";
+import { resumeWaitingRunsOnReply } from "~/server/services/agentRuns/enqueue";
+import { findUnstartedAssistantMentions } from "~/server/services/agentRuns/unstartedMentions";
 import { triggerDispatch } from "~/server/services/agentRuns/dispatch";
 import { after } from "next/server";
 import { deleteFromBlob } from "~/lib/blob";
-
-function hasViewAccess(access: {
-  isCreator: boolean;
-  isAssignee: boolean;
-  hasProjectAccess: boolean;
-}): boolean {
-  return access.isCreator || access.isAssignee || access.hasProjectAccess;
-}
+import { runAfterResponseReported } from "~/server/utils/runAfterResponse";
 
 export const actionCommentRouter = createTRPCRouter({
   getComments: protectedProcedure
@@ -25,7 +19,7 @@ export const actionCommentRouter = createTRPCRouter({
         ctx.session.user.id,
         input.actionId,
       );
-      if (!access || !hasViewAccess(access)) {
+      if (!access || !canViewAction(access)) {
         throw new TRPCError({
           code: "NOT_FOUND",
           message: "Action not found",
@@ -35,7 +29,8 @@ export const actionCommentRouter = createTRPCRouter({
       return ctx.db.actionComment.findMany({
         where: { actionId: input.actionId },
         include: {
-          author: { select: { id: true, name: true, image: true } },
+          // isAgent: an Assistant's comments (its questions) render as an agent's.
+          author: { select: { id: true, name: true, image: true, isAgent: true } },
         },
         orderBy: { createdAt: "asc" },
       });
@@ -54,7 +49,7 @@ export const actionCommentRouter = createTRPCRouter({
         ctx.session.user.id,
         input.actionId,
       );
-      if (!access || !hasViewAccess(access)) {
+      if (!access || !canViewAction(access)) {
         throw new TRPCError({
           code: "NOT_FOUND",
           message: "Action not found",
@@ -69,10 +64,12 @@ export const actionCommentRouter = createTRPCRouter({
         content: input.content,
       });
 
-      // The owner answering their Assistant's question resumes the run
-      // (ADR-0067, Agent PRD D6). Only a human's comment reaches this router;
-      // an Assistant's own comment goes through the run tool and never resumes.
-      const resumed = await resumeWaitingRunsOnOwnerReply(ctx.db, {
+      // Answering an Assistant's question resumes the run — from the person
+      // it asked (whoever assigned the Action) or its owner, never a
+      // bystander (Agent PRD D6, widened 2026-10-11). Only a human's comment
+      // reaches this router; an Assistant's own comment goes through the run
+      // tool and never resumes.
+      const resumed = await resumeWaitingRunsOnReply(ctx.db, {
         actionId: input.actionId,
         authorId: ctx.session.user.id,
         commentId: comment.id,
@@ -81,7 +78,15 @@ export const actionCommentRouter = createTRPCRouter({
         after(() => triggerDispatch());
       }
 
-      return comment;
+      // A mention never starts a run (decided 2026-10-11): name the mentioned
+      // Assistants that are not assigned, so the author can be offered the
+      // assignment instead of waiting on a run that will not come.
+      const unstartedAssistants = await findUnstartedAssistantMentions(ctx.db, {
+        actionId: input.actionId,
+        content: input.content,
+      });
+
+      return { ...comment, unstartedAssistants };
     }),
 
   deleteComment: protectedProcedure
@@ -186,10 +191,10 @@ export const actionCommentRouter = createTRPCRouter({
         });
       }
 
-      // Fire-and-forget blob deletion
-      void deleteFromBlob(input.imageUrl).catch(() => {
-        // Blob deletion is best-effort
-      });
+      // Best-effort blob deletion, after the response
+      runAfterResponseReported("actionComment.deleteImageBlob", () =>
+        deleteFromBlob(input.imageUrl),
+      );
 
       return { deleted: newContent.length === 0 };
     }),

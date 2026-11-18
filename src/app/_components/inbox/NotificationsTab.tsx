@@ -13,9 +13,12 @@ import {
 import {
   IconAt,
   IconBell,
+  IconBriefcase,
   IconCalendarEvent,
   IconCheck,
   IconClockExclamation,
+  IconCreditCard,
+  IconFileText,
   IconListDetails,
   IconMicrophone,
   IconNews,
@@ -31,6 +34,7 @@ import {
 } from '~/server/services/notifications/emit/constants';
 import { compactAge } from '~/app/_components/product/overview/overviewShared';
 import { toPlainText } from '~/lib/content/plainText';
+import { InboxPeekDrawer, inboxPeekLinkProps } from './InboxPeek';
 
 const PAGE_SIZE = 20;
 
@@ -47,7 +51,10 @@ const CATEGORY_DISPLAY: Record<NotificationCategory, { label: string; icon: Icon
   [NOTIFICATION_CATEGORIES.AGENDA_READY]: { label: 'Agendas', icon: IconListDetails },
   [NOTIFICATION_CATEGORIES.SUMMARY]: { label: 'Summaries', icon: IconNews },
   [NOTIFICATION_CATEGORIES.UPDATE_REVIEW]: { label: 'Updates to review', icon: IconSparkles },
+  [NOTIFICATION_CATEGORIES.PAGE_SHARED]: { label: 'Shared pages', icon: IconFileText },
   [NOTIFICATION_CATEGORIES.AGENT_RUN]: { label: 'Assistant runs', icon: IconRobot },
+  [NOTIFICATION_CATEGORIES.POSITION_ASSIGNED]: { label: 'Positions', icon: IconBriefcase },
+  [NOTIFICATION_CATEGORIES.BILLING]: { label: 'Billing', icon: IconCreditCard },
 };
 
 const CATEGORY_OPTIONS = [
@@ -168,7 +175,11 @@ export function NotificationsTab() {
             return (
               <div key={notification.id} className="flex items-center gap-1">
                 {notification.deeplink ? (
-                  <Link href={notification.deeplink} className="wsa-item min-w-0 flex-1">
+                  <Link
+                    href={notification.deeplink}
+                    className="wsa-item min-w-0 flex-1"
+                    {...inboxPeekLinkProps(notification.deeplink)}
+                  >
                     {row}
                   </Link>
                 ) : (
@@ -203,6 +214,10 @@ export function NotificationsTab() {
           )}
         </>
       )}
+
+      <InboxPeekDrawer
+        hrefs={notifications.flatMap((n) => (n.deeplink ? [n.deeplink] : []))}
+      />
     </section>
   );
 }

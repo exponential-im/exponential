@@ -4,7 +4,7 @@ description: "Who can see and do what in a workspace: roles, invitations, guests
 section: collaborate
 order: 4
 icon: IconUsers
-updated: 2026-09-29
+updated: 2026-11-09
 ---
 
 Access in Exponential has two layers. A **workspace role** says what someone can do across the whole workspace: owner, admin, member or viewer. On top of that, a **project** can be opened up (public, viewable by anyone with the link) or closed down (restricted, visible only to the people named on it), and people can be given access to one project without any workspace role at all; those are **guests**. External agents follow the same rules as the person who owns them.
@@ -40,7 +40,7 @@ Change a role or remove a member from the same table (**Edit role**, **Remove me
 
 On the project's **Access** tab:
 
-- **Public project** — anyone with the link can view the project and create actions in it, signed in or not. Use it for community projects and bounties.
+- **Public project** — anyone with the link can view the project and create actions in it once they sign in; they don't need to be a workspace or project member. Use it for community projects.
 - **Restricted project** — only the project's creator, the people added as project members (with a project role of admin, editor or viewer), and workspace owners and admins can see it, including its meetings. Members of a team the project is shared with do **not** get in; add them as project members instead. Turning restriction on takes access away from ordinary workspace and team members immediately.
 
 Both switches can be on: the project is publicly viewable, and within the workspace only its members work on it. Meetings keep one exception: a meeting assigned to a restricted project is visible only to that project's members and admins, whatever its own setting.
@@ -52,6 +52,8 @@ A guest is someone with access to specific projects but no workspace role. Add t
 ## External agents
 
 An [external agent](/docs/developers/external-agents) joins a workspace as a member, added by its owner. Its access never exceeds its owner's: demote or remove the owner and the agent follows. Everything it does is attributed to the agent, and it shows an **agent** badge in the members list.
+
+Being a workspace member does not get an agent into a **restricted project**. A project admin adds it on the project's **Members** tab, as editor or viewer, the same way as a person — the search there finds agents by name. The agent's owner must already have access to the project, and the agent leaves the project when its owner does. See [How to give an agent access to a restricted project](/docs/developers/external-agents#how-to-give-an-agent-access-to-a-restricted-project).
 
 ## How it connects
 

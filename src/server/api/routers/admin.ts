@@ -11,8 +11,19 @@ import {
 } from "~/server/services/threadScoreAnalytics";
 import { computeCalibration, isCalibrated } from "~/server/services/calibrationGate";
 import { parseSetupState } from "./welcome";
+import {
+  getSignUpMode,
+  setSignUpMode,
+  SIGN_UP_MODES,
+} from "~/server/services/instance/instanceSettings";
 import { buildCalibrationPairs } from "~/server/services/calibrationGateService";
 import { JUDGE_VERSION } from "~/server/services/AgentEvalService";
+import { resolveBillingMode } from "~/server/services/billing/config";
+import { getSpendReport } from "~/server/services/billing/spendReport";
+import {
+  backfillKnowledgeIndex,
+  getKnowledgeIndexStats,
+} from "~/server/services/knowledgeIndexAdmin";
 
 // `tokenUsage` is written via `JSON.stringify(...)` in AiInteractionLogger,
 // so Prisma returns it as a string. Older rows (or rows written via Prisma
@@ -56,6 +67,40 @@ const adminProcedure = protectedProcedure.use(async ({ ctx, next }) => {
 });
 
 export const adminRouter = createTRPCRouter({
+  /**
+   * What each workspace's Assistant use cost on the hosted key in one calendar
+   * month (UTC), with the distribution across workspaces: the numbers the
+   * assistant allowance is sized from, and the total to reconcile against the
+   * provider's invoice. `month` is `YYYY-MM`; the current month when omitted.
+   *
+   * On an install that does not meter (`BILLING_MODE` unset or `off`) there is
+   * no ledger, and this answers `{ mode: "off" }` without touching the database.
+   */
+  getAssistantSpend: adminProcedure
+    .input(z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/).optional() }))
+    .query(async ({ ctx, input }) => {
+      const mode = resolveBillingMode(process.env);
+      if (mode === "off") return { mode } as const;
+
+      const month = input.month ? new Date(`${input.month}-01T00:00:00.000Z`) : new Date();
+      return { mode, report: await getSpendReport(ctx.db, month) } as const;
+    }),
+
+  /**
+   * The install's Sign-up mode (ADR-0081): `open`, or `invite-only` (only an
+   * address with a pending invitation can create an account). No setting
+   * reads as `open`.
+   */
+  getSignUpMode: adminProcedure.query(async ({ ctx }) => ({
+    mode: await getSignUpMode(ctx.db),
+  })),
+
+  setSignUpMode: adminProcedure
+    .input(z.object({ mode: z.enum(SIGN_UP_MODES) }))
+    .mutation(async ({ ctx, input }) => ({
+      mode: await setSignUpMode(ctx.db, input.mode),
+    })),
+
   /**
    * Get all AI interactions (admin only - no user filter)
    */
@@ -214,6 +259,7 @@ export const adminRouter = createTRPCRouter({
         }
         const state = parseSetupState(user.welcomeSetupState);
         const hasProgress =
+          state.useCase !== null ||
           state.goalId !== null ||
           state.actionId !== null ||
           state.planCreated ||
@@ -651,4 +697,29 @@ export const adminRouter = createTRPCRouter({
       errors: result.errors,
     };
   }),
+
+  /**
+   * Platform-wide knowledge index coverage: indexed vs pending transcriptions
+   * and resources, chunk counts per source type, and orphan chunks whose
+   * source row no longer exists.
+   */
+  getKnowledgeIndexStats: adminProcedure.query(async ({ ctx }) => {
+    return getKnowledgeIndexStats(ctx.db);
+  }),
+
+  /**
+   * Embed one batch of transcriptions that have text but no chunks, across
+   * all users. The client loops, passing every attempted id back as
+   * `excludeIds`, until `remaining` is 0 or a batch attempts nothing.
+   */
+  backfillKnowledgeIndex: adminProcedure
+    .input(
+      z.object({
+        limit: z.number().int().min(1).max(20).default(5),
+        excludeIds: z.array(z.string()).max(10000).default([]),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      return backfillKnowledgeIndex(ctx.db, input);
+    }),
 });

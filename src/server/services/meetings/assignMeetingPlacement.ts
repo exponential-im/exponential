@@ -5,6 +5,8 @@ import {
   canEditProject,
   getTranscriptionAccess,
   canEditTranscription,
+  canEditWorkspaceContent,
+  getWorkspaceMembership,
 } from "~/server/services/access";
 import { dropStrandedMeetingFeatureLinks } from "./meetingFeatures";
 
@@ -55,7 +57,7 @@ export interface AssignMeetingPlacementResult {
 /**
  * The one rule for which Workspace a Meeting lands in, shared by every path
  * that writes a Meeting's `workspaceId`: the device recorder's `startSession`,
- * the manual form, `updateDetails`, and the placement move below.
+ * the manual form, `moveMeetingToWorkspace`, and the placement move below.
  *
  * - With a Project, the Project's Workspace is authoritative. A caller-supplied
  *   `workspaceId` that disagrees is a coherence bug, so it is rejected rather
@@ -241,4 +243,124 @@ export async function assignMeetingPlacement(
   });
 
   return { count, projectId, workspaceId };
+}
+
+export interface MoveMeetingToWorkspaceResult {
+  workspaceId: string | null;
+  /** Feature links dropped because their feature stays in the old workspace. */
+  droppedFeatureLinks: number;
+}
+
+/**
+ * Move a Meeting that has no Project to another Workspace, or to Personal
+ * (`workspaceId: null`, owner only). A project-linked Meeting's Workspace is its Project's,
+ * so it moves through `assignMeetingPlacement` instead and is refused here.
+ *
+ * The caller needs edit access to the Meeting and an edit-capable role
+ * (member or above) in the target Workspace: moving a Meeting in exposes it to
+ * every member, which a viewer can't do. The Meeting's extracted Actions move
+ * with it, and participants, ceremony link and feature links follow through
+ * `followMeetingsToWorkspace`, the same as every other placement path.
+ */
+export async function moveMeetingToWorkspace(
+  db: PrismaClient,
+  userId: string,
+  input: { meetingId: string; workspaceId: string | null },
+): Promise<MoveMeetingToWorkspaceResult> {
+  const { meetingId, workspaceId } = input;
+  const session = await db.transcriptionSession.findUnique({
+    where: { id: meetingId },
+    select: { id: true, userId: true, projectId: true, workspaceId: true },
+  });
+  if (!session) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Meeting not found" });
+  }
+  const access = await getTranscriptionAccess(db, userId, session);
+  if (!canEditTranscription(access)) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "You do not have edit access to this meeting",
+    });
+  }
+  if (session.projectId) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        "This meeting belongs to a project, so its workspace follows the project. Change the project instead.",
+    });
+  }
+  // Personal means the owner's Personal. A co-editor moving someone else's
+  // meeting there would pull it out of the workspace and away from themselves.
+  if (!workspaceId && session.userId !== userId) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "Only the meeting's owner can move it to Personal",
+    });
+  }
+  if (workspaceId) {
+    const membership = await getWorkspaceMembership(db, userId, workspaceId);
+    if (!canEditWorkspaceContent(membership?.role ?? null)) {
+      throw new TRPCError({
+        code: "FORBIDDEN",
+        message: "You need member access to the target workspace to move a meeting into it",
+      });
+    }
+  }
+  if (session.workspaceId === workspaceId) {
+    return { workspaceId, droppedFeatureLinks: 0 };
+  }
+
+  const droppedFeatureLinks = await db.$transaction(async (tx) => {
+    await tx.transcriptionSession.update({
+      where: { id: meetingId },
+      data: { workspaceId, updatedAt: new Date() },
+    });
+    await tx.action.updateMany({
+      where: { transcriptionSessionId: meetingId },
+      data: { workspaceId },
+    });
+    const before = await tx.meetingFeature.count({
+      where: { transcriptionSessionId: meetingId },
+    });
+    await followMeetingsToWorkspace(tx, { meetingIds: [meetingId], workspaceId });
+    const after = await tx.meetingFeature.count({
+      where: { transcriptionSessionId: meetingId },
+    });
+    return before - after;
+  });
+
+  return { workspaceId, droppedFeatureLinks };
+}
+
+/**
+ * File a freshly imported, still-unplaced Meeting into its owner's chosen
+ * default Workspace (the Fireflies integration's "File new meetings into"
+ * setting). Opt-in by design: a Workspace-level Meeting is visible to every
+ * member, so an import is never moved out of Personal unless its owner asked.
+ *
+ * Runs after ceremony auto-attach, so a ceremony match — the more specific
+ * placement — wins; the write only touches a Meeting that is still without a
+ * Workspace and a Project. The owner must still be a member (direct or via a
+ * team) of the target Workspace: someone who has left it keeps getting
+ * Personal imports rather than filing into a Workspace they can no longer see.
+ *
+ * Returns the Workspace the Meeting was filed into, or null when it stays put.
+ */
+export async function fileImportIntoDefaultWorkspace(
+  db: PrismaClient,
+  input: { meetingId: string; ownerUserId: string; workspaceId: string | null },
+): Promise<string | null> {
+  const { meetingId, ownerUserId, workspaceId } = input;
+  if (!workspaceId) return null;
+
+  // Re-checked on every import: the owner may since have been demoted to
+  // guest or viewer, and a Workspace Meeting is visible to every member.
+  const membership = await getWorkspaceMembership(db, ownerUserId, workspaceId);
+  if (!canEditWorkspaceContent(membership?.role ?? null)) return null;
+
+  const { count } = await db.transcriptionSession.updateMany({
+    where: { id: meetingId, userId: ownerUserId, workspaceId: null, projectId: null },
+    data: { workspaceId, updatedAt: new Date() },
+  });
+  return count > 0 ? workspaceId : null;
 }

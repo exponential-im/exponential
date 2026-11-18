@@ -12,10 +12,13 @@
  *   narrows it to the project's allowlist).
  * - Editing follows the same paths at edit strength: meeting edit access,
  *   project edit access, or a non-viewer workspace role.
- * - Drafts (`reviewState = DRAFT`) are invisible everywhere except the source
- *   meeting's own views, and only to people who may edit that meeting. The
- *   bulk WHERE therefore matches CONFIRMED rows only; `listForMeeting` adds
- *   drafts per row after a `canEditTranscription` check.
+ * - Drafts (`reviewState = DRAFT`) never reach a bulk read. A meeting draft
+ *   is visible only in the source meeting's own views, to people who may
+ *   edit that meeting; a meeting-less draft (agent-authored) only to people
+ *   who may edit it — they are the ones who can confirm it. The bulk WHERE
+ *   therefore matches CONFIRMED rows only; `listForMeeting` adds drafts per
+ *   row after a `canEditTranscription` check, and the Inbox lists agent
+ *   drafts to their reviewer.
  *
  * Every list/aggregate read over Decisions goes through
  * `buildDecisionAccessWhere`; routers must not carry inline permission logic.
@@ -100,14 +103,20 @@ export async function getDecisionAccess(
     hasProjectAccess: projectAccessInfo ? hasProjectAccess(projectAccessInfo) : false,
     canEditProject: projectAccessInfo ? canEditProject(projectAccessInfo) : false,
     workspaceRole: membership?.role ?? null,
-    isDraft: decision.reviewState === "DRAFT",
+    // A rejected draft is still an unreviewed (possibly hallucinated) agent
+    // or extractor output, so it keeps draft visibility: only the people who
+    // may confirm it. It must never fall through to confirmed-row access.
+    isDraft: decision.reviewState !== "CONFIRMED",
   };
 }
 
 /** Check if the user can view this decision. */
 export function canViewDecision(access: DecisionAccessInfo): boolean {
-  // A draft is only visible to people who may edit its source meeting.
-  if (access.isDraft) return access.hasMeeting && access.canEditMeeting;
+  // A draft is only visible to people who may confirm it: editors of its
+  // source meeting, or for a meeting-less (agent) draft, its editors.
+  if (access.isDraft) {
+    return access.hasMeeting ? access.canEditMeeting : canEditDecision(access);
+  }
   if (access.hasMeeting) return access.canViewMeeting;
   if (access.hasProject) return access.hasProjectAccess;
   return access.workspaceRole !== null;
@@ -134,6 +143,36 @@ export function buildDecisionAccessWhere(
   return {
     workspaceId,
     ...buildDecisionAccessWhereAcrossWorkspaces(userId),
+  };
+}
+
+/**
+ * Decisions every member of the workspace may read, whoever they are: for
+ * copying into a surface the whole workspace sees (a ceremony agenda
+ * snapshot), where a per-viewer filter cannot apply because the text is
+ * stored once. Confirmed only, and visible through a workspace-wide path:
+ *
+ * - meeting-less and project-less;
+ * - meeting-less in a project that is unrestricted or public;
+ * - from a meeting that is project-less in this workspace, or in an
+ *   unrestricted or public project.
+ *
+ * Anything behind a restricted project or a private recording is left out,
+ * even when the person generating the agenda could read it.
+ */
+export function buildWorkspaceAudienceDecisionWhere(workspaceId: string): Prisma.DecisionWhereInput {
+  const openProject: Prisma.ProjectWhereInput = { OR: [{ isRestricted: false }, { isPublic: true }] };
+  return {
+    workspaceId,
+    reviewState: "CONFIRMED",
+    OR: [
+      { transcriptionSessionId: null, projectId: null },
+      { transcriptionSessionId: null, project: openProject },
+      {
+        transcriptionSessionId: { not: null },
+        transcriptionSession: { OR: [{ projectId: null, workspaceId }, { project: openProject }] },
+      },
+    ],
   };
 }
 

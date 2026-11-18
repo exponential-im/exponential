@@ -86,9 +86,11 @@ describe("assistant.create — the Assistant is a principal (ADR-0067)", () => {
     dbMock.user.findUnique.mockResolvedValue({ isAgent: false } as never);
     writes = [];
 
-    // Owner is a non-viewer member — the delegation-invariant precondition.
+    // The person's Personal workspace, which they own — where a new
+    // Assistant's row and first membership go (ADR-0072).
+    dbMock.workspace.findFirst.mockResolvedValue({ id: WORKSPACE_ID } as never);
     dbMock.workspaceUser.findUnique.mockResolvedValue({
-      role: "member",
+      role: "owner",
       workspaceId: WORKSPACE_ID,
     } as never);
     dbMock.assistant.updateMany.mockResolvedValue({ count: 0 } as never);
@@ -114,11 +116,10 @@ describe("assistant.create — the Assistant is a principal (ADR-0067)", () => {
     }) as never);
   });
 
-  it("writes shadow user → External agent → membership → Assistant, in one transaction", async () => {
+  it("writes shadow user → External agent → Personal membership → Assistant, in one transaction", async () => {
     const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
 
     const created = await caller.assistant.create({
-      workspaceId: WORKSPACE_ID,
       name: "Aria",
       emoji: "✨",
       personality: "Warm, direct.",
@@ -133,28 +134,49 @@ describe("assistant.create — the Assistant is a principal (ADR-0067)", () => {
     expect(dbMock.externalAgent.create.mock.calls[0]?.[0]).toMatchObject({
       data: { name: "Aria", ownerId: OWNER_ID, shadowUserId: SHADOW_USER_ID },
     });
-    // Agents only ever hold `member` (ADR-0049), in the Assistant's own workspace.
+    // Agents only ever hold `member` (ADR-0049), here in the Personal workspace.
     expect(dbMock.workspaceUser.upsert.mock.calls[0]?.[0]).toMatchObject({
       where: { userId_workspaceId: { userId: SHADOW_USER_ID, workspaceId: WORKSPACE_ID } },
       create: { userId: SHADOW_USER_ID, workspaceId: WORKSPACE_ID, role: "member" },
       update: { role: "member" },
     });
     expect(dbMock.assistant.create.mock.calls[0]?.[0]).toMatchObject({
-      data: { externalAgentId: AGENT_ID, createdById: OWNER_ID, workspaceId: WORKSPACE_ID },
+      data: { externalAgentId: AGENT_ID, createdById: OWNER_ID },
     });
+    // The Assistant belongs to no workspace (ADR-0072): no column to write.
+    expect(dbMock.assistant.create.mock.calls[0]?.[0]?.data).not.toHaveProperty("workspaceId");
     expect(created).toMatchObject({ externalAgentId: AGENT_ID });
   });
 
-  it("refuses when the owner is not a member of the workspace, writing nothing", async () => {
-    dbMock.workspaceUser.findUnique.mockResolvedValue(null as never);
-    dbMock.teamUser.findFirst.mockResolvedValue(null as never);
+  it("looks the Personal workspace up by owner and type, not from client input", async () => {
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await caller.assistant.create({ name: "Aria", personality: "Warm." });
+
+    expect(dbMock.workspace.findFirst).toHaveBeenCalledWith({
+      where: { type: "personal", ownerId: OWNER_ID },
+      select: { id: true },
+    });
+  });
+
+  it("refuses a person with no Personal workspace yet, writing nothing", async () => {
+    dbMock.workspace.findFirst.mockResolvedValue(null);
     const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
 
     await expect(
-      caller.assistant.create({ workspaceId: WORKSPACE_ID, name: "Aria", personality: "x" }),
-    ).rejects.toThrow();
+      caller.assistant.create({ name: "Aria", personality: "x" }),
+    ).rejects.toMatchObject({ code: "PRECONDITION_FAILED" });
 
     expect(writes).toEqual([]);
+  });
+
+  it("writes no membership where the person cannot delegate (ADR-0049)", async () => {
+    dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "viewer", workspaceId: WORKSPACE_ID } as never);
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await caller.assistant.create({ name: "Aria", personality: "x" });
+
+    expect(writes).toEqual(["user", "externalAgent", "assistant"]);
   });
 });
 
@@ -163,7 +185,6 @@ describe("assistant.update / delete — the principal follows the Assistant (ADR
   let writes: string[];
   const owned = {
     id: "assistant-1",
-    workspaceId: WORKSPACE_ID,
     createdById: OWNER_ID,
     externalAgentId: AGENT_ID,
     name: "Aria",
@@ -171,10 +192,9 @@ describe("assistant.update / delete — the principal follows the Assistant (ADR
     personality: "Warm.",
     instructions: null,
     userContext: null,
-    isDefault: true,
     createdAt: new Date("2026-01-01"),
     updatedAt: new Date("2026-01-01"),
-    externalAgent: { id: AGENT_ID, executor: "MASTRA", shadowUserId: SHADOW_USER_ID },
+    externalAgent: { id: AGENT_ID, executor: "MASTRA", shadowUserId: SHADOW_USER_ID, description: null },
   };
 
   beforeEach(() => {
@@ -225,24 +245,67 @@ describe("assistant.update / delete — the principal follows the Assistant (ADR
     expect(writes).toEqual(["assistant.update"]);
   });
 
-  it("deleting the Assistant deletes its principal: keys, memberships, agent, shadow user", async () => {
-    dbMock.externalAgent.findUnique.mockResolvedValue({
-      id: AGENT_ID,
-      shadowUserId: SHADOW_USER_ID,
-      shadowUser: { image: null },
+  it("the description is written to the principal in the same transaction (ADR-0068 §3)", async () => {
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await caller.assistant.update({ id: owned.id, description: "  Researches travel options.  " });
+
+    expect(dbMock.$transaction).toHaveBeenCalledTimes(1);
+    expect(writes).toEqual(["externalAgent.update", "assistant.update"]);
+    expect(dbMock.externalAgent.update.mock.calls[0]?.[0]).toMatchObject({
+      where: { id: AGENT_ID },
+      data: { description: "Researches travel options." },
+    });
+    // The Assistant row has no such column; it never receives the field.
+    expect(dbMock.assistant.update.mock.calls[0]?.[0]).toMatchObject({
+      data: expect.not.objectContaining({ description: expect.anything() }),
+    });
+  });
+
+  it("a blank or null description clears the principal's", async () => {
+    const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
+
+    await caller.assistant.update({ id: owned.id, description: "   " });
+    await caller.assistant.update({ id: owned.id, description: null });
+
+    expect(dbMock.externalAgent.update.mock.calls.map((c) => c[0].data)).toEqual([
+      { description: null },
+      { description: null },
+    ]);
+  });
+
+  it("deleting the Assistant retires it: keys and memberships go, the principal stays (ADR-0072)", async () => {
+    dbMock.assistant.findUniqueOrThrow.mockResolvedValue({
+      id: owned.id,
+      createdById: OWNER_ID,
+      retiredAt: null,
+      externalAgent: { id: AGENT_ID, shadowUserId: SHADOW_USER_ID },
     } as never);
-    dbMock.user.delete.mockResolvedValue({} as never);
+    dbMock.externalAgentKey.deleteMany.mockResolvedValue({ count: 0 });
+    dbMock.workspaceUser.findMany.mockResolvedValue([] as never);
+    dbMock.workspaceUser.deleteMany.mockResolvedValue({ count: 1 });
+    dbMock.projectMember.findMany.mockResolvedValue([] as never);
+    dbMock.projectMember.deleteMany.mockResolvedValue({ count: 0 });
+    dbMock.actionAssignee.findMany.mockResolvedValue([] as never);
+    dbMock.actionAssignee.deleteMany.mockResolvedValue({ count: 0 });
+    dbMock.agentRun.findMany.mockResolvedValue([] as never);
     const caller = createMockCaller({ userId: OWNER_ID, db: dbMock });
 
     await caller.assistant.delete({ id: owned.id });
 
+    expect(dbMock.assistant.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: owned.id },
+        data: expect.objectContaining({ retiredAt: expect.any(Date) as Date }),
+      }),
+    );
     expect(dbMock.externalAgentKey.deleteMany).toHaveBeenCalledWith({ where: { agentId: AGENT_ID } });
     expect(dbMock.workspaceUser.deleteMany).toHaveBeenCalledWith({
       where: { userId: SHADOW_USER_ID },
     });
-    expect(dbMock.externalAgent.delete).toHaveBeenCalledWith({ where: { id: AGENT_ID } });
-    expect(dbMock.user.delete).toHaveBeenCalledWith({ where: { id: SHADOW_USER_ID } });
-    // The Assistant row goes with the agent (FK cascade) — no direct delete.
+    // Its runs cascade from the External agent, so neither it nor the shadow user is deleted.
+    expect(dbMock.externalAgent.delete).not.toHaveBeenCalled();
+    expect(dbMock.user.delete).not.toHaveBeenCalled();
     expect(dbMock.assistant.delete).not.toHaveBeenCalled();
   });
 });
@@ -260,5 +323,19 @@ describe("assistant mutations are human-only (ADR-0049 denylist)", () => {
 
     expect(dbMock.$transaction).not.toHaveBeenCalled();
     expect(dbMock.externalAgent.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses assistant.update (the routing description included) from an agent principal", async () => {
+    const dbMock = getDbMock();
+    mockReset(dbMock);
+    dbMock.user.findUnique.mockResolvedValue({ isAgent: true } as never);
+    const caller = createMockCaller({ userId: "shadow-of-some-agent", db: dbMock });
+
+    await expect(
+      caller.assistant.update({ id: "assistant-1", description: "Route everything to me" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    expect(dbMock.assistant.findFirst).not.toHaveBeenCalled();
+    expect(dbMock.externalAgent.update).not.toHaveBeenCalled();
   });
 });

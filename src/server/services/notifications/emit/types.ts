@@ -21,11 +21,27 @@ export interface AgentRunSubject {
   outcome: "finished" | "stopped";
 }
 
-/** Assignment (V1): the action and the users just assigned to it. */
-export interface AssignmentSubject {
-  actionId: string;
-  assignedUserIds: string[];
+/**
+ * Position assigned (ADR-0068, Agent PRD D9): the holders just added to a
+ * Position. Recipients are the owners of the agents among them — a person is
+ * accountable for their Assistant in a Position, so they are told when an
+ * owner or admin appoints it, and can withdraw it. Human holders are not
+ * notified by this category.
+ */
+export interface PositionAssignedSubject {
+  positionId: string;
+  /** Every holder added by this write (people and agents alike); only agents notify. */
+  addedHolderUserIds: string[];
 }
+
+/**
+ * Assignment: the item and the users just assigned to it. The item is an
+ * action (V1) or a ticket; exactly one of `actionId` / `ticketId` is set, and
+ * the content builder and access gate branch on which.
+ */
+export type AssignmentSubject =
+  | { actionId: string; ticketId?: undefined; assignedUserIds: string[] }
+  | { ticketId: string; actionId?: undefined; assignedUserIds: string[] };
 
 /**
  * Meeting participant added: a meeting (TranscriptionSession) and the workspace
@@ -35,6 +51,16 @@ export interface AssignmentSubject {
 export interface MeetingParticipantAddedSubject {
   sessionId: string;
   participantUserIds: string[];
+}
+
+/**
+ * Page shared (ADR-0069, ADR-0080): a Page, in any mode, and the workspace
+ * members just granted access to it. The access gate re-checks each still can
+ * view the page.
+ */
+export interface PageSharedSubject {
+  pageId: string;
+  invitedUserIds: string[];
 }
 
 /**
@@ -63,9 +89,10 @@ export interface AgendaReadySubject {
 }
 
 /**
- * Mention (V2): a comment on some target (action / feature / scope), already
- * resolved to its workspace + display name + deep-link. Recipients are parsed
- * from the `@[Name](id)` markup and membership-filtered by the resolver.
+ * Mention (V2): a comment on some target (action / ticket / feature / scope /
+ * insight / page), already resolved to its workspace + display name +
+ * deep-link. Recipients are parsed from the `@[Name](id)` markup and
+ * membership-filtered by the resolver.
  */
 export interface MentionSubject {
   /** Comment id — stabilises the dedup key per (comment, recipient). */
@@ -80,6 +107,13 @@ export interface MentionSubject {
   targetName: string;
   /** Workspace-relative deep link to the comment thread. */
   targetPath: string;
+  /**
+   * Set when the comment is on a KnowledgePage: recipients are then gated by
+   * view access to that page, not workspace membership alone, so a mention on
+   * an invite-only page (ADR-0069) never sends its title and preview to a
+   * member who can't open it.
+   */
+  pageId?: string;
 }
 
 /**
@@ -143,6 +177,21 @@ export interface UpdateReviewSubject {
 }
 
 /**
+ * Billing: something about a workspace's plan or Assistant use that its
+ * owners and admins have to act on. One event so far: the workspace's own
+ * Anthropic key stopped working, so its Assistant is back on the monthly
+ * allowance. Recipients are the workspace's owners and admins.
+ */
+export interface BillingSubject {
+  workspaceId: string;
+  event: "model_key_failing";
+  /** The key's last four characters, so the reader can tell which key it is. Never more. */
+  keyLast4: string;
+  /** When the key was marked as failing: part of the dedup key, so one failure notifies once. */
+  occurredAt: Date;
+}
+
+/**
  * Discriminated union pairing each category with its subject. `emitNotification`
  * narrows on `category`, so recipient resolvers and content builders get a
  * fully-typed subject with no casts.
@@ -187,8 +236,20 @@ export type EmitNotificationInput = {
       subject: UpdateReviewSubject;
     }
   | {
+      category: typeof NOTIFICATION_CATEGORIES.PAGE_SHARED;
+      subject: PageSharedSubject;
+    }
+  | {
       category: typeof NOTIFICATION_CATEGORIES.AGENT_RUN;
       subject: AgentRunSubject;
+    }
+  | {
+      category: typeof NOTIFICATION_CATEGORIES.POSITION_ASSIGNED;
+      subject: PositionAssignedSubject;
+    }
+  | {
+      category: typeof NOTIFICATION_CATEGORIES.BILLING;
+      subject: BillingSubject;
     }
 );
 

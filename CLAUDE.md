@@ -16,8 +16,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 // Use Tailwind classes
 <div className="bg-background-primary text-text-primary border-border-primary">
 
-// Use CSS variables
-<div style={{ backgroundColor: 'var(--background-primary)' }}>
+// Use CSS variables (the token is --color-bg-primary; --background-primary does not exist)
+<div style={{ backgroundColor: 'var(--color-bg-primary)' }}>
 ```
 
 ### ❌ FORBIDDEN Color Usage:
@@ -28,6 +28,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 
 **Git pre-commit hooks will REJECT your commit if you use hardcoded colors!**
+
+### 🚨 Same rule for SHAPE: no raw radius or shadow values
+
+Radius and shadow come from the shape tokens on `:root` (`--radius-xs|sm|md|lg|xl|2xl|full`,
+`--shadow-sm|md|lg|xl`). `rounded-md`, `radius="md"` and `var(--radius-md)` are the same
+number. `rounded-[10px]`, `radius={12}`, `borderRadius: 8` and `border-radius: 10px` are lint
+errors, and a `var(--x)` that is declared nowhere fails `npm run tokens:check`. A feature
+stylesheet must never declare its own `--radius-*`. See `/dev-docs/styling-architecture.md`,
+"Shape tokens".
+
+**Draw boxes with the primitives, not with classes.** `Panel`, `SectionHeader`, `Pill`,
+`Toolbar` and `EmptyState` from `~/app/_components/ui` own radius, border and surface.
+A `className` that composes `rounded-* border bg-surface-*` by hand is ratcheted by
+`npm run tokens:check` (counts may only go down). See "Primitives" in the styling doc.
 
 ## Development Commands
 
@@ -115,6 +129,7 @@ Uses **Vitest** with a multi-project config (unit + integration). Tests run auto
 - `npm run check` — Lint + typecheck (always run before committing)
 - `npm run test:e2e` — Playwright visual/E2E suite: boots `next dev` on :3100, seeds the disposable `dev-fixture` workspace, mints a session (no OAuth), runs `e2e/*.spec.ts`. For ad-hoc authenticated browsing use `npm run dev:seed-fixture` + `npm run dev:session`. **See `/dev-docs/AGENT_VISUAL_TESTING.md`** — this is how to visually verify UI changes without a login wall.
 - `npm run test:perf` — page-load perf harness (`e2e/perf/`, production build only, one worker): hard load + client nav timings, tRPC waterfalls/payloads, DB query counts per page. Run `next build` first; see the perf section of `/dev-docs/AGENT_VISUAL_TESTING.md`.
+- `npm run dev:agent-token` — prints an agent token for the fixture user, for the Mastra repo's live smoke test (`npm run smoke:live` there: one real, billed agent turn on the capped `ANTHROPIC_API_KEY_DEV`). See "Running a real agent chat locally" in `/dev-docs/AGENT_VISUAL_TESTING.md`.
 
 **Unit tests** (`*.test.ts`) — pure function tests, no DB needed:
 - Access control permissions (`src/server/services/access/__tests__/`)
@@ -205,8 +220,10 @@ HOME=/Users/james/.config/agent-homes/claude exponential actions kanban --json
 # List all projects in the workspace
 HOME=/Users/james/.config/agent-homes/claude exponential projects list --workspace exponential --json
 
-# Check auth status — also the fastest way to confirm which identity you are
-HOME=/Users/james/.config/agent-homes/claude exponential auth status
+# Who am I — prints the account's name and id, and its owner when it is an agent.
+# Run this first on a FORBIDDEN: the account it names is the one James must add
+# to the restricted project (project → Members tab, search by name).
+HOME=/Users/james/.config/agent-homes/claude exponential auth whoami
 ```
 
 The CLI outputs JSON when piped or when `--json` is passed, making it easy to parse programmatically. In a terminal it uses colored pretty output.
@@ -236,6 +253,7 @@ This is a productivity management application built with the T3 Stack (Next.js 1
 - **CRM**: Contact/organization management, deal pipeline (Kanban), Gmail/Calendar import. See `/dev-docs/CRM_ARCHITECTURE.md`
 - **Notifications**: Multi-channel notification system (email, push, WhatsApp). See `/dev-docs/NOTIFICATION_ARCHITECTURE.md`
 - **Agent runs**: assigning an Action to an Assistant starts a hosted run (ADR-0067). See `/dev-docs/AGENT_RUNS.md` before touching `services/agentRuns/`, the `mastra.*` run callbacks, or the Assign modal
+- **Agent quality**: every report of a bad assistant answer follows one pattern (capture, name the cause, one `agent-quality` bug, fix plus a check, verify live). See `/dev-docs/AGENT_QUALITY.md` before working on a chat that went wrong, or changing an agent tool, an agent prompt, or a procedure an agent tool calls
 
 ## Directory Structure
 
@@ -424,6 +442,7 @@ The AI agents for this application live in a separate repository:
 - When adding a new tool, check if a corresponding tRPC endpoint exists here
 - Agent tools often mirror the services layer in `src/server/services/`
 - JWT tokens generated here (see `src/server/api/routers/mastra.ts`) are verified by agents
+- When you change the input of a procedure an agent tool calls, run `npm run contracts:generate` and commit `contracts/agent-procedures.json`. A unit test fails until you do. See [`contracts/README.md`](contracts/README.md)
 
 ## Development Notes
 
@@ -459,6 +478,13 @@ We use a hybrid git flow optimized for a small team (2 developers) that balances
 
 `.github/workflows/pr-agent-automerge.yml` squash-merges a PR into `main` once CI is green
 and PR-Agent left nothing blocking on the latest commit. **Agent sessions do not merge PRs.**
+
+PR-Agent runs review-only: GLM 5.3 through OpenRouter, one call per push. It doesn't
+rewrite descriptions or post code suggestions. What blocks is a review finding tagged
+`[blocker]` or left untagged, or a security concern. Fix those; `[minor]` findings don't
+hold the merge. Every push is reviewed again and paid for, so batch fixes into one push
+rather than pushing each one separately. The model and house rules are in `.pr_agent.toml`;
+PR-Agent reads that file from `main`, so editing it on a branch changes nothing until merged.
 
 - Never pass `--merge` to `/ship-this` or `/ship-ticket`, and never run `gh pr merge`. Open
   the PR, apply PR-Agent's findings, push, and stop at "in review". The gate (or James) merges.
@@ -657,7 +683,7 @@ Copy the prompt content into a new Claude session, then provide your inputs. See
 ## Task Tracking
 
 **Exponential is the single source of truth for work items** (features, bugs, PRDs, tickets) —
-workspace `syntrofi` / product `exponential`, via the `exponential` CLI and the `/to-prd`,
+workspace `exponential` / product `exponential`, via the `exponential` CLI and the `/to-prd`,
 `/to-robo-prd`, `/to-tickets`, `/start-ticket`, `/ship-ticket` skills. Feature work goes
 `/to-prd` → `/to-robo-prd` → `/to-tickets` (one ticket per scope, slices as ordered actions)
 so the backlog stays human-readable; `/to-expo` is manual-only and reserved for loose plans
@@ -668,19 +694,13 @@ outside the feature registry, because it files many thin tickets. See the **Issu
 - **Quick / small / single-step work** (a bugfix, a rename, a one-file change): no tracker needed,
   or an ephemeral `TodoWrite` list. Don't manufacture a ticket for a 5-minute change.
 - **Multi-step or multi-session implementation work**: track it where it belongs in Exponential.
-- **There is no longer a mandate to file everything in `bd` before writing code.**
 
-### Beads (`bd`) — being wound down
+### Beads (`bd`) — retired
 
-beads still holds a historical backlog with live dependency chains (notably the bounty/payment
-epic). It is **not the default tracker anymore** and we are migrating its open issues into
-Exponential. Until that's done:
-
-- It's fine to **read** beads for context: `bd ready`, `bd blocked`, `bd show <id>`,
-  `bd list --status=in_progress`. The `blocked-by` / `blocks` graph is the main thing worth keeping.
-- Don't **create** new beads issues — file new work in Exponential instead.
-- Don't use `bd edit` (it opens `$EDITOR` and blocks agents); use `bd update` if you must edit.
-- `bd` priorities are numeric (0–4 / P0–P4, 0=critical), never "high"/"medium"/"low".
+beads was retired in November 2026. Its still-open issues were triaged and moved into Exponential
+tickets (each body starts "Moved from beads `exponential-xxxx`"); the bounty board / crypto payments
+chain was gathered into one ticket, `micro.grove`, and archived (direction dropped). Don't run `bd` here. To read an old
+issue: `git show 930e7415:.beads/issues.jsonl | grep <id>` (the last `main` commit before removal).
 
 ## Agent skills
 
@@ -688,7 +708,7 @@ Per-repo configuration for Matt Pocock's engineering skills (`/triage`, `/to-prd
 
 ### Issue tracker
 
-Work items (features, PRDs, bugs, tickets) live in **Exponential** under workspace `syntrofi` / product `exponential`. Use the `exponential` CLI. Ephemeral in-session checklists can use `TodoWrite`; there is no separate mandatory tracker. (Legacy `bd`/beads is read-only and being wound down — see the **Task Tracking** section above.) See [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
+Work items (features, PRDs, bugs, tickets) live in **Exponential** under workspace `exponential` / product `exponential`. Use the `exponential` CLI. Ephemeral in-session checklists can use `TodoWrite`; there is no other tracker (beads is retired — see the **Task Tracking** section above). See [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
 
 ### Commenting and @mentions
 

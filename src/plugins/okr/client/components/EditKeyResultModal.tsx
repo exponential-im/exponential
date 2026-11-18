@@ -22,6 +22,7 @@ import { api, type RouterOutputs } from "~/trpc/react";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { reportHandledError } from "~/lib/reportHandledError";
 import { KeyResultGuidanceIcon } from "./KeyResultGuidance";
+import { PersonPicker, type PickerUser } from "~/app/_components/shared/PersonPicker";
 
 // Unit options for key results
 const unitOptions = [
@@ -135,6 +136,9 @@ export function EditKeyResultModal({
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [selectedFeatureIds, setSelectedFeatureIds] = useState<string[]>([]);
   const [driUserId, setDriUserId] = useState<string | null>(null);
+  // The person last picked, for the optimistic paint when they come from the
+  // picker's wider member list (team-derived members) rather than the context.
+  const [pickedDriUser, setPickedDriUser] = useState<PickerUser | null>(null);
   const [objectiveId, setObjectiveId] = useState<string | null>(null);
 
   const utils = api.useUtils();
@@ -245,23 +249,6 @@ export function EditKeyResultModal({
     return byId;
   }, [currentUser, workspace?.members]);
 
-  const driOptions = useMemo(() => {
-    const members = workspace?.members ?? [];
-    const optionMap = new Map<string, { value: string; label: string }>();
-
-    members.forEach((member) => {
-      const label = member.user.name ?? member.user.email ?? "Unknown User";
-      optionMap.set(member.user.id, { value: member.user.id, label });
-    });
-
-    if (currentUser) {
-      const label = currentUser.name ?? currentUser.email ?? "Me";
-      optionMap.set(currentUser.id, { value: currentUser.id, label });
-    }
-
-    return Array.from(optionMap.values());
-  }, [currentUser, workspace?.members]);
-
   const objectiveOptions = useMemo(
     () =>
       availableObjectives.map((goal) => ({
@@ -271,12 +258,6 @@ export function EditKeyResultModal({
     [availableObjectives]
   );
 
-  useEffect(() => {
-    if (driOptions.length === 0) return;
-    if (!driUserId || !driOptions.some((option) => option.value === driUserId)) {
-      setDriUserId(driOptions[0]?.value ?? null);
-    }
-  }, [driOptions, driUserId]);
 
   /**
    * Every OKR query a save can affect, invalidated ONCE after all of the
@@ -350,7 +331,9 @@ export function EditKeyResultModal({
     const nextDriUser =
       nextDriUserId === kr.driUserId
         ? kr.driUser
-        : (driUserById.get(nextDriUserId ?? "") ?? kr.driUser);
+        : (driUserById.get(nextDriUserId ?? "") ??
+          (pickedDriUser?.id === nextDriUserId ? pickedDriUser : null) ??
+          kr.driUser);
 
     return {
       ...kr,
@@ -566,24 +549,16 @@ export function EditKeyResultModal({
 
   const isReview = variant === "review";
 
-  // Token map: in 'review' variant, swap to portfolio-review tokens so the
-  // modal blends with the weekly-plan surface. The `pr-modal-surface`
-  // class (defined in globals.css) re-declares `--pr-*` outside the
-  // surface element so they resolve inside the Mantine Portal.
-  const bgElevated = isReview
-    ? "var(--pr-bg-elevated)"
-    : "var(--color-bg-elevated)";
+  // In the 'review' variant the inputs take the quieter fill and hairline the
+  // weekly-plan surface uses, so the modal blends with it.
+  const bgElevated = "var(--color-bg-elevated)";
   const bgInput = isReview
-    ? "var(--pr-surface-muted)"
+    ? "var(--color-surface-muted)"
     : "var(--color-bg-secondary)";
-  const textPrimary = isReview
-    ? "var(--pr-text-primary)"
-    : "var(--color-text-primary)";
-  const textSecondary = isReview
-    ? "var(--pr-text-secondary)"
-    : "var(--color-text-secondary)";
+  const textPrimary = "var(--color-text-primary)";
+  const textSecondary = "var(--color-text-secondary)";
   const borderPrimary = isReview
-    ? "var(--pr-border-subtle)"
+    ? "var(--color-border-subtle)"
     : "var(--color-border-primary)";
 
   const inputStyles = {
@@ -610,7 +585,6 @@ export function EditKeyResultModal({
       onClose={onClose}
       size="lg"
       radius="md"
-      classNames={isReview ? { content: "pr-modal-surface", header: "pr-modal-surface" } : undefined}
       title={
         <Text fw={600} size="lg">
           {isCreate ? "Create Key Result" : "Edit Key Result"}
@@ -649,15 +623,18 @@ export function EditKeyResultModal({
             styles={inputStyles}
           />
 
-          <Select
+          <PersonPicker
+            trigger="field"
             label="DRI"
-            description="Directly responsible individual"
-            placeholder="Select a DRI"
-            data={driOptions}
+            clearable={false}
+            workspaceId={workspace?.id ?? createWorkspaceId}
             value={driUserId}
-            onChange={(value) => setDriUserId(value ?? null)}
-            required
-            styles={selectStyles}
+            selectedUser={freshKeyResult?.driUser ?? null}
+            onChange={(id, user) => {
+              setDriUserId(id);
+              setPickedDriUser(user);
+            }}
+            fieldProps={{ description: "Directly responsible individual", required: true, styles: inputStyles }}
           />
 
           {!isCreate && (

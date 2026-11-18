@@ -19,17 +19,34 @@ import {
   IconFileText,
   IconChartBar,
   IconGitMerge,
+  IconLink,
+  IconChevronDown,
+  IconChevronRight,
+  IconDots,
+  IconListCheck,
+  IconAdjustmentsHorizontal,
   type Icon,
 } from "@tabler/icons-react";
+import { Menu } from "@mantine/core";
 import { InboxCount } from "./InboxCount";
 import { TodayCount } from "./TodayCount";
+import { useSidebarMode } from "./sidebarMode";
+import { useStoredBoolean } from "~/hooks/useStoredBoolean";
 import { useLocalWikiAvailable } from "~/lib/wiki/useWikiBridge";
 import { WIKI_ROUTE } from "~/lib/wiki/wikiLinks";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { api } from "~/trpc/react";
-import { parseNavLayout, NAV_ITEM_CONFIG } from "~/lib/navLayout";
+import {
+  MENU_PICKER_HREF,
+  NAV_ITEM_CONFIG,
+  SHORTCUTS_SECTION_ID,
+  isCustomNavItem,
+  type NavItem,
+  type NavSection,
+} from "~/lib/navLayout";
+import { useWorkspaceNavLayout } from "~/hooks/useWorkspaceNavLayout";
 
-const ITEM_ICONS: Record<string, Icon> = {
+export const ITEM_ICONS: Record<string, Icon> = {
   goals: IconTarget,
   decisions: IconGavel,
   actions: IconBriefcase,
@@ -55,6 +72,15 @@ interface NavLinkProps {
    * falls back to an exact/prefix match on `href`.
    */
   matchSegments?: string[];
+  /**
+   * Native tooltip. Defaults to the label when it is a string, which is what
+   * the icon-only rail and any truncated row need to stay readable.
+   */
+  title?: string;
+  /** A disclosed child row: smaller, no icon, indented under its parent. */
+  variant?: 'child';
+  /** Match only the exact path, not its sub-routes (for a parent whose children are also listed). */
+  exact?: boolean;
 }
 
 /**
@@ -62,7 +88,7 @@ interface NavLinkProps {
  * current pathname matches `href` (exact or prefix) or, when provided, any of
  * `matchSegments` as a whole route segment after the workspace prefix.
  */
-export function NavLink({ href, icon: Icon, children, count, matchSegments }: NavLinkProps): React.ReactElement {
+export function NavLink({ href, icon: Icon, children, count, matchSegments, title, variant, exact }: NavLinkProps): React.ReactElement {
   const pathname = usePathname();
   const hrefPath = href.split("?")[0] ?? href;
 
@@ -72,17 +98,26 @@ export function NavLink({ href, icon: Icon, children, count, matchSegments }: Na
   const pathnameSegments = pathname.split("/").filter(Boolean);
   const routeSegments =
     pathnameSegments[0] === "w" ? pathnameSegments.slice(2) : pathnameSegments;
-  const isHrefActive = pathname === hrefPath || pathname.startsWith(`${hrefPath}/`);
+  // A custom shortcut to another site opens in a new tab and is never "active".
+  const isExternal = /^https?:\/\//i.test(href);
+  const isHrefActive = !isExternal && (exact
+    ? pathname === hrefPath
+    : pathname === hrefPath || pathname.startsWith(`${hrefPath}/`));
 
   const isActive = matchSegments
     ? isHrefActive || matchSegments.some((segment) => routeSegments.includes(segment))
     : isHrefActive;
 
+  const resolvedTitle = title ?? (typeof children === 'string' ? children : undefined);
+
   return (
     <Link
       href={href}
-      className={`sb-nav-item ${isActive ? 'sb-nav-item--active' : ''}`}
+      className={`sb-nav-item ${variant === 'child' ? 'sb-nav-item--child' : ''} ${isActive ? 'sb-nav-item--active' : ''}`}
       aria-current={isActive ? 'page' : undefined}
+      title={resolvedTitle}
+      target={isExternal ? '_blank' : undefined}
+      rel={isExternal ? 'noopener noreferrer' : undefined}
     >
       {Icon && (
         <span className="sb-nav-item__icon">
@@ -95,38 +130,268 @@ export function NavLink({ href, icon: Icon, children, count, matchSegments }: Na
   );
 }
 
-function SectionLabel({ children }: { children: React.ReactNode }) {
+/** A section heading that cannot fold (Favourites, Recents). */
+export function SectionLabel({ children }: { children: React.ReactNode }) {
   return <div className="sb-section-label">{children}</div>;
 }
 
-function SectionDivider() {
-  return <div className="sb-divider" />;
+/**
+ * A nav row that discloses a few of its entities underneath — the active
+ * projects under Projects, the active goals under Goals — so the most-used
+ * destinations are one click away without the sidebar becoming a tree.
+ * Folded by default; the fold is remembered per device, and the children
+ * are only fetched while it is open.
+ */
+function DisclosableNavLink({
+  itemId,
+  href,
+  icon,
+  label,
+  matchSegments,
+  workspaceId,
+  workspaceSlug,
+}: {
+  itemId: 'projects' | 'goals';
+  href: string;
+  icon?: Icon;
+  label: string;
+  matchSegments?: string[];
+  workspaceId: string;
+  workspaceSlug: string;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useStoredBoolean(`sb-disclose:${itemId}`, false);
+  const mode = useSidebarMode();
+  const isOpen = expanded && mode === 'full';
+
+  const projects = api.project.navChildren.useQuery(
+    { workspaceId },
+    { enabled: isOpen && itemId === 'projects', staleTime: 60 * 1000 },
+  );
+  const goals = api.goal.navChildren.useQuery(
+    { workspaceId },
+    { enabled: isOpen && itemId === 'goals', staleTime: 60 * 1000 },
+  );
+
+  const children: Array<{ key: string; href: string; title: string }> =
+    itemId === 'projects'
+      ? (projects.data ?? []).map((p) => ({
+          key: p.id,
+          href: `/w/${workspaceSlug}/projects/${p.slug}`,
+          title: p.name,
+        }))
+      : (goals.data ?? []).map((g) => ({
+          key: String(g.id),
+          href: `/w/${workspaceSlug}/goals/${g.id}`,
+          title: g.title,
+        }));
+  const isLoading = itemId === 'projects' ? projects.isLoading : goals.isLoading;
+  const childrenId = `sb-children-${itemId}`;
+
+  return (
+    <div className="sb-nav-row sb-nav-row--disclosable">
+      <NavLink href={href} icon={icon} matchSegments={matchSegments}>
+        {label}
+      </NavLink>
+      <button
+        type="button"
+        className="sb-row-action sb-row-action--disclose"
+        aria-expanded={isOpen}
+        aria-controls={childrenId}
+        aria-label={`${isOpen ? 'Hide' : 'Show'} active ${label.toLowerCase()}`}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <IconChevronRight size={12} />
+      </button>
+      {isOpen && (
+        <div id={childrenId} className="sb-nav-children">
+          {isLoading && <span className="sb-nav-item sb-nav-item--child sb-nav-item--muted">Loading…</span>}
+          {!isLoading && children.length === 0 && (
+            <span className="sb-nav-item sb-nav-item--child sb-nav-item--muted">
+              No active {label.toLowerCase()}
+            </span>
+          )}
+          {children.map((child) => (
+            <NavLink key={child.key} href={child.href} variant="child">
+              {child.title}
+            </NavLink>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
- * Renders the workspace sidebar navigation from the user's persisted
- * `navLayout` preference: global items (Inbox/Today/Time) followed by the
- * configurable sections/items, with plugin gating and a reduced guest view.
+ * One configurable section: a heading that folds the items under it, the
+ * fold persisted on the user's nav layout so it follows them between
+ * devices. A section with a single item shows no heading at all — the
+ * label would cost more than it tells. The rail ignores folds and headings
+ * and shows every icon. The pinned shortcuts section never shows a heading:
+ * its rows sit directly under the global ones, as in Notion.
  */
-export function NavLinks(): React.ReactElement {
-  const { workspaceSlug, workspaceId, userRole } = useWorkspace();
-  const isGuest = userRole === 'guest';
-  const localWikiAvailable = useLocalWikiAvailable();
-
-  const { data: preferences } = api.navigationPreference.getPreferences.useQuery(
-    undefined,
-    { staleTime: 30 * 1000 },
-  );
-  const { data: enabledPlugins } = api.pluginConfig.getEnabled.useQuery(
-    { workspaceId: workspaceId ?? undefined },
-    { enabled: !!workspaceId && !isGuest, staleTime: 5 * 60 * 1000 },
-  );
-
-  const layout = parseNavLayout(preferences?.navLayout ?? null);
+function NavSectionBlock({
+  section,
+  items,
+  onToggleCollapsed,
+  workspaceId,
+  workspaceSlug,
+}: {
+  section: NavSection;
+  items: NavItem[];
+  onToggleCollapsed: (sectionId: string) => void;
+  workspaceId: string;
+  workspaceSlug: string;
+}): React.ReactElement {
+  const mode = useSidebarMode();
+  const foldable = mode === 'full' && items.length > 1 && section.id !== SHORTCUTS_SECTION_ID;
+  const showHeading = foldable;
+  const collapsed = foldable && (section.collapsed ?? false);
+  const itemsId = `sb-section-${section.id}`;
 
   return (
-    <>
-      {/* Global items - always visible */}
+    <div className="sb-section">
+      {showHeading && (
+        <button
+          type="button"
+          className="sb-section-header"
+          aria-expanded={!collapsed}
+          aria-controls={itemsId}
+          onClick={() => onToggleCollapsed(section.id)}
+        >
+          <span className="sb-section-header__label">{section.name}</span>
+          <span className="sb-section-header__chevron" aria-hidden="true">
+            <IconChevronDown size={12} />
+          </span>
+        </button>
+      )}
+      {!collapsed && (
+        <div id={itemsId} className="sb-group">
+          {items.map((item) => {
+            if (isCustomNavItem(item)) {
+              return (
+                <NavLink key={item.id} href={item.href} icon={IconLink}>
+                  {item.label ?? item.href}
+                </NavLink>
+              );
+            }
+            const itemId = item.id;
+            const config = NAV_ITEM_CONFIG[itemId];
+            if (!config) return null;
+            const Icon = ITEM_ICONS[itemId];
+            if (itemId === 'projects' || itemId === 'goals') {
+              return (
+                <DisclosableNavLink
+                  key={itemId}
+                  itemId={itemId}
+                  href={config.href(workspaceSlug)}
+                  icon={Icon}
+                  label={config.label}
+                  matchSegments={config.matchSegments}
+                  workspaceId={workspaceId}
+                  workspaceSlug={workspaceSlug}
+                />
+              );
+            }
+            return (
+              <NavLink
+                key={itemId}
+                href={config.href(workspaceSlug)}
+                icon={Icon}
+                matchSegments={config.matchSegments}
+              >
+                {config.label}
+              </NavLink>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The last row of the workspace nav: "More". The default sidebar is short on
+ * purpose, so this is the standing answer to "where did that page go?" and
+ * "how do I change this?". It lists the built-in pages that are not in the
+ * person's menu (each a link, so a hidden page is still one click away),
+ * then the menu picker and, where the sidebar can be rearranged, the
+ * customiser. That last entry matters beyond convenience: the customiser was
+ * otherwise reachable only by right-click, which a touch screen does not have
+ * and a keyboard user would not think to try.
+ */
+function MoreNavMenu({
+  hiddenItemIds,
+  workspaceSlug,
+  onCustomize,
+}: {
+  hiddenItemIds: string[];
+  workspaceSlug: string;
+  onCustomize?: () => void;
+}): React.ReactElement {
+  return (
+    <div className="sb-section">
+      <div className="sb-group">
+        <Menu shadow="md" width={250} position="top-start" withinPortal>
+          <Menu.Target>
+            <button
+              type="button"
+              className="sb-nav-item sb-nav-item--button"
+              title="Pages not in your menu, and menu settings"
+            >
+              <span className="sb-nav-item__icon">
+                <IconDots size={16} />
+              </span>
+              <span className="sb-nav-item__label">More</span>
+            </button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            {hiddenItemIds.length > 0 && <Menu.Label>Not in your menu</Menu.Label>}
+            {hiddenItemIds.map((id) => {
+              const config = NAV_ITEM_CONFIG[id];
+              if (!config) return null;
+              const Glyph = ITEM_ICONS[id] ?? IconLink;
+              return (
+                <Menu.Item
+                  key={id}
+                  component={Link}
+                  href={config.href(workspaceSlug)}
+                  leftSection={<Glyph size={16} />}
+                >
+                  {config.label}
+                </Menu.Item>
+              );
+            })}
+            {hiddenItemIds.length > 0 && <Menu.Divider />}
+            <Menu.Item
+              component={Link}
+              href={MENU_PICKER_HREF}
+              leftSection={<IconListCheck size={16} />}
+            >
+              Choose what&apos;s in my menu
+            </Menu.Item>
+            {onCustomize && (
+              <Menu.Item
+                leftSection={<IconAdjustmentsHorizontal size={16} />}
+                onClick={onCustomize}
+              >
+                Rearrange my menu
+              </Menu.Item>
+            )}
+          </Menu.Dropdown>
+        </Menu>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The global rows every signed-in person gets: Inbox, Today, Time, and the
+ * local wiki in the desktop shell.
+ */
+export function GlobalNavLinks(): React.ReactElement {
+  const localWikiAvailable = useLocalWikiAvailable();
+  return (
+    <div className="sb-group">
       <NavLink href="/inbox" icon={IconInbox} count={<InboxCount />}>
         Inbox
       </NavLink>
@@ -143,56 +408,103 @@ export function NavLinks(): React.ReactElement {
           Local wiki
         </NavLink>
       )}
+    </div>
+  );
+}
 
-      {workspaceSlug && !isGuest && (
-        <>
-          {layout.map((section) => {
-            if (section.hidden) return null;
+/**
+ * Renders the workspace sidebar navigation from the layout in effect for the
+ * current workspace (see {@link useWorkspaceNavLayout}): pinned shortcuts,
+ * then the configurable sections/items, with plugin gating and a reduced
+ * guest view. The global rows (Inbox/Today/Time) are {@link GlobalNavLinks},
+ * so the shell can place Favourites and Recents between the two. Ends with
+ * the "More" row; `onCustomize`, when the shell can open the customiser, adds
+ * that entry to it.
+ */
+export function NavLinks({ onCustomize }: { onCustomize?: () => void } = {}): React.ReactElement {
+  const { workspaceSlug, workspaceId, userRole } = useWorkspace();
+  const isGuest = userRole === 'guest';
 
-            const visibleItems = section.items.filter((item) => {
-              if (item.hidden) return false;
-              const config = NAV_ITEM_CONFIG[item.id];
-              if (!config) return false;
-              if (config.requiresPlugin && !enabledPlugins?.includes(config.requiresPlugin)) return false;
-              return true;
-            });
+  const { data: enabledPlugins } = api.pluginConfig.getEnabled.useQuery(
+    { workspaceId: workspaceId ?? undefined },
+    { enabled: !!workspaceId && !isGuest, staleTime: 5 * 60 * 1000 },
+  );
 
-            if (visibleItems.length === 0) return null;
+  // Folding a section writes the whole layout back through the per-workspace
+  // saver, so a fold made in one workspace stays there. The saver updates the
+  // cache first (the fold is instant) and refuses to write while the layout
+  // is still loading, when it would only be the defaults and would erase the
+  // user's renames, order and hidden items.
+  const { layout, saveLayout } = useWorkspaceNavLayout(workspaceId);
+  const toggleCollapsed = (sectionId: string) => {
+    saveLayout(
+      layout.map((s) =>
+        s.id === sectionId ? { ...s, collapsed: !(s.collapsed ?? false) } : s,
+      ),
+    );
+  };
 
-            return (
-              <div key={section.id}>
-                <SectionDivider />
-                <SectionLabel>{section.name}</SectionLabel>
-                {visibleItems.map((item) => {
-                  const config = NAV_ITEM_CONFIG[item.id];
-                  if (!config) return null;
-                  const Icon = ITEM_ICONS[item.id];
-                  return (
-                    <NavLink
-                      key={item.id}
-                      href={config.href(workspaceSlug)}
-                      icon={Icon}
-                      matchSegments={config.matchSegments}
-                    >
-                      {config.label}
-                    </NavLink>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </>
-      )}
+  if (!workspaceSlug) return <></>;
 
-      {/* Guest: only projects */}
-      {workspaceSlug && isGuest && (
-        <>
-          <SectionDivider />
+  // Guest: only projects
+  if (isGuest) {
+    return (
+      <div className="sb-section">
+        <div className="sb-group">
           <NavLink href={`/w/${workspaceSlug}/projects`} icon={IconStack2}>
             Projects
           </NavLink>
-        </>
-      )}
+        </div>
+      </div>
+    );
+  }
+
+  // Built-in pages this workspace offers that the menu does not show: hidden
+  // themselves, or sitting in a hidden section.
+  const hiddenItemIds = layout.flatMap((section) =>
+    section.items
+      .filter((item) => {
+        if (isCustomNavItem(item)) return false;
+        if (!section.hidden && !item.hidden) return false;
+        const config = NAV_ITEM_CONFIG[item.id];
+        if (!config) return false;
+        return !config.requiresPlugin || (enabledPlugins?.includes(config.requiresPlugin) ?? false);
+      })
+      .map((item) => item.id),
+  );
+
+  return (
+    <>
+      {layout.map((section) => {
+        if (section.hidden) return null;
+
+        const visibleItems = section.items.filter((item) => {
+          if (item.hidden) return false;
+          if (isCustomNavItem(item)) return true;
+          const config = NAV_ITEM_CONFIG[item.id];
+          if (!config) return false;
+          if (config.requiresPlugin && !enabledPlugins?.includes(config.requiresPlugin)) return false;
+          return true;
+        });
+
+        if (visibleItems.length === 0) return null;
+
+        return (
+          <NavSectionBlock
+            key={section.id}
+            section={section}
+            items={visibleItems}
+            onToggleCollapsed={toggleCollapsed}
+            workspaceId={workspaceId ?? ''}
+            workspaceSlug={workspaceSlug}
+          />
+        );
+      })}
+      <MoreNavMenu
+        hiddenItemIds={hiddenItemIds}
+        workspaceSlug={workspaceSlug}
+        onCustomize={onCustomize}
+      />
     </>
   );
 }

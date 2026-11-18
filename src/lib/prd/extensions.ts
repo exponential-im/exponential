@@ -1,5 +1,6 @@
 import type { AnyExtension, Extensions } from "@tiptap/core";
 import StarterKit from "@tiptap/starter-kit";
+import CodeBlock from "@tiptap/extension-code-block";
 import Link from "@tiptap/extension-link";
 import Placeholder from "@tiptap/extension-placeholder";
 import TaskList from "@tiptap/extension-task-list";
@@ -10,9 +11,12 @@ import TableRow from "@tiptap/extension-table-row";
 import TableHeader from "@tiptap/extension-table-header";
 import TableCell from "@tiptap/extension-table-cell";
 import { Markdown } from "tiptap-markdown";
+import { MarkdownHighlight, MarkdownUnderline } from "./marks";
 import { CommentMark } from "./comment-mark";
 import { PlainTextClipboard } from "./plain-text-clipboard";
 import { PageLink } from "./page-link";
+import { DatabaseNode } from "./database-node";
+import { YouTubeNode } from "./youtube-node";
 
 /**
  * The schema for the **PRD body** — the single scoped exception to ADR-0017
@@ -29,9 +33,12 @@ import { PageLink } from "./page-link";
  * projection.
  *
  * Capability is deliberately "Tier B / Linear-grade": headings, lists, task
- * lists, code blocks, tables, links, inline marks, and anchored comment marks.
+ * lists, code blocks, tables, links, YouTube embeds, inline marks, and anchored
+ * comment marks.
  * Every node/mark here is serialisable by tiptap-markdown except
  * {@link CommentMark}, which intentionally drops from the Markdown projection.
+ * Underline and highlight have no Markdown syntax and project as `<u>`/`<mark>`;
+ * see ./marks for why that is declared rather than left to the HTML fallback.
  */
 export const PRD_DEFAULT_PLACEHOLDER =
   "Write the PRD… select text to format or comment, or type / for blocks.";
@@ -46,23 +53,45 @@ export function buildPrdExtensions(
      * the plain base node.
      */
     pageLink?: AnyExtension;
+    /**
+     * Override for the code block — the interactive editor passes
+     * `CodeBlockWithView` (same schema + a node view that draws ```mermaid
+     * blocks as diagrams); the codec and the public render use the base node.
+     */
+    codeBlock?: AnyExtension;
+    /**
+     * Override for the {@link DatabaseNode} block (ADR-0078) — the page
+     * editor passes `DatabaseWithView` (same schema + the table node view).
+     * The node is in every host's schema because the set is shared, but only
+     * a Page can hold a database (`database.create` needs a holding page),
+     * so Feature, Ticket and Insight bodies never contain one.
+     */
+    database?: AnyExtension;
   } = {},
 ): Extensions {
   return [
     StarterKit.configure({
-      // StarterKit ships a basic codeBlock; keep it (tiptap-markdown serialises
-      // it). Everything else in StarterKit is used as-is.
+      // The code block is added separately below so the editor can swap in its
+      // node view; it is StarterKit's own extension, so the schema and the
+      // tiptap-markdown serialisation are unchanged. Everything else in
+      // StarterKit is used as-is.
+      codeBlock: false,
     }),
+    options.codeBlock ?? CodeBlock,
     Link.configure({
       openOnClick: true,
       autolink: true,
       HTMLAttributes: {
-        class: "text-brand-primary underline cursor-pointer",
+        class: "text-link underline cursor-pointer",
         rel: "noopener noreferrer nofollow",
       },
     }),
     TaskList,
     TaskItem.configure({ nested: true }),
+    // Strike is already in StarterKit and native to Markdown (`~~`); these two
+    // are the marks Markdown has no syntax for. See ./marks.
+    MarkdownUnderline,
+    MarkdownHighlight,
     Image.configure({
       inline: false,
       allowBase64: false,
@@ -80,6 +109,9 @@ export function buildPrdExtensions(
     TableCell,
     CommentMark,
     options.pageLink ?? PageLink,
+    options.database ?? DatabaseNode,
+    // YouTube embeds: a bare watch URL on its own line in Markdown.
+    YouTubeNode,
     PlainTextClipboard,
     Placeholder.configure({
       placeholder: options.placeholder ?? PRD_DEFAULT_PLACEHOLDER,

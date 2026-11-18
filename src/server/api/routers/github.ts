@@ -3,6 +3,7 @@ import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/
 import * as githubService from "~/server/services/githubService";
 import { TRPCError } from "@trpc/server";
 import {
+  assertWorkspaceRole,
   getWorkspaceMembership,
   hasMinimumWorkspaceRole,
   requireWorkspaceMembership,
@@ -16,6 +17,8 @@ import {
 import { normalizeAccessibleRepos } from "~/server/services/github/accessibleRepos";
 import { reconcileWorkspaceRepositories } from "~/server/services/github/reconcileRepositories";
 import { githubIntegrationService } from "~/server/services/github-integration";
+import { setWorkspaceGithubLogin } from "~/server/services/github/memberLogins";
+import { readPublicRepo } from "~/server/services/github/publicRepoRead";
 
 export const githubRouter = createTRPCRouter({
   listCommits: publicProcedure
@@ -23,29 +26,25 @@ export const githubRouter = createTRPCRouter({
       z.object({
         page: z.number().min(1).default(1),
         perPage: z.number().min(1).max(100).default(100),
-        owner: z.string().default("positonic"),
+        owner: z.string().default("exponential-im"),
         repo: z.string().default("exponential"),
         branch: z.string().default("main"),
       }).optional(),
     )
     .query(async ({ input }) => {
-      const owner = input?.owner ?? "positonic";
+      const owner = input?.owner ?? "exponential-im";
       const repo = input?.repo ?? "exponential";
       const branch = input?.branch;
       const page = input?.page;
       const perPage = input?.perPage;
-      const octokit = githubService.initGithubClient(
-        process.env.GITHUB_TOKEN ?? "",
-      );
-      return githubService.listCommits(
-        octokit,
-        owner,
-        repo,
-        {
-          branch,
-          page,
-          perPage,
-        },
+      return readPublicRepo(
+        (octokit) =>
+          githubService.listCommits(octokit, owner, repo, {
+            branch,
+            page,
+            perPage,
+          }),
+        { token: process.env.GITHUB_TOKEN },
       );
     }),
 
@@ -54,20 +53,21 @@ export const githubRouter = createTRPCRouter({
       z.object({
         page: z.number().min(1).default(1),
         perPage: z.number().min(1).max(100).default(30),
-        owner: z.string().default("positonic"),
+        owner: z.string().default("exponential-im"),
         repo: z.string().default("exponential"),
       }).optional(),
     )
     .query(async ({ input }) => {
-      const owner = input?.owner ?? "positonic";
+      const owner = input?.owner ?? "exponential-im";
       const repo = input?.repo ?? "exponential";
-      const octokit = githubService.initGithubClient(
-        process.env.GITHUB_TOKEN ?? "",
+      return readPublicRepo(
+        (octokit) =>
+          githubService.listReleases(octokit, owner, repo, {
+            page: input?.page,
+            perPage: input?.perPage,
+          }),
+        { token: process.env.GITHUB_TOKEN },
       );
-      return githubService.listReleases(octokit, owner, repo, {
-        page: input?.page,
-        perPage: input?.perPage,
-      });
     }),
 
   createIssue: protectedProcedure
@@ -303,6 +303,41 @@ export const githubRouter = createTRPCRouter({
     }),
 
   /**
+   * Set (or, with `login: null`, clear) the GitHub username a workspace
+   * attributes a member's PRs and commits to, for members who haven't
+   * connected GitHub themselves. Workspace-scoped and unverified, so
+   * **owner/admin only**, and only for current members. See `memberLogins`.
+   */
+  setMemberGithubLogin: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string().min(1),
+        userId: z.string().min(1),
+        login: z.string().trim().min(1).max(200).nullable(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      await assertWorkspaceRole(ctx.db, ctx.session.user.id, input.workspaceId, [
+        "owner",
+        "admin",
+      ]);
+      const target = await getWorkspaceMembership(
+        ctx.db,
+        input.userId,
+        input.workspaceId,
+      );
+      if (!target) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "That person isn't a member of this workspace",
+        });
+      }
+
+      await setWorkspaceGithubLogin(ctx.db, input);
+      return { ok: true };
+    }),
+
+  /**
    * Set which repos a workspace tracks (ADR-0020, slice #3, L3). Reconciles
    * `WorkspaceRepository` rows against the desired selection idempotently —
    * re-saving the same set is a no-op. **Owner/admin only**, enforced via the
@@ -439,7 +474,7 @@ export const githubRouter = createTRPCRouter({
 //       });
 
 //       try {
-//         const repoOwner = "positonic";
+//         const repoOwner = "exponential-im";
 //         const repoName = "ai-todo";
         
 //         // First check if we can access the repo

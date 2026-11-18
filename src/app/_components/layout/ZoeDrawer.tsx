@@ -22,6 +22,8 @@ import {
   type DrawerSize,
 } from "~/providers/AgentModalProvider";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { useAiCapabilities } from "~/providers/AiCapabilitiesProvider";
+import { AiNotConfiguredNote } from "~/app/_components/ai/AiNotConfiguredNote";
 import {
   LOCAL_WIKI_AGENT_ID,
   LOCAL_WIKI_AGENT_NAME,
@@ -29,6 +31,7 @@ import {
 } from "~/lib/localWiki";
 import { api } from "~/trpc/react";
 import { reportHandledError } from "~/lib/reportHandledError";
+import { resolveChatWorkspaceId } from "~/lib/chat/chatWorkspace";
 import classes from "./ZoeDrawer.module.css";
 import type ManyChatDefault from "../ManyChat";
 
@@ -63,7 +66,7 @@ function getInitials(name: string): string {
   return name.split(" ").map((n) => n[0]).join("").toUpperCase();
 }
 
-export function ZoeDrawer() {
+function ZoeChatDrawer() {
   const {
     isOpen,
     openModal,
@@ -85,7 +88,16 @@ export function ZoeDrawer() {
   } = useAgentModal();
   const { workspace, workspaceId: urlWorkspaceId } = useWorkspace();
 
-  const effectiveWorkspaceId = overrideWorkspaceId ?? urlWorkspaceId;
+  // The person's own pick, then the workspace the page on screen belongs to,
+  // then the provider's (the URL's, or on a slug-less route like
+  // /recording/<id> only the default workspace). Resolved here, not just in
+  // ManyChat: this value is passed down as a prop, where it would outrank the
+  // page, and it also drives the switcher label and the project list.
+  const effectiveWorkspaceId = resolveChatWorkspaceId({
+    explicit: overrideWorkspaceId,
+    pageContext,
+    provider: urlWorkspaceId,
+  });
 
   const [defaultAgent, setDefaultAgent] = useState<{ id: string; name: string } | null>(null);
 
@@ -166,10 +178,12 @@ export function ZoeDrawer() {
     { workspaceId: effectiveWorkspaceId ?? undefined },
     { enabled: !!effectiveWorkspaceId && isOpen },
   );
-  const { data: customAssistant } = api.assistant.getDefault.useQuery(
-    { workspaceId: effectiveWorkspaceId ?? "" },
-    { enabled: !!effectiveWorkspaceId && isOpen },
-  );
+  // One Assistant per person (ADR-0072): the same one in every workspace, so
+  // no workspace gate — a workspace without one no longer falls back to an
+  // unnamed agent.
+  const { data: customAssistant } = api.assistant.getMine.useQuery(undefined, {
+    enabled: isOpen,
+  });
   const { data: agents } = api.mastra.getMastraAgents.useQuery(undefined, {
     enabled: isOpen,
     staleTime: 10 * 60 * 1000,
@@ -267,6 +281,7 @@ export function ZoeDrawer() {
         maximised && classes.isMax,
       )}
       data-size={drawerSize}
+      data-print="hide"
       role="dialog"
       aria-label="Zoe assistant"
       aria-hidden={!isOpen}
@@ -544,7 +559,65 @@ function SparkMark() {
   );
 }
 
+/**
+ * The Assistant drawer. With no Assistant on this install (no Mastra), opening
+ * it — from ⌘J, the command palette or a home-page prompt — shows how to turn
+ * the Assistant on instead of a chat that can only fail.
+ */
+export function ZoeDrawer() {
+  const { assistant } = useAiCapabilities();
+  return assistant ? <ZoeChatDrawer /> : <AssistantOffDrawer />;
+}
+
+function AssistantOffDrawer() {
+  const { isOpen, closeModal } = useAgentModal();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeModal();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [isOpen, closeModal]);
+
+  return (
+    <div
+      className={clsx(classes.zoeRoot, isOpen && classes.isOpen)}
+      data-size="s"
+      role="dialog"
+      aria-label="Assistant"
+      aria-hidden={!isOpen}
+    >
+      <div className={classes.zoeBackdrop} onClick={closeModal} />
+      <div className={classes.zoeDrawer}>
+        <div className={classes.zoeHead}>
+          <span className={classes.zoeHeadIdentity}>
+            <span className={classes.zoeHeadAvatar}>
+              <IconSparkles size={13} />
+            </span>
+            <span className={classes.zoeHeadTitle}>Assistant</span>
+          </span>
+          <div className={classes.zoeHeadSpacer} />
+          <button type="button" className={classes.zoeIconBtn} onClick={closeModal} aria-label="Close">
+            <IconX size={14} />
+          </button>
+        </div>
+        <div className="p-4">
+          <AiNotConfiguredNote requirement="assistant" feature="The Assistant" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function ZoeFab() {
+  const { assistant } = useAiCapabilities();
+  if (!assistant) return null;
+  return <ZoeFabButton />;
+}
+
+function ZoeFabButton() {
   const { isOpen, openModal, closeModal, pendingNotification, openModalWithNotification } =
     useAgentModal();
 
@@ -562,6 +635,7 @@ export function ZoeFab() {
     <button
       type="button"
       className={classes.zoeFab}
+      data-print="hide"
       onClick={handleClick}
       title="Ask Zoe · ⌘J"
       aria-label={isOpen ? "Close Zoe" : "Open Zoe"}

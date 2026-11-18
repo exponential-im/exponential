@@ -223,7 +223,8 @@ describe("ticket router", () => {
       ).rejects.toThrow(/cycle/i);
     });
 
-    it("rejects dependencies across different products", async () => {
+    // ADR-0002: Workspace, not Product, bounds a dependency.
+    it("links tickets across products in the same workspace", async () => {
       const user = await createUser(db);
       const ws = await createWorkspace(db, { ownerId: user.id });
       const p1 = await createProduct(db, { workspaceId: ws.id, createdById: user.id });
@@ -232,9 +233,25 @@ describe("ticket router", () => {
       const b = await createTicket(db, { productId: p2.id, createdById: user.id });
 
       const caller = createTestCaller(user.id);
+      await caller.product.ticket.addDependency({ ticketId: a.id, dependsOnId: b.id });
+
+      const detail = await caller.product.ticket.getById({ id: a.id });
+      expect(detail.dependsOn.map((t) => t.id)).toEqual([b.id]);
+    });
+
+    it("rejects dependencies across workspaces", async () => {
+      const user = await createUser(db);
+      const ws1 = await createWorkspace(db, { ownerId: user.id });
+      const ws2 = await createWorkspace(db, { ownerId: user.id });
+      const p1 = await createProduct(db, { workspaceId: ws1.id, createdById: user.id });
+      const p2 = await createProduct(db, { workspaceId: ws2.id, createdById: user.id });
+      const a = await createTicket(db, { productId: p1.id, createdById: user.id });
+      const b = await createTicket(db, { productId: p2.id, createdById: user.id });
+
+      const caller = createTestCaller(user.id);
       await expect(
         caller.product.ticket.addDependency({ ticketId: a.id, dependsOnId: b.id }),
-      ).rejects.toThrow(/same product/i);
+      ).rejects.toThrow(/same workspace/i);
     });
 
     it("list derives isBlocked and openBlockerCount", async () => {
@@ -308,6 +325,37 @@ describe("ticket router", () => {
           title: "No access",
         }),
       ).rejects.toThrow(TRPCError);
+    });
+  });
+
+  describe("initBodyDoc", () => {
+    it("migrates the body without bumping updatedAt", async () => {
+      const user = await createUser(db);
+      const ws = await createWorkspace(db, { ownerId: user.id });
+      const product = await createProduct(db, {
+        workspaceId: ws.id,
+        createdById: user.id,
+      });
+      const ticket = await createTicket(db, {
+        productId: product.id,
+        createdById: user.id,
+      });
+      // Age the row so a bump to "now" cannot pass unnoticed.
+      const lastEdited = new Date("2026-01-01T00:00:00Z");
+      await db.ticket.update({
+        where: { id: ticket.id },
+        data: { updatedAt: lastEdited },
+      });
+
+      const caller = createTestCaller(user.id);
+      const doc = { type: "doc", content: [{ type: "paragraph" }] };
+      await expect(
+        caller.product.ticket.initBodyDoc({ id: ticket.id, doc }),
+      ).resolves.toEqual({ migrated: true });
+
+      const row = await db.ticket.findUniqueOrThrow({ where: { id: ticket.id } });
+      expect(row.bodyDoc).toEqual(doc);
+      expect(row.updatedAt).toEqual(lastEdited);
     });
   });
 });

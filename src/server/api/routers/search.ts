@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import {
   buildActionAccessWhere,
@@ -12,7 +12,11 @@ import {
   isWorkspaceGuest,
 } from "~/server/services/access";
 import { stripHtml } from "~/lib/utils";
-import { shortIdSearchWhere, ticketUrlId } from "~/lib/fun-ids";
+import { ticketUrlId } from "~/lib/fun-ids";
+import { searchTicketsIdFirst } from "~/plugins/product/server/services/ticketTextSearch";
+import { getKnowledgeService } from "~/server/services/KnowledgeService";
+import { resolvePrincipal } from "~/server/services/access/principal";
+import { isAiConfigured } from "~/server/services/ai/requireAi";
 
 /**
  * Global search — the server-side equivalent of the Cmd+K palette
@@ -232,36 +236,41 @@ async function searchKeyResults({ db, userId, q, workspaceId, limit }: SearchArg
 }
 
 // Mirrors ticket.list's assertWorkspaceAccess gate (direct or team-based
-// workspace membership via the ticket's product; guests denied).
+// workspace membership via the ticket's product; guests denied). A query that
+// names a ticket (`snappy.thunder`, `42`, `#42`, `EXP-42`) puts that ticket
+// first; see searchTicketsIdFirst.
 async function searchTickets({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
-  const tickets = await db.ticket.findMany({
-    where: {
-      product: {
-        ...(workspaceId ? { workspaceId } : {}),
-        workspace: { is: buildWorkspaceAccessWhere(userId) },
-      },
-      OR: [
-        { title: insensitive(q) },
-        // Fun shortIds match word-order-insensitively ("toucan.prime" finds
-        // prime.toucan).
-        ...shortIdSearchWhere(q),
-        // An all-digits query also matches the ticket's sequential number.
-        ...(/^\d+$/.test(q) && parseInt(q, 10) > 0
-          ? [{ number: parseInt(q, 10) }]
-          : []),
-      ],
+  const accessWhere: Prisma.TicketWhereInput = {
+    product: {
+      ...(workspaceId ? { workspaceId } : {}),
+      workspace: { is: buildWorkspaceAccessWhere(userId) },
     },
-    select: {
-      id: true,
-      title: true,
-      number: true,
-      shortId: true,
-      status: true,
-      product: {
-        select: { slug: true, workspace: { select: { id: true, slug: true, name: true } } },
-      },
-    },
-    take: limit,
+  };
+  const tickets = await searchTicketsIdFirst({
+    query: q,
+    limit,
+    find: (match, take, skip = 0) =>
+      db.ticket.findMany({
+        where: { AND: [accessWhere, match] },
+        select: {
+          id: true,
+          title: true,
+          number: true,
+          shortId: true,
+          status: true,
+          product: {
+            select: {
+              slug: true,
+              name: true,
+              workspace: { select: { id: true, slug: true, name: true } },
+            },
+          },
+        },
+        orderBy: { updatedAt: "desc" },
+        take,
+        ...(skip > 0 ? { skip } : {}),
+      }),
+    productName: (t) => t.product.name,
   });
   return tickets.map((t) => ({
     type: "ticket",
@@ -469,6 +478,56 @@ async function searchProducts({ db, userId, q, workspaceId, limit }: SearchArgs)
   }));
 }
 
+/** One Knowledge Base hit: the best-matching chunk of one indexed source. */
+export interface KnowledgeSearchResult {
+  sourceType: "transcription" | "resource" | "document" | "page";
+  sourceId: string;
+  title: string;
+  /** The matching chunk, whitespace-collapsed and cut to a one-line preview. */
+  snippet: string;
+  similarity: number;
+  /** In-app route, or the source's own URL when `external`. */
+  url: string;
+  external: boolean;
+}
+
+const knowledgeSearchInput = z.object({
+  // Semantic matching on one or two letters returns noise, and every call
+  // pays for an embedding — so the bar is higher than the title search's.
+  query: z.string().trim().min(3).max(200),
+  workspaceId: z.string(),
+  /** Max sources returned (each source contributes its best chunk). */
+  limit: z.number().int().min(1).max(20).default(5),
+  /** Restrict to these source kinds; default is every kind the caller can see. */
+  sourceTypes: z
+    .array(z.enum(["transcription", "resource", "document", "page"]))
+    .min(1)
+    .optional(),
+});
+
+// Nearest-neighbour search always returns *something*; below this cosine
+// similarity a chunk is unrelated to the query. Same cut-off the agent's
+// semantic search defaults to (knowledgeChunk.semanticSearch).
+const KNOWLEDGE_MIN_SIMILARITY = 0.3;
+
+/** Source kinds that can produce a result (a document has no URL yet). */
+const SEARCHABLE_KNOWLEDGE_SOURCES: ("transcription" | "resource" | "page")[] = [
+  "transcription",
+  "resource",
+  "page",
+];
+
+// Several chunks of one long transcript often outrank everything else, so
+// fetch extra and keep each source's best chunk.
+const KNOWLEDGE_CHUNKS_PER_RESULT = 4;
+
+const SNIPPET_LENGTH = 140;
+
+function snippetOf(content: string): string {
+  const flat = content.replace(/\s+/g, " ").trim();
+  return flat.length > SNIPPET_LENGTH ? `${flat.slice(0, SNIPPET_LENGTH - 1)}…` : flat;
+}
+
 export const searchRouter = createTRPCRouter({
   global: protectedProcedure.input(searchInput).query(async ({ ctx, input }) => {
     const args: SearchArgs = {
@@ -504,5 +563,91 @@ export const searchRouter = createTRPCRouter({
       workspaceId: input.workspaceId ?? null,
       results: groups.flat(),
     };
+  }),
+
+  /**
+   * Semantic search over the workspace's Knowledge Base — the same index and
+   * the same scoping as the Knowledge Base page's Search tab
+   * (mastra.queryMeetingContext): every indexed meeting, resource, document
+   * and page in the workspace the caller may view, with meeting, page and
+   * resource access checked per source. Kept apart from `global` because it costs an embedding call
+   * and is slower; the palette runs it alongside the title search.
+   *
+   * Never throws for an embedding/vector failure — the palette treats this as
+   * an optional extra section, so a failure degrades to no results.
+   */
+  knowledge: protectedProcedure.input(knowledgeSearchInput).query(async ({ ctx, input }) => {
+    const userId = ctx.session.user.id;
+    const empty = { query: input.query, workspaceId: input.workspaceId, results: [] as KnowledgeSearchResult[] };
+
+    const membership = await getWorkspaceMembership(ctx.db, userId, input.workspaceId);
+    if (!membership) return empty;
+    const workspace = await ctx.db.workspace.findUnique({
+      where: { id: input.workspaceId },
+      select: { slug: true },
+    });
+    if (!workspace) return empty;
+    // Semantic search needs an embeddings provider; without one it's switched off.
+    if (!isAiConfigured("openai")) return empty;
+
+    let chunks;
+    try {
+      // Access is the per-source viewer rules below. The service's `userId`
+      // option would narrow to chunks the caller *authored*, which hid every
+      // teammate's meeting, page and resource from this search.
+      chunks = await getKnowledgeService(ctx.db).search(input.query, {
+        workspaceId: input.workspaceId,
+        pageViewerId: userId,
+        transcriptionViewerId: userId,
+        resourceViewerId: userId,
+        // A person also finds the Resources filed under Projects they are
+        // in (ADR-0082). An agent's shadow user is a workspace member too,
+        // and must not: its reach is its owner's own Resources (ADR-0079).
+        resourceSharedWithViewer: (await resolvePrincipal(ctx)).kind !== "agent",
+        // Uploaded documents have no page to link to yet, so their chunks are
+        // always dropped below; searching them would only spend the over-fetch.
+        sourceTypes: input.sourceTypes ?? SEARCHABLE_KNOWLEDGE_SOURCES,
+        limit: input.limit * KNOWLEDGE_CHUNKS_PER_RESULT,
+      });
+    } catch (error) {
+      console.error("[search.knowledge] Knowledge search failed:", error);
+      return empty;
+    }
+
+    const seen = new Set<string>();
+    const results: KnowledgeSearchResult[] = [];
+    // Chunks arrive nearest-first, so the first chunk of each source is its best.
+    for (const chunk of chunks) {
+      if (chunk.similarity < KNOWLEDGE_MIN_SIMILARITY) break;
+      const key = `${chunk.sourceType}:${chunk.sourceId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      let url: string | null = null;
+      let external = false;
+      if (chunk.sourceType === "transcription") url = `/recording/${chunk.sourceId}`;
+      else if (chunk.sourceType === "page") url = `/w/${workspace.slug}/pages/${chunk.sourceId}`;
+      // Resource URLs are user-supplied; only ever hand back web links, never
+      // a `javascript:` or other scheme the palette would open.
+      else if (chunk.sourceMeta?.url && /^https?:\/\//i.test(chunk.sourceMeta.url)) {
+        url = chunk.sourceMeta.url;
+        external = true;
+      }
+      // Notes and uploaded documents have no page of their own yet.
+      if (!url) continue;
+
+      results.push({
+        sourceType: chunk.sourceType,
+        sourceId: chunk.sourceId,
+        title: chunk.sourceTitle ?? "Untitled",
+        snippet: snippetOf(chunk.content),
+        similarity: chunk.similarity,
+        url,
+        external,
+      });
+      if (results.length >= input.limit) break;
+    }
+
+    return { ...empty, results };
   }),
 });

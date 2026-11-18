@@ -10,13 +10,17 @@ import { parseActionInput } from "~/server/services/parsing";
 import { ScoringService } from "~/server/services/ScoringService";
 import { startOfDay } from "date-fns";
 import { findUserByEmailInWorkspace, getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
-import { ASSIGNABLE_USER_SELECT, toAssignableUser, type AssignableUser } from "~/server/services/access/assignability";
+import { ASSIGNABLE_USER_SELECT, type AssignableUserRow } from "~/server/services/access/assignability";
+import { attachPositions } from "~/server/services/positions";
 import { after } from "next/server";
 import { enqueueAgentRunsForAssignees, cancelQueuedRunsForUnassigned } from "~/server/services/agentRuns/enqueue";
 import { triggerDispatch } from "~/server/services/agentRuns/dispatch";
 import { activeRunInclude, withActiveRun } from "~/server/services/agentRuns/include";
-import { getActionAccess, canViewAction, canEditAction, getProjectAccess, hasProjectAccess, isProjectInsider, canEditProject, buildActionAccessWhere, buildActionEditWhere, buildActionDeleteWhere } from "~/server/services/access";
-import { apiKeyMiddleware } from "~/server/api/middleware/apiKeyAuth";
+import { RUN_ELIGIBLE_AGENT_WHERE } from "~/server/services/agentRuns/constants";
+import { getActionAccess, canViewAction, canEditAction, getProjectAccess, hasProjectAccess, isProjectInsider, canEditProject, buildActionAccessWhere, buildActionEditWhere, buildActionDeleteWhere, requireProjectAccess } from "~/server/services/access";
+import { apiKeyMiddleware, resolveApiKeyCallerPrincipal } from "~/server/api/middleware/apiKeyAuth";
+import { resolvePrincipal, type Principal } from "~/server/services/access/principal";
+import { actionSourceForPrincipal } from "~/server/utils/actionSource";
 import { uploadToBlob } from "~/lib/blob";
 import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
 import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
@@ -49,36 +53,45 @@ import {
   myActionsOwnershipWhere,
   myActionsTodayWhere,
   myInboxActionsWhere,
+  myPlateActionsWhere,
+  notInPausedProjectWhere,
   serverLocalDay,
 } from "~/server/services/actions/myActionsWhere";
 import { groupOverdueCohorts, daysOverdue } from "~/lib/actions/triage";
-
-/**
- * Which surface a session-authenticated write came from, by principal: an
- * external-agent key is an agent (ADR-0049), a personal API token is the
- * CLI / SDK, anything else (browser session, extension, device) is the UI.
- */
-function sourceForPrincipal(tokenType: string | undefined): ActionSource {
-  if (tokenType === "agent-key") return "agent";
-  if (tokenType === "api-token") return "cli";
-  return "ui";
-}
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
+import { runAfterResponseReported } from "~/server/utils/runAfterResponse";
 
 /**
  * `quickCreate` keeps its free-form `source` input (the iOS shortcut has sent
  * its legacy default for years), but `createAction` only accepts the closed
- * set. A value in the set passes through; the legacy `ios-shortcut` default
- * is the iOS shortcut, as is any call authenticated by an x-api-key header;
- * anything else is named from the principal.
+ * set. An agent principal never chooses: its source comes from the verified
+ * principal, so it cannot stamp `ui` or `cli` (D-0016). For a person, a value
+ * in the set passes through; the legacy `ios-shortcut` default is the iOS
+ * shortcut, as is any call authenticated by an x-api-key header; anything
+ * else is named from the principal.
  */
 function resolveQuickCreateSource(
   requested: string,
-  ctx: { tokenType?: string; viaApiKey: boolean },
+  principal: Principal,
+  viaApiKey: boolean,
 ): ActionSource {
-  if (isActionSource(requested)) return requested;
-  if (requested === "ios-shortcut" || ctx.viaApiKey) return "ios";
-  return sourceForPrincipal(ctx.tokenType);
+  if (principal.kind !== "human") return actionSourceForPrincipal(principal);
+  // A person may name their own surface, but never an agent's: `agent` and
+  // the gateway and voice sources say an agent wrote the row.
+  if (isActionSource(requested) && !AGENT_ACTION_SOURCES.has(requested)) return requested;
+  // The legacy default, and a person's durable x-api-key, are the iOS shortcut.
+  if (viaApiKey || requested === "ios-shortcut") return "ios";
+  return actionSourceForPrincipal(principal);
 }
+
+/** Sources that attribute a row to an agent; a person can't claim them. */
+const AGENT_ACTION_SOURCES: ReadonlySet<ActionSource> = new Set([
+  "agent",
+  "whatsapp",
+  "telegram",
+  "matrix",
+  "voice",
+]);
 
 /** The viewer's local day, `[start, end)` — both ends, for DST-change days. */
 const localDayInput = z
@@ -169,7 +182,9 @@ export const actionRouter = createTRPCRouter({
           syncs: true,
           ...activeRunInclude,
           assignees: {
-            include: { user: { select: { id: true, name: true, email: true, image: true } } },
+            // isAgent: an Assistant assignee renders as an agent, and the
+            // comment box can tell an assigned Assistant from one it may offer.
+            include: { user: { select: { id: true, name: true, email: true, image: true, isAgent: true } } },
           },
           createdBy: { select: { id: true, name: true, email: true, image: true } },
           tags: { include: { tag: true } },
@@ -460,14 +475,44 @@ export const actionRouter = createTRPCRouter({
     // tags, assignees and sprint with the create and gets them in one
     // transaction; an external caller may still create and then attach.
     .input(actionWriteSchema.merge(actionCreateAttachmentsSchema))
-    .mutation(({ ctx, input }) =>
-      createAction(actionWriteDeps(ctx), {
+    .mutation(async ({ ctx, input }) => {
+      const created = await createAction(actionWriteDeps(ctx), {
         ...input,
         // The *who* is createdById (for an agent, its shadow user; ADR-0049),
-        // the *how* is source, named from the principal.
-        source: sourceForPrincipal(ctx.tokenType),
-      }),
-    ),
+        // the *how* is source, named from the verified principal.
+        source: actionSourceForPrincipal(await resolvePrincipal(ctx)),
+      });
+
+      // Assigning an Assistant starts an Agent run (ADR-0067), and attaching
+      // it on create is an assignment: the same hook as `assign`, after the
+      // commit, with the same skips (humans, plain External agents, a parked
+      // action, a live run) and the same post-response kick so the mutation
+      // never waits on Mastra. Every assignee is new to a fresh row, so no
+      // prior-assignee filter. Deliberately in the router, next to `assign`,
+      // and not inside `createAction`: the kick needs a request scope
+      // (`after()` throws outside one) that the module's voice, cron and
+      // webhook callers do not have, and none of them attaches assignees.
+      // The row is committed by now, so a failure here must not fail the
+      // create: the modal would report "Failed to Create Action" and a retry
+      // would write a second row. Log it and report 0 instead; the owner
+      // can still assign (idempotent) to start the run.
+      const runs = await enqueueAgentRunsForAssignees(ctx.db, {
+        actionId: created.id,
+        userIds: created.assignees.map((a) => a.userId),
+        requestedById: ctx.session.user.id,
+      }).catch((err: unknown) => {
+        console.error("[agentRuns] enqueue on create failed:", err);
+        return [];
+      });
+      if (runs.some((r) => r.executor === "MASTRA")) {
+        after(() => triggerDispatch());
+      }
+
+      // `agentRunsQueued` as on `assign` (Agent PRD D8.2): the runs this
+      // call actually started, 0 on every skip, so the modal (and a CLI or
+      // chat caller) can say honestly whether the Assistant is on it.
+      return { ...created, agentRunsQueued: runs.length };
+    }),
 
   /**
    * Idempotently ensure a "Do daily plan" prompt Action exists for today.
@@ -546,7 +591,7 @@ export const actionRouter = createTRPCRouter({
       );
 
       // Project activity audit log: explicit status + dueDate diffs
-      // (fire-and-forget). A kanban-driven status change is already logged
+      // (after the response). A kanban-driven status change is already logged
       // by the module as the column move; logging the coarse diff too would
       // record one drag twice. Logged against the project the action ends up
       // in, so a change made while moving it lands in the new project's feed.
@@ -562,32 +607,31 @@ export const actionRouter = createTRPCRouter({
             : undefined;
 
         if (statusDiff || dueDateDiff) {
-          void logActionDiffActivities(ctx.db, {
-            projectId: activityProjectId,
-            actionId: id,
-            changedById: ctx.session.user.id,
-            diff: { status: statusDiff, dueDate: dueDateDiff },
-          }).catch((err: unknown) => {
-            console.error("[projectActivity] action.update diff:", err);
-          });
+          runAfterResponseReported("action.update.activityLog", () =>
+            logActionDiffActivities(ctx.db, {
+              projectId: activityProjectId,
+              actionId: id,
+              changedById: ctx.session.user.id,
+              diff: { status: statusDiff, dueDate: dueDateDiff },
+            }),
+          );
         }
       }
 
-      // Recalculate score if completion status changed and action is linked to daily plan
-      // Run async without blocking the response for faster UI
+      // Recalculate score if completion status changed and action is linked to daily plan.
+      // Runs after the response (kept alive by the platform) for a faster UI.
       if (transitions.completing || transitions.uncompleting) {
         if (updatedAction.dailyPlanActions.length > 0) {
-          // Fire and forget - don't await scoring calculation
-          void Promise.all(
-            updatedAction.dailyPlanActions.map((dpa) =>
-              ScoringService.calculateDailyScore(
-                ctx,
-                dpa.dailyPlan.date,
-                dpa.dailyPlan.workspaceId ?? undefined
-              ).catch((err) => {
-                console.error("[action.update] Failed to recalculate score:", err);
-              })
-            )
+          runAfterResponseReported("action.update.dailyScore", () =>
+            Promise.all(
+              updatedAction.dailyPlanActions.map((dpa) =>
+                ScoringService.calculateDailyScore(
+                  ctx,
+                  dpa.dailyPlan.date,
+                  dpa.dailyPlan.workspaceId ?? undefined
+                )
+              )
+            ),
           );
         }
       }
@@ -600,12 +644,15 @@ export const actionRouter = createTRPCRouter({
 
         if (wasOverdue) {
           // Check if all overdue tasks are now cleared
+          // A paused project's actions are off the overdue pile, so they
+          // must not keep it from counting as cleared.
           const remainingOverdue = await ctx.db.action.count({
             where: {
               createdById: ctx.session.user.id,
               status: "ACTIVE",
               id: { not: id },
               scheduledStart: { lt: today },
+              AND: [notInPausedProjectWhere()],
             },
           });
 
@@ -631,14 +678,14 @@ export const actionRouter = createTRPCRouter({
             });
           }
 
-          // Fire and forget - recalculate today's score since overdue count changed
-          void ScoringService.calculateDailyScore(
-            ctx,
-            today,
-            updatedAction.workspaceId ?? undefined
-          ).catch((err) => {
-            console.error("[action.update] Failed to recalculate score after overdue change:", err);
-          });
+          // Recalculate today's score after the response, since the overdue count changed
+          runAfterResponseReported("action.update.dailyScoreAfterOverdue", () =>
+            ScoringService.calculateDailyScore(
+              ctx,
+              today,
+              updatedAction.workspaceId ?? undefined
+            ),
+          );
         }
       }
 
@@ -747,29 +794,10 @@ export const actionRouter = createTRPCRouter({
       // Same ownership as action.getAll: created-by-me-with-no-assignees OR
       // assigned-to-me. Cross-workspace by default; optional workspaceId filter
       // matches either the action's own workspace or its project's workspace
-      // (so project-less actions are still scoped correctly).
+      // (so project-less actions are still scoped correctly). Actions in an
+      // On hold, Completed or Cancelled project are not on the plate.
       const actions = await ctx.db.action.findMany({
-        where: {
-          AND: [
-            {
-              OR: [
-                { createdById: userId, assignees: { none: {} } },
-                { assignees: { some: { userId } } },
-              ],
-            },
-            ...(input?.workspaceId
-              ? [
-                  {
-                    OR: [
-                      { workspaceId: input.workspaceId },
-                      { project: { workspaceId: input.workspaceId } },
-                    ],
-                  },
-                ]
-              : []),
-          ],
-          status: "ACTIVE",
-        },
+        where: myPlateActionsWhere(userId, input?.workspaceId),
         select: {
           id: true,
           name: true,
@@ -839,27 +867,7 @@ export const actionRouter = createTRPCRouter({
       // Same ownership and scoping rules as getTodaysActions, so the triage
       // view and the /today page always describe the same pile.
       const actions = await ctx.db.action.findMany({
-        where: {
-          AND: [
-            {
-              OR: [
-                { createdById: userId, assignees: { none: {} } },
-                { assignees: { some: { userId } } },
-              ],
-            },
-            ...(input?.workspaceId
-              ? [
-                  {
-                    OR: [
-                      { workspaceId: input.workspaceId },
-                      { project: { workspaceId: input.workspaceId } },
-                    ],
-                  },
-                ]
-              : []),
-          ],
-          status: "ACTIVE",
-        },
+        where: myPlateActionsWhere(userId, input?.workspaceId),
         select: {
           id: true,
           name: true,
@@ -913,6 +921,10 @@ export const actionRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
+      // My actions due in the range: the home overview's Tomorrow / This week
+      // / This month, and `actions range` / `list_by_date_range` in the CLI
+      // and MCP. Every caller reads the person's plate (no project is named),
+      // so a paused project's actions are left out, as on /today.
       return ctx.db.action.findMany({
         where: {
           OR: [
@@ -921,6 +933,7 @@ export const actionRouter = createTRPCRouter({
             // Assigned to me via ActionAssignee
             { assignees: { some: { userId: userId } } },
           ],
+          AND: [notInPausedProjectWhere()],
           dueDate: {
             gte: input.startDate,
             lt: input.endDate,
@@ -1248,19 +1261,19 @@ export const actionRouter = createTRPCRouter({
 
       const projectScoped = toDelete.filter((a) => a.projectId !== null);
       if (projectScoped.length > 0) {
-        void Promise.all(
-          projectScoped.map((a) =>
-            logProjectActivity(ctx.db, {
-              projectId: a.projectId!,
-              actionId: null,
-              type: PROJECT_ACTIVITY_TYPES.ACTION_DELETED,
-              fromValue: a.name,
-              changedById: ctx.session.user.id,
-            }),
+        runAfterResponseReported("action.bulkDelete.activityLog", () =>
+          Promise.all(
+            projectScoped.map((a) =>
+              logProjectActivity(ctx.db, {
+                projectId: a.projectId!,
+                actionId: null,
+                type: PROJECT_ACTIVITY_TYPES.ACTION_DELETED,
+                fromValue: a.name,
+                changedById: ctx.session.user.id,
+              }),
+            ),
           ),
-        ).catch((err: unknown) => {
-          console.error("[projectActivity] bulkDelete:", err);
-        });
+        );
       }
 
       return {
@@ -1385,20 +1398,20 @@ export const actionRouter = createTRPCRouter({
 
       const projectScoped = toDefer.filter((a) => a.projectId !== null);
       if (projectScoped.length > 0) {
-        void Promise.all(
-          projectScoped.map((a) =>
-            logProjectActivity(ctx.db, {
-              projectId: a.projectId!,
-              actionId: a.id,
-              type: PROJECT_ACTIVITY_TYPES.DUE_DATE_CHANGED,
-              fromValue: (a.dueDate ?? a.scheduledStart)?.toISOString() ?? null,
-              toValue: null,
-              changedById: ctx.session.user.id,
-            }),
+        runAfterResponseReported("action.bulkDefer.activityLog", () =>
+          Promise.all(
+            projectScoped.map((a) =>
+              logProjectActivity(ctx.db, {
+                projectId: a.projectId!,
+                actionId: a.id,
+                type: PROJECT_ACTIVITY_TYPES.DUE_DATE_CHANGED,
+                fromValue: (a.dueDate ?? a.scheduledStart)?.toISOString() ?? null,
+                toValue: null,
+                changedById: ctx.session.user.id,
+              }),
+            ),
           ),
-        ).catch((err: unknown) => {
-          console.error("[projectActivity] bulkDefer:", err);
-        });
+        );
       }
 
       return {
@@ -1526,15 +1539,16 @@ export const actionRouter = createTRPCRouter({
         skipDuplicates: true,
       });
 
-      if (action.projectId && nextIds.length !== priorIds.length) {
-        void logActionDiffActivities(ctx.db, {
-          projectId: action.projectId,
-          actionId: input.actionId,
-          changedById: ctx.session.user.id,
-          diff: { assigneeIds: { from: priorIds, to: nextIds } },
-        }).catch((err: unknown) => {
-          console.error("[projectActivity] assign:", err);
-        });
+      const activityProjectId = action.projectId;
+      if (activityProjectId && nextIds.length !== priorIds.length) {
+        runAfterResponseReported("action.assign.activityLog", () =>
+          logActionDiffActivities(ctx.db, {
+            projectId: activityProjectId,
+            actionId: input.actionId,
+            changedById: ctx.session.user.id,
+            diff: { assigneeIds: { from: priorIds, to: nextIds } },
+          }),
+        );
       }
 
       // Assigning an Assistant starts an Agent run (ADR-0067). One queued row
@@ -1556,26 +1570,38 @@ export const actionRouter = createTRPCRouter({
       // Resolves recipients + enabled channels, persists a durable Notification
       // record, and delivers best-effort synchronously; the cron worker retries
       // any channel that failed. Never notifies the assigner about their own action.
-      void emitNotification({
-        category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
-        actorUserId: ctx.session.user.id,
-        subject: {
-          actionId: input.actionId,
-          assignedUserIds: input.userIds,
-        },
-        db: ctx.db,
-      });
+      emitAfterResponse("action.assign.notification", () =>
+        emitNotification({
+          category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+          actorUserId: ctx.session.user.id,
+          subject: {
+            actionId: input.actionId,
+            assignedUserIds: input.userIds,
+          },
+          db: ctx.db,
+        }),
+        { actionId: input.actionId },
+      );
 
-      // Return updated action with assignees
-      return ctx.db.action.findUnique({
+      // Return updated action with assignees. `agentRunsQueued` is the number
+      // of Agent runs this call actually started (Agent PRD D8.2): 0 whenever
+      // the enqueue skipped — a human assignee, an Assistant already on the
+      // action, a parked or completed action, a plain External agent, or a
+      // run already live — so a caller routing from chat can say honestly
+      // whether work began.
+      const updated = await ctx.db.action.findUnique({
         where: { id: input.actionId },
         include: {
           assignees: {
-            include: { user: { select: { id: true, name: true, email: true, image: true } } },
+            include: { user: { select: { id: true, name: true, email: true, image: true, isAgent: true } } },
           },
           project: true,
         },
       });
+      if (!updated) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Action not found" });
+      }
+      return { ...updated, agentRunsQueued: runs.length };
     }),
 
   // Unassign users from an action
@@ -1635,15 +1661,16 @@ export const actionRouter = createTRPCRouter({
         userIds: input.userIds,
       });
 
-      if (action.projectId && nextIds.length !== priorIds.length) {
-        void logActionDiffActivities(ctx.db, {
-          projectId: action.projectId,
-          actionId: input.actionId,
-          changedById: ctx.session.user.id,
-          diff: { assigneeIds: { from: priorIds, to: nextIds } },
-        }).catch((err: unknown) => {
-          console.error("[projectActivity] unassign:", err);
-        });
+      const activityProjectId = action.projectId;
+      if (activityProjectId && nextIds.length !== priorIds.length) {
+        runAfterResponseReported("action.unassign.activityLog", () =>
+          logActionDiffActivities(ctx.db, {
+            projectId: activityProjectId,
+            actionId: input.actionId,
+            changedById: ctx.session.user.id,
+            diff: { assigneeIds: { from: priorIds, to: nextIds } },
+          }),
+        );
       }
 
       // Return updated action with assignees
@@ -1717,7 +1744,7 @@ export const actionRouter = createTRPCRouter({
       // per action, coalesced against live runs (ADR-0067). One principal
       // lookup up front so a human-only bulk assign costs nothing extra.
       const agentAssignees = await ctx.db.externalAgent.count({
-        where: { shadowUserId: { in: input.userIds }, assistant: { isNot: null } },
+        where: { shadowUserId: { in: input.userIds }, ...RUN_ELIGIBLE_AGENT_WHERE },
       });
       if (agentAssignees > 0) {
         let kick = false;
@@ -1775,7 +1802,7 @@ export const actionRouter = createTRPCRouter({
       }
 
       // Collect assignable users from multiple sources
-      const userMap = new Map<string, AssignableUser>();
+      const userMap = new Map<string, AssignableUserRow>();
 
       const isRestrictedProject = action.project?.isRestricted ?? false;
 
@@ -1804,7 +1831,7 @@ export const actionRouter = createTRPCRouter({
       if (!isRestrictedProject) {
         userTeams.forEach(team => {
           team.members.forEach(member => {
-            userMap.set(member.user.id, toAssignableUser(member.user));
+            userMap.set(member.user.id, member.user);
           });
         });
       }
@@ -1814,10 +1841,9 @@ export const actionRouter = createTRPCRouter({
       //    (they are escape-hatch project editors).
       //
       //    Gated on `isProjectInsider`, NOT `canViewAction`: a public project
-      //    satisfies the view gate for any authenticated caller, and bounty
-      //    action ids for public projects are published by the unauthenticated
-      //    /api/bounties feed. Public visibility grants the project, never the
-      //    workspace roster behind it.
+      //    satisfies the view gate for any authenticated caller, and action ids
+      //    in public projects are discoverable from its public pages. Public
+      //    visibility grants the project, never the workspace roster behind it.
       //
       //    An action with a workspace but no project (a loose workspace
       //    action) takes its roster from its own workspace instead — the same
@@ -1849,7 +1875,7 @@ export const actionRouter = createTRPCRouter({
           },
         });
         workspaceUsers.forEach(wu => {
-          userMap.set(wu.user.id, toAssignableUser(wu.user));
+          userMap.set(wu.user.id, wu.user);
         });
       }
 
@@ -1864,7 +1890,7 @@ export const actionRouter = createTRPCRouter({
           },
         });
         projectMembers.forEach(pm => {
-          userMap.set(pm.user.id, toAssignableUser(pm.user));
+          userMap.set(pm.user.id, pm.user);
         });
 
         // Always include the project creator (synthetic "Owner" axis).
@@ -1873,7 +1899,7 @@ export const actionRouter = createTRPCRouter({
             where: { id: action.project.createdById },
             select: ASSIGNABLE_USER_SELECT,
           });
-          if (creator) userMap.set(creator.id, toAssignableUser(creator));
+          if (creator) userMap.set(creator.id, creator);
         }
       }
 
@@ -1884,11 +1910,19 @@ export const actionRouter = createTRPCRouter({
           select: ASSIGNABLE_USER_SELECT,
         });
         if (currentUser) {
-          userMap.set(currentUser.id, toAssignableUser(currentUser));
+          userMap.set(currentUser.id, currentUser);
         }
       }
 
-      const assignableUsers = Array.from(userMap.values());
+      // Positions ride on exactly the workspace this procedure already trusts
+      // for its roster (ADR-0068 §5) — never a wider one, so a public-project
+      // visitor cannot read Positions through team-mates who happen to be in
+      // the roster. One extra query; none when there is no such workspace.
+      const assignableUsers = await attachPositions(
+        ctx.db,
+        rosterWorkspaceId,
+        Array.from(userMap.values()),
+      );
 
       return {
         assignableUsers,
@@ -1964,7 +1998,7 @@ export const actionRouter = createTRPCRouter({
 
       const isRestrictedProject = project?.isRestricted ?? false;
 
-      const userMap = new Map<string, AssignableUser>();
+      const userMap = new Map<string, AssignableUserRow>();
 
       const userTeams = await ctx.db.team.findMany({
         where: {
@@ -1983,7 +2017,7 @@ export const actionRouter = createTRPCRouter({
       if (!isRestrictedProject) {
         userTeams.forEach(team => {
           team.members.forEach(member => {
-            userMap.set(member.user.id, toAssignableUser(member.user));
+            userMap.set(member.user.id, member.user);
           });
         });
       }
@@ -1999,7 +2033,7 @@ export const actionRouter = createTRPCRouter({
           },
         });
         workspaceUsers.forEach(wu => {
-          userMap.set(wu.user.id, toAssignableUser(wu.user));
+          userMap.set(wu.user.id, wu.user);
         });
       }
 
@@ -2011,7 +2045,7 @@ export const actionRouter = createTRPCRouter({
           },
         });
         projectMembers.forEach(pm => {
-          userMap.set(pm.user.id, toAssignableUser(pm.user));
+          userMap.set(pm.user.id, pm.user);
         });
 
         const projectRecord = await ctx.db.project.findUnique({
@@ -2023,7 +2057,7 @@ export const actionRouter = createTRPCRouter({
             where: { id: projectRecord.createdById },
             select: ASSIGNABLE_USER_SELECT,
           });
-          if (creator) userMap.set(creator.id, toAssignableUser(creator));
+          if (creator) userMap.set(creator.id, creator);
         }
       }
 
@@ -2033,12 +2067,20 @@ export const actionRouter = createTRPCRouter({
           select: ASSIGNABLE_USER_SELECT,
         });
         if (currentUser) {
-          userMap.set(currentUser.id, toAssignableUser(currentUser));
+          userMap.set(currentUser.id, currentUser);
         }
       }
 
+      // Same rule as getAssignableUsers: Positions attach for the trusted
+      // workspace only, else every user gets `positions: []`.
+      const assignableUsers = await attachPositions(
+        ctx.db,
+        effectiveWorkspaceId,
+        Array.from(userMap.values()),
+      );
+
       return {
-        assignableUsers: Array.from(userMap.values()),
+        assignableUsers,
         actionContext: {
           hasProject: !!project,
           hasTeam: false,
@@ -2194,6 +2236,10 @@ export const actionRouter = createTRPCRouter({
     .input(z.object({
       projectId: z.string(),
     }))
+    // Writes kanbanStatus/kanbanOrder across the whole project, so the
+    // caller — person or agent — must be able to edit the project
+    // (authorized agency, ADR-0071).
+    .use(requireProjectAccess("edit"))
     .mutation(async ({ ctx, input }) => {
       // Get all actions in this project without kanban orders
       const actionsWithoutOrder = await ctx.db.action.findMany({
@@ -2361,10 +2407,11 @@ export const actionRouter = createTRPCRouter({
           status: "ACTIVE",
           scheduledStart: parsed.scheduledStart ?? undefined,
           dueDate: parsed.dueDate ?? undefined,
-          source: resolveQuickCreateSource(input.source, {
-            tokenType: ctx.tokenType,
-            viaApiKey: !ctx.session?.user?.id,
-          }),
+          source: resolveQuickCreateSource(
+            input.source,
+            await resolveApiKeyCallerPrincipal(ctx),
+            !ctx.session?.user?.id,
+          ),
         },
       );
 
@@ -3030,6 +3077,17 @@ export const actionRouter = createTRPCRouter({
       });
 
       if (existing) {
+        // Writing to the workspace is not editing this row: the source pair
+        // can match an Action someone else owns. The caller — person or
+        // agent — must be able to edit it (authorized agency, ADR-0071).
+        const rowAccess = await getActionAccess(ctx.db, userId, existing.id);
+        if (!rowAccess || !canEditAction(rowAccess)) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You do not have permission to edit this action",
+          });
+        }
+
         const action = await ctx.db.action.update({
           where: { id: existing.id },
           data: {

@@ -1,0 +1,483 @@
+'use client';
+
+import { useAiCapabilities } from "~/providers/AiCapabilitiesProvider";
+import { api, type RouterOutputs } from "~/trpc/react";
+import { Skeleton, Paper, Text } from "@mantine/core";
+import { useEffect, useMemo, useRef } from "react";
+import { useMutation } from "@tanstack/react-query";
+import { notifications } from "@mantine/notifications";
+import { useRouter } from "next/navigation";
+import { useAgentModal, type ChatMessage } from "~/providers/AgentModalProvider";
+import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
+import { MeetingDetail } from "~/app/_components/meeting/MeetingDetail";
+
+/**
+ * A meeting's full detail with every handler wired up: the `/recording/[id]`
+ * page, and the inbox's peek drawer.
+ */
+export function MeetingDetailContainer({ id }: { id: string }) {
+
+  const { data: session, isLoading } = api.transcription.getDetail.useQuery({ id });
+  const { data: transcriptActions = [], isLoading: isActionsLoading } =
+    api.action.getByTranscription.useQuery(
+      { transcriptionId: id },
+      { enabled: Boolean(id) },
+    );
+  const utils = api.useUtils();
+  // Decisions only need the meeting id, which the URL already carries: start
+  // them alongside the meeting instead of after it. MeetingDetail reads the
+  // same cache entry.
+  useEffect(() => {
+    void utils.decision.listForMeeting.prefetch({ transcriptionSessionId: id });
+  }, [utils, id]);
+  const router = useRouter();
+  const updateDetailsMutation = api.transcription.updateDetails.useMutation();
+  const updateTitleMutation = api.transcription.updateTitle.useMutation();
+  const moveToWorkspaceMutation = api.transcription.moveToWorkspace.useMutation();
+  const assignProjectMutation = api.transcription.assignProject.useMutation({
+    onSuccess: () => {
+      notifications.show({
+        title: "Saved",
+        message: "Meeting placement updated",
+        color: "green",
+      });
+      void utils.transcription.getDetail.invalidate({ id });
+      void utils.action.getByTranscription.invalidate({ transcriptionId: id });
+    },
+    onError: (error) => {
+      notifications.show({
+        title: "Error",
+        message: error.message || "Failed to update placement",
+        color: "red",
+      });
+    },
+  });
+  const archiveMutation = api.transcription.archiveTranscription.useMutation({
+    onSuccess: () => {
+      notifications.show({
+        title: "Archived",
+        message: "Meeting moved to archive.",
+        color: "green",
+      });
+      const slug = session?.workspace?.slug;
+      router.push(slug ? `/w/${slug}/meetings` : "/recordings");
+    },
+    onError: (error) => {
+      notifications.show({
+        title: "Error",
+        message: error.message || "Failed to archive",
+        color: "red",
+      });
+    },
+  });
+  const { openModal, setMessages } = useAgentModal();
+
+  // Auto-generate the summary on view when a meeting has a transcript but no
+  // summary yet, instead of waiting for the hourly cron sweep. Routes through
+  // the shared `generateSummary` mutation (one summarization path). Guarded so
+  // it fires at most once per meeting id, even on re-render / failure.
+  const summaryAttemptedRef = useRef<Set<string>>(new Set());
+  const generateSummaryMutation = api.transcription.generateSummary.useMutation({
+    onSuccess: () => {
+      void utils.transcription.getDetail.invalidate({ id });
+    },
+  });
+  const { mutate: generateSummary } = generateSummaryMutation;
+
+  // Manual refresh: re-run the AI summary (the mutation overwrites the stored
+  // one) with explicit feedback, vs the silent auto-generate-on-view above.
+  async function handleRegenerateSummary() {
+    if (!session) return;
+    // Don't stack a manual regenerate on top of an in-flight generation (the
+    // auto-generate-on-view effect shares this mutation).
+    if (generateSummaryMutation.isPending) return;
+    try {
+      await generateSummaryMutation.mutateAsync({ transcriptionId: session.id });
+      notifications.show({
+        title: "Summary regenerated",
+        message: "The meeting summary has been refreshed.",
+        color: "green",
+      });
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message:
+          error instanceof Error ? error.message : "Failed to regenerate summary",
+        color: "red",
+      });
+    }
+  }
+
+  const { summaries: canSummarize } = useAiCapabilities();
+  useEffect(() => {
+    if (!session) return;
+    // No summarisation provider on this install: the Summary tab says so.
+    if (!canSummarize) return;
+    const hasSummary = Boolean(session.summary?.trim());
+    if (hasSummary || !session.hasTranscript) return;
+    if (summaryAttemptedRef.current.has(session.id)) return;
+    summaryAttemptedRef.current.add(session.id);
+    // Say so when it fails — otherwise the summary just never appears and
+    // there's no hint why (e.g. the LLM provider is out of credit).
+    generateSummary(
+      { transcriptionId: session.id },
+      {
+        onError: (error) => {
+          notifications.show({
+            title: "Couldn't generate the AI summary",
+            message: error.message,
+            color: "red",
+          });
+        },
+      },
+    );
+  }, [session, generateSummary, canSummarize]);
+
+  // "Extract outputs" (one button on every tab): one reading of the meeting
+  // drafts its actions, decisions and open questions, so each item lands in
+  // exactly one bucket. Nothing is created or logged until it is reviewed on
+  // the Outputs tab (ADR-0007, ADR-0060), which MeetingDetail opens on success.
+  //
+  // The call goes to a route of its own rather than through the tRPC client:
+  // the shared tRPC route stops at 60 seconds, and reading the whole of a long
+  // recording takes longer. The route runs the same `transcription.
+  // extractOutputs` procedure, so the result and the errors are the same.
+  const extractOutputsMutation = useMutation({
+    mutationFn: async (input: { transcriptionId: string; replaceDrafts?: boolean }) => {
+      const response = await fetch("/api/meetings/extract-outputs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (!response.ok) {
+        const message =
+          body !== null && typeof body === "object" && "error" in body && typeof body.error === "string"
+            ? body.error
+            : "Extraction failed";
+        throw new Error(message);
+      }
+      return body as RouterOutputs["transcription"]["extractOutputs"];
+    },
+  });
+
+  async function handleExtractOutputs(options: { replaceDrafts?: boolean } = {}): Promise<boolean> {
+    if (!session) return false;
+    const transcriptionId = session.id;
+    const result = await extractOutputsMutation
+      .mutateAsync({ transcriptionId, replaceDrafts: options.replaceDrafts })
+      .catch((error: unknown) => {
+        notifications.show({
+          title: "Couldn't extract outputs",
+          message: error instanceof Error && error.message.length > 0 ? error.message : "Extraction failed",
+          color: "red",
+        });
+        return null;
+      });
+    if (!result) return false;
+    const { actions, decisions } = result;
+    await Promise.all([
+      utils.action.getDraftByTranscription.invalidate({ transcriptionId }),
+      utils.action.getByTranscription.invalidate({ transcriptionId }),
+      utils.decision.listForMeeting.invalidate({ transcriptionSessionId: transcriptionId }),
+      utils.transcription.getDetail.invalidate({ id }),
+    ]);
+
+    // Partial transcript coverage is a caveat on a successful run, not a
+    // failure — say so plainly rather than leaving the count unexplained.
+    for (const warning of decisions.warnings ?? []) {
+      notifications.show({
+        title: "Part of the transcript was not read",
+        message: warning,
+        color: "yellow",
+        autoClose: 10_000,
+      });
+    }
+    // The decision half says so itself when it kept its drafts. A meeting
+    // with only action drafts gets no such warning, so say it here.
+    if (actions.draftsKept && (decisions.warnings ?? []).length === 0) {
+      notifications.show({
+        title: "Existing drafts were kept",
+        message: "Part of the transcript could not be read this time, so the draft actions were left as they were. Try again in a moment.",
+        color: "yellow",
+        autoClose: 10_000,
+      });
+    }
+    // One half can fail while the other succeeds (a meeting outside a
+    // workspace has no decision log, but can still get actions).
+    for (const [label, half] of [
+      ["Actions", actions],
+      ["Decisions", decisions],
+    ] as const) {
+      if (!half.success && half.errors.length > 0) {
+        notifications.show({
+          title: `${label} not extracted`,
+          message: half.errors.join(", "),
+          color: "orange",
+        });
+      }
+    }
+
+    const parts: string[] = [];
+    if (actions.draftCount > 0) {
+      parts.push(`${actions.draftCount} draft ${actions.draftCount === 1 ? "action" : "actions"}`);
+    }
+    if (decisions.draftCount > 0) {
+      parts.push(
+        `${decisions.draftCount} draft ${decisions.draftCount === 1 ? "decision or question" : "decisions & questions"}`,
+      );
+    }
+    if (parts.length > 0) {
+      notifications.show({
+        title: "Ready to review",
+        message: `${parts.join(" and ")} on the Outputs tab.`,
+        color: "green",
+      });
+    } else if (actions.alreadyPublished || decisions.alreadyPublished) {
+      notifications.show({
+        title: "Already extracted",
+        message: "This meeting's outputs have already been reviewed.",
+        color: "gray",
+      });
+    } else if (actions.success || decisions.success) {
+      notifications.show({
+        title: "Nothing found",
+        message:
+          decisions.discardedWithoutEvidence > 0
+            ? "Candidates were found but none could be backed by a transcript turn."
+            : "No actions, decisions or open questions were detected in this meeting.",
+        color: "gray",
+      });
+    }
+    return true;
+  }
+
+  // Same deterministic-then-review shape as Extract outputs, one level up the
+  // altitude ladder: an Action is a task, a Feature is a product capability.
+  // Nothing is written to the feature registry until the card's accept step.
+  const ideateFeaturesMutation =
+    api.transcription.generateDraftFeatures.useMutation({
+      onSuccess: (result) => {
+        if (!session) return;
+        if (result.draftCount === 0) {
+          notifications.show({
+            title: "No features found",
+            message: "No product features were identified in this meeting.",
+            color: "gray",
+          });
+          return;
+        }
+        const transcriptionId = session.id;
+        setMessages((prev) => {
+          const alreadyHasCard = prev.some(
+            (m) =>
+              m.card?.kind === "draft-features" &&
+              m.card.transcriptionId === transcriptionId,
+          );
+          if (alreadyHasCard) return prev;
+          const cardMessage: ChatMessage = {
+            type: "ai",
+            agentName: "Zoe",
+            content: result.alreadyDrafted
+              ? "Here are the draft features from this meeting — pick a product and accept the ones you want."
+              : "I found some product features in this meeting — pick a product and accept the ones you want.",
+            card: { kind: "draft-features", transcriptionId },
+          };
+          return [...prev, cardMessage];
+        });
+        openModal();
+      },
+      onError: (error) => {
+        notifications.show({
+          title: "Error",
+          message: error.message || "Failed to ideate features",
+          color: "red",
+        });
+      },
+    });
+
+  function handleIdeateFeatures() {
+    if (!session) return;
+    ideateFeaturesMutation.mutate({ transcriptionId: session.id });
+  }
+
+  function handleArchive() {
+    if (!session) return;
+    if (
+      typeof window !== "undefined" &&
+      !window.confirm("Archive this meeting? You can restore it later.")
+    )
+      return;
+    archiveMutation.mutate({ id: session.id });
+  }
+
+  async function handleSaveSummary(value: string) {
+    if (!session) return;
+    try {
+      await updateDetailsMutation.mutateAsync({ id: session.id, summary: value });
+      notifications.show({ title: "Saved", message: "Summary updated", color: "green" });
+      void utils.transcription.getDetail.invalidate({ id });
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to update summary",
+        color: "red",
+      });
+    }
+  }
+
+  async function handleSaveNotes(value: string) {
+    if (!session) return;
+    try {
+      await updateDetailsMutation.mutateAsync({ id: session.id, notes: value });
+      notifications.show({ title: "Saved", message: "Notes updated", color: "green" });
+      void utils.transcription.getNotes.invalidate({ id });
+      void utils.transcription.getDetail.invalidate({ id });
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to update notes",
+        color: "red",
+      });
+      throw error;
+    }
+  }
+
+  async function handleRenameTitle(title: string) {
+    if (!session) return;
+    try {
+      await updateTitleMutation.mutateAsync({ id: session.id, title });
+      utils.transcription.getDetail.setData({ id }, (prev) =>
+        prev ? { ...prev, title } : prev,
+      );
+      // Meeting lists (workspace, project tab, recordings) show the title too.
+      void utils.transcription.invalidate();
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to rename meeting",
+        color: "red",
+      });
+      throw error;
+    }
+  }
+
+  async function handleMeetingDateChange(value: Date | null) {
+    if (!session) return;
+    try {
+      await updateDetailsMutation.mutateAsync({ id: session.id, meetingDate: value });
+      notifications.show({
+        title: "Saved",
+        message: value ? "Meeting date updated" : "Meeting date cleared",
+        color: "green",
+      });
+      void utils.transcription.getDetail.invalidate({ id });
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to update meeting date",
+        color: "red",
+      });
+    }
+  }
+
+  async function handleWorkspaceChange(workspaceId: string | null) {
+    if (!session) return;
+    const linkedFeatures = session.featureLinks.length;
+    if (
+      linkedFeatures > 0 &&
+      !window.confirm(
+        "Features from this workspace stay behind, so their links to this meeting will be removed. Move anyway?",
+      )
+    ) {
+      return;
+    }
+    try {
+      const result = await moveToWorkspaceMutation.mutateAsync({ id: session.id, workspaceId });
+      notifications.show({
+        title: "Moved",
+        message:
+          result.droppedFeatureLinks > 0
+            ? `Meeting moved. ${result.droppedFeatureLinks} feature link(s) removed.`
+            : "Meeting and its actions moved to the new workspace",
+        color: "green",
+      });
+      void utils.transcription.invalidate();
+      void utils.action.getByTranscription.invalidate({ transcriptionId: id });
+    } catch (error) {
+      notifications.show({
+        title: "Error",
+        message: error instanceof Error ? error.message : "Failed to move meeting",
+        color: "red",
+      });
+    }
+  }
+
+  function handleProjectChange(projectId: string | null) {
+    if (!session) return;
+    // Routes through the placement service: sets the project, derives the
+    // workspace, and re-homes the meeting's Actions in one path.
+    assignProjectMutation.mutate({ transcriptionId: session.id, projectId });
+  }
+
+  // Register page context so the agent chat knows what recording is in view.
+  const recordingPageContext = useMemo(() => {
+    if (!session) return null;
+    return {
+      pageType: "recording" as const,
+      pageTitle: session.title ?? "Meeting",
+      pagePath: `/recording/${id}`,
+      data: {
+        transcriptionId: session.id,
+        title: session.title ?? "Untitled",
+        summary: session.summary ?? null,
+        description: session.description ?? null,
+        actionsCount: transcriptActions.length,
+        hasTranscription: session.hasTranscript,
+        meetingDate: session.meetingDate ? String(session.meetingDate) : null,
+        workspaceName: session.workspace?.name ?? null,
+        // /recording/<id> has no workspace in its URL, so without this the
+        // chat scopes to the person's default workspace and the agent's
+        // meeting tools look in the wrong place. Only for a member: the chat
+        // route rejects a workspace the person doesn't belong to.
+        workspaceId: session.isWorkspaceMember ? session.workspace?.id ?? null : null,
+      },
+    };
+  }, [session, transcriptActions.length, id]);
+
+  useRegisterPageContext(recordingPageContext);
+
+  if (isLoading) {
+    return <Skeleton height={400} />;
+  }
+
+  if (!session) {
+    return (
+      <Paper p="md">
+        <Text>Meeting not found</Text>
+      </Paper>
+    );
+  }
+
+  return (
+    <MeetingDetail
+      session={session}
+      actions={transcriptActions}
+      isActionsLoading={isActionsLoading}
+      isIdeatingFeatures={ideateFeaturesMutation.isPending}
+      isGeneratingSummary={generateSummaryMutation.isPending}
+      onSaveSummary={handleSaveSummary}
+      onSaveNotes={handleSaveNotes}
+      onRenameTitle={handleRenameTitle}
+      onMeetingDateChange={handleMeetingDateChange}
+      onProjectChange={handleProjectChange}
+      onWorkspaceChange={(workspaceId) => void handleWorkspaceChange(workspaceId)}
+      isSavingWorkspace={moveToWorkspaceMutation.isPending}
+      onIdeateFeatures={handleIdeateFeatures}
+      onRegenerateSummary={handleRegenerateSummary}
+      onExtractOutputs={handleExtractOutputs}
+      isExtractingOutputs={extractOutputsMutation.isPending}
+      onArchive={handleArchive}
+    />
+  );
+}

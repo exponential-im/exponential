@@ -5,6 +5,54 @@
 Accepted — 2026-08-03
 
 Amended by [ADR-0061](0061-time-entries-belong-to-the-owner.md): for `TimeEntry` only, an agent may write a row owned by its owner, recording itself as author.
+Amended by [ADR-0079](0079-agents-keep-their-owners-reading-list.md): an agent saves `Resource`s to its owner's Reading list, inside its delegated workspaces, recording itself as author.
+
+Amended 2026-11-09 (ticket alpha.shark): the delegation invariant extends to **project
+membership**. A project admin may add an agent's shadow user to a project (this is how an agent
+enters a restricted project, which the member role never reaches) only while the agent already
+belongs to the project's workspace and its owner has access to the project; the role is capped at
+`editor`; removing the owner from the project removes their agents too. Refusals from a project
+name the account, its owner and the missing access rather than saying "Access denied".
+
+Amended 2026-11-15: the delegation invariant also holds from the other side for **Actions**.
+An agent writes as its shadow user (point 7), so an Action it created with no project and no
+assignee was readable by the agent alone: its owner could not find it in search, open it or
+complete it, although the owner holds the agent's key. The owner of the agent that created an
+Action now reaches it through the central action resolver, **while they still belong to the
+Action's workspace**: view at any role, edit and delete at a write role. The path ends when the
+owner leaves the workspace, as the agent's own membership does; an Action in no workspace follows
+the agent's owner. Attribution is unchanged: `createdById` stays the shadow user.
+
+Amended 2026-11-15 (ticket slim.lake, decided by James): such an Action also lands on the owner's
+plate. When an agent principal creates an Action with **no project and no assignee**, the owner is
+assigned to it, so it appears on their Today and Inbox and they get the usual Assignment
+notification. The rule is the Action write module's (`resolveAgentOwnerAssignee`), so every create
+path has it, and it reads the verified principal, never a label the caller sends. An Action in a
+project is left alone (the project's people already see it, and an agent filing backlog work for a
+team is not handing it all to its owner), as is one whose assignee the agent named. The owner is
+added only if they belong to the Action's workspace, and the assignment does not outlive that:
+an assignee keeps an Action whatever their workspace standing, so the cascade that removes an
+owner's agents from a workspace (removal, or demotion to viewer) also unassigns the owner from
+the project-less Actions those agents created there. A viewer goes on reading them through the
+owner path above; someone removed reaches nothing. This is the third "an agent keeps this for
+its owner" case after time (ADR-0061) and the Reading list (ADR-0079), and differs from both: the
+row is not owned by the owner, it is assigned to them.
+
+Amended 2026-11-15 (ADRs in the agent context, PR #1129): an agent may read **ADR metadata**
+(label, title, status, link; never the body) through `agentGuidance.context`, under the same
+role the `adr` router demands of a person: its shadow user needs a write role in the workspace
+(member or above; viewers and guests get none), and its owner must still belong to the
+workspace. The `adr` router itself stays human-only, so the ADR text is read only by people.
+Zoe and the gateways (`agent_for_human`) get the same metadata when the person has a write role.
+
+Amended 2026-11-16 by [ADR-0083](0083-app-is-its-own-oauth-server-for-mcp-clients.md) (ticket
+bold.heron): point 5 still holds, and static keys remain the credential for software that can
+keep one. An **OAuth connection** is a second credential for the same principal: a person
+approves an MCP client on the consent screen, the connection is bound to one of their External
+agents, and its access token resolves exactly as that agent's key does (the shadow user, token
+type `agent-key`). The tokens stay opaque and hashed (`exp_oat_` access, `exp_ort_` refresh,
+never JWTs), so disconnecting revokes them on the next request, and they are honoured only at
+`/api/mcp`, the audience they are issued for.
 
 ## Context
 

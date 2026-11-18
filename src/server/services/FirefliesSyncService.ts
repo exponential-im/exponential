@@ -1,5 +1,6 @@
 import { db } from '~/server/db';
 import { attachMeetingToOccurrence } from "~/server/services/ceremonies/autoAttach";
+import { fileFirefliesImport } from "~/server/services/meetings/firefliesDefaultWorkspace";
 import { FirefliesService, type FirefliesTranscript } from './FirefliesService';
 import { getDecryptedKey } from '~/server/utils/credentialHelper';
 // import { ActionProcessorFactory } from './processors/ActionProcessorFactory';
@@ -287,11 +288,14 @@ export class FirefliesSyncService {
               continue;
             }
             
-            // Update existing non-archived
+            // Update existing non-archived. A changed transcript makes the
+            // Knowledge index stale; the embedding sweep picks up `pending`.
+            const transcriptChanged = existingSession.transcription !== sessionData.transcription;
             transcriptionSession = await db.transcriptionSession.update({
               where: { sessionId: transcript.id },
               data: {
                 ...sessionData,
+                ...(transcriptChanged ? { embeddingStatus: 'pending' } : {}),
                 updatedAt: new Date(),
               }
             });
@@ -309,6 +313,13 @@ export class FirefliesSyncService {
             result.newTranscripts++;
             // Ceremony auto-attach (ADR-0059); never throws.
             await attachMeetingToOccurrence(db, transcriptionSession);
+            // Still unplaced → the integration's opt-in default workspace.
+            // Never throws.
+            await fileFirefliesImport(db, {
+              meetingId: transcriptionSession.id,
+              ownerUserId: userId,
+              integrationId,
+            });
           }
 
           // 5. Skip action processing during bulk sync

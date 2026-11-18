@@ -125,6 +125,25 @@ describe("emitNotification — Assignment tracer", () => {
     );
   });
 
+  it("resolves to the recipients it notified, or null when resolving them failed", async () => {
+    const reached = await emitNotification({
+      category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+      actorUserId: "actor1",
+      subject: { actionId: "a1", assignedUserIds: ["assignee1", "actor1"] },
+      db,
+    });
+    expect(reached).toEqual(["assignee1"]);
+
+    canAccessMock.mockRejectedValueOnce(new Error("db down"));
+    const failed = await emitNotification({
+      category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+      actorUserId: "actor1",
+      subject: { actionId: "a1", assignedUserIds: ["assignee1"] },
+      db,
+    });
+    expect(failed).toBeNull();
+  });
+
   it("never notifies the actor about their own action (self-assign)", async () => {
     await emitNotification({
       category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
@@ -875,5 +894,43 @@ describe("emitNotification — Update review", () => {
         }),
       }),
     );
+  });
+});
+
+describe("emitNotification — concurrent emit race", () => {
+  it("treats a unique-constraint loss on the Notification insert as already sent, not an error", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    db.notification.create.mockRejectedValue(
+      Object.assign(new Error("Unique constraint failed on the fields: (`dedupeKey`,`userId`)"), { code: "P2002" }),
+    );
+
+    const result = await emitNotification({
+      category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+      actorUserId: "actor1",
+      subject: { actionId: "a1", assignedUserIds: ["assignee1"] },
+      db,
+    });
+
+    expect(result).toEqual(["assignee1"]);
+    expect(db.notificationDelivery.create).not.toHaveBeenCalled();
+    expect(sendNotificationSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("still surfaces any other insert failure", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    db.notification.create.mockRejectedValue(Object.assign(new Error("boom"), { code: "P2003" }));
+
+    await emitNotification({
+      category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+      actorUserId: "actor1",
+      subject: { actionId: "a1", assignedUserIds: ["assignee1"] },
+      db,
+    });
+
+    expect(errorSpy).toHaveBeenCalled();
+    expect(db.notificationDelivery.create).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

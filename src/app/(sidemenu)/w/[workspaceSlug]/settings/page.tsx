@@ -25,14 +25,15 @@ import {
   IconUserPlus,
   IconPlug,
   IconCalendarRepeat,
+  IconCreditCard,
   IconFolder,
   IconUsers,
   IconRocket,
   IconMail,
   IconPlugConnected,
-  IconCoin,
   IconSun,
   IconCalendarCheck,
+  IconBrandGithub,
   IconBrandSlack,
   IconBrandNotion,
   IconRefresh,
@@ -50,17 +51,22 @@ import {
   IconSend,
   IconBug,
   IconServer,
+  IconAlertTriangle,
   type Icon as TablerIcon,
 } from '@tabler/icons-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { canDelegateFromRole } from '~/lib/agentDelegation';
+import { PersonLink } from '~/app/_components/people/PersonLink';
 import { InviteMemberModal } from '~/app/_components/InviteMemberModal';
 import { EditMemberRoleModal } from '~/app/_components/EditMemberRoleModal';
 import { PendingInvitationsTable } from '~/app/_components/PendingInvitationsTable';
 import { WorkspaceTeamsSection } from '~/app/_components/WorkspaceTeamsSection';
+import { PositionsSection } from '~/app/_components/PositionsSection';
 import { SlackChannelSettings } from '~/app/_components/SlackChannelSettings';
+import { GithubRepositoriesSettings } from '~/app/_components/integrations/GithubRepositoriesSettings';
 import { ZulipSettings } from '~/app/_components/ZulipSettings';
 import { MatrixServerSettings } from '~/app/_components/MatrixServerSettings';
 import { SentrySettings } from '~/app/_components/SentrySettings';
@@ -87,22 +93,36 @@ import {
   type SidebarGroup,
 } from '~/app/_components/settings/SettingsShell';
 import { WorkspaceUpdatesSettings } from '~/app/_components/settings/WorkspaceUpdatesSettings';
+import { AiFeaturesSettings } from '~/app/_components/settings/AiFeaturesSettings';
+import { BillingSettings } from '~/app/_components/settings/BillingSettings';
 
-type SectionId =
-  | 'general'
-  | 'members'
-  | 'teams'
-  | 'features'
-  | 'integrations'
-  | 'plugins'
-  | 'ceremonies'
-  | 'updates'
-  | 'danger';
+const SECTION_IDS = [
+  'general',
+  'members',
+  'teams',
+  'features',
+  'integrations',
+  'plugins',
+  'ceremonies',
+  'updates',
+  'billing',
+  'danger',
+] as const;
+
+type SectionId = (typeof SECTION_IDS)[number];
+
+/** `?section=integrations` opens that section, so other pages and OAuth returns can link to it. */
+function sectionFromParam(value: string | null): SectionId {
+  return SECTION_IDS.find((id) => id === value) ?? 'general';
+}
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
   const { workspace, workspaceId, isLoading, userRole, refetchWorkspace } = useWorkspace();
-  const [section, setSection] = useState<SectionId>('general');
+  const searchParams = useSearchParams();
+  const [section, setSection] = useState<SectionId>(() =>
+    sectionFromParam(searchParams.get('section')),
+  );
   const [editingField, setEditingField] = useState<'name' | 'description' | 'aiInstructions' | null>(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -117,6 +137,8 @@ export default function WorkspaceSettingsPage() {
     email: string | null;
     image: string | null;
     role: string;
+    isAgent: boolean;
+    agentDescription: string | null;
   } | null>(null);
   const [firefliesModalOpened, { open: openFirefliesModal, close: closeFirefliesModal }] = useDisclosure(false);
   const [emailModalOpened, { open: openEmailModal, close: closeEmailModal }] = useDisclosure(false);
@@ -165,7 +187,6 @@ export default function WorkspaceSettingsPage() {
   const currentEffortUnit = (workspaceData?.effortUnit as EffortUnit | undefined) ?? 'STORY_POINTS';
   const advancedActionsEnabled = workspaceData?.enableAdvancedActions ?? false;
   const detailedActionsEnabled = workspaceData?.enableDetailedActions ?? false;
-  const bountiesEnabled = workspaceData?.enableBounties ?? false;
   const dailyPlanBannerEnabled = workspaceData?.enableDailyPlanBanner ?? true;
   const weeklyReviewBannerEnabled = workspaceData?.enableWeeklyReviewBanner ?? true;
   const emailNotificationsEnabled = workspaceData?.enableEmailNotifications ?? true;
@@ -175,6 +196,29 @@ export default function WorkspaceSettingsPage() {
   const keyResultsEnabled =
     workspaceData?.enableKeyResults ?? (workspaceData?.type !== 'personal');
   const currentHomeLayout = validateHomeLayout(workspaceData?.homeLayout);
+
+  // Positions per member (ADR-0068) for the Members table. A personal
+  // workspace has one human and nobody to route to, so the column — and its
+  // warning, which would fire forever — is skipped there along with the query.
+  const isPersonalWorkspace = workspace?.type === 'personal';
+  const { data: positionList } = api.position.list.useQuery(
+    { workspaceId: workspaceId ?? '' },
+    { enabled: !!workspaceId && !!workspace && !isPersonalWorkspace }
+  );
+  const positionTitleById = new Map(
+    (positionList?.positions ?? []).map((position) => [position.id, position.title])
+  );
+  const memberPositions = new Map(
+    (positionList?.members ?? []).map((member) => [
+      member.userId,
+      {
+        titles: member.positionIds
+          .map((id) => positionTitleById.get(id))
+          .filter((title): title is string => !!title),
+        remitGap: member.remitGap,
+      },
+    ])
+  );
 
   const featureSuccess = (message: string) => () => {
     void utils.workspace.getBySlug.invalidate();
@@ -212,11 +256,6 @@ export default function WorkspaceSettingsPage() {
       detailedActionsEnabled
         ? 'Detailed action pages have been disabled'
         : 'Detailed action pages have been enabled'
-    ),
-  });
-  const updateBountiesMutation = api.workspace.update.useMutation({
-    onSuccess: featureSuccess(
-      bountiesEnabled ? 'Bounties have been disabled' : 'Bounties have been enabled'
     ),
   });
   const updateDailyPlanBannerMutation = api.workspace.update.useMutation({
@@ -395,6 +434,30 @@ export default function WorkspaceSettingsPage() {
     },
   });
 
+  // "Add my Assistant" (ADR-0072, Agent PRD V2): a person's Assistant joins a
+  // workspace only when they add it, and only where they hold a delegating
+  // role — the same rule the server enforces in assistant.addToWorkspace.
+  const canAddMyAssistant = canDelegateFromRole(userRole);
+  const { data: myAssistant } = api.assistant.getMine.useQuery(undefined, {
+    enabled: section === 'members' && canAddMyAssistant,
+  });
+  const addMyAssistantMutation = api.assistant.addToWorkspace.useMutation({
+    onSuccess: () => {
+      refetchWorkspace();
+      void utils.assistant.getMine.invalidate();
+      void utils.assistant.myWorkspaces.invalidate();
+      notifications.show({
+        title: 'Assistant added',
+        message: `${myAssistant?.name ?? 'Your Assistant'} can now be assigned work in ${workspace?.name ?? 'this workspace'}.`,
+        color: 'green',
+        autoClose: 3000,
+      });
+    },
+    onError: (error) => {
+      notifications.show({ title: 'Could not add your Assistant', message: error.message, color: 'red' });
+    },
+  });
+
   const { data: emailStatus, refetch: refetchEmailStatus } = api.integration.getWorkspaceEmailStatus.useQuery(
     { workspaceId: workspaceId! },
     { enabled: !!workspaceId }
@@ -519,6 +582,17 @@ export default function WorkspaceSettingsPage() {
     }
   );
 
+  // Answers `{ mode: 'off' }` on an install that does not meter Assistant use
+  // (every self-hosted one), and then there is no Billing tab at all.
+  const { data: billingStatus } = api.billing.getStatus.useQuery(
+    { workspaceId: workspaceId! },
+    {
+      enabled:
+        !!workspaceId && (userRole === 'owner' || userRole === 'admin'),
+    }
+  );
+  const showBilling = !!billingStatus && billingStatus.mode !== 'off';
+
   const handleSaveEmail = () => {
     if (!workspaceId || !emailAddress || !emailAppPassword) return;
     createEmailMutation.mutate({
@@ -580,7 +654,13 @@ export default function WorkspaceSettingsPage() {
 
   const handleEditRole = (member: {
     userId: string;
-    user: { name: string | null; email: string | null; image: string | null };
+    user: {
+      name: string | null;
+      email: string | null;
+      image: string | null;
+      isAgent: boolean;
+      externalAgentShadow?: { description: string | null } | null;
+    };
     role: string;
   }) => {
     setEditingMember({
@@ -589,6 +669,8 @@ export default function WorkspaceSettingsPage() {
       email: member.user.email,
       image: member.user.image,
       role: member.role,
+      isAgent: member.user.isAgent,
+      agentDescription: member.user.externalAgentShadow?.description ?? null,
     });
     openEditRoleModal();
   };
@@ -613,13 +695,16 @@ export default function WorkspaceSettingsPage() {
 
   const canEdit = userRole === 'owner' || userRole === 'admin';
   const canManageMembers = userRole === 'owner' || userRole === 'admin';
+  const myAssistantShadowId = myAssistant?.externalAgent.shadowUserId;
+  const myAssistantIsMember =
+    !!myAssistantShadowId && !!workspace.members?.some((member) => member.userId === myAssistantShadowId);
+  const showAddMyAssistant = canAddMyAssistant && !myAssistantIsMember;
 
   const memberCount = workspace.members?.length ?? 0;
   const pendingCount = pendingInvites?.length ?? 0;
   const featureList = [
     advancedActionsEnabled,
     detailedActionsEnabled,
-    bountiesEnabled,
     keyResultsEnabled,
     dailyPlanBannerEnabled,
     weeklyReviewBannerEnabled,
@@ -646,6 +731,9 @@ export default function WorkspaceSettingsPage() {
         { id: 'ceremonies', label: 'Ceremonies', icon: IconCalendarRepeat },
         ...(userRole === 'owner' || userRole === 'admin'
           ? [{ id: 'updates' as const, label: 'Updates', icon: IconSparkles }]
+          : []),
+        ...(showBilling
+          ? [{ id: 'billing' as const, label: 'Billing', icon: IconCreditCard }]
           : []),
       ],
     },
@@ -910,38 +998,74 @@ export default function WorkspaceSettingsPage() {
               count={`${memberCount} · ${pendingCount} pending`}
               description="People with access to projects, goals, and integrations in this workspace."
               action={
-                canManageMembers && (
-                  <Button
-                    size="xs"
-                    leftSection={<IconUserPlus size={14} />}
-                    onClick={openInviteModal}
-                  >
-                    Invite member
-                  </Button>
+                (showAddMyAssistant || canManageMembers) && (
+                  <Group gap="xs">
+                    {showAddMyAssistant && (
+                      <Button
+                        size="xs"
+                        variant="default"
+                        leftSection={<IconRobotFace size={14} />}
+                        onClick={() => workspaceId && addMyAssistantMutation.mutate({ workspaceId })}
+                        loading={addMyAssistantMutation.isPending}
+                        data-testid="add-my-assistant"
+                      >
+                        Add my Assistant
+                      </Button>
+                    )}
+                    {canManageMembers && (
+                      <Button
+                        size="xs"
+                        leftSection={<IconUserPlus size={14} />}
+                        onClick={openInviteModal}
+                      >
+                        Invite member
+                      </Button>
+                    )}
+                  </Group>
                 )
               }
               flush
             >
-              <div className="grid grid-cols-[1fr_140px_auto] px-2 pt-3 text-[13px]">
+              {/* Phones: three columns (member, role, actions) and positions
+                  move under the member's name, so the role isn't cut off. */}
+              <div
+                className={`grid grid-cols-[minmax(0,1fr)_auto_auto] px-0 pt-3 text-[13px] sm:px-2 ${
+                  isPersonalWorkspace
+                    ? 'sm:grid-cols-[minmax(0,1fr)_140px_auto]'
+                    : 'sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_140px_auto]'
+                }`}
+              >
                 <div className="border-b border-border-primary px-3.5 pb-2.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-text-muted">
                   Member
                 </div>
+                {!isPersonalWorkspace && (
+                  <div className="hidden border-b border-border-primary px-3.5 pb-2.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-text-muted sm:block">
+                    Positions
+                  </div>
+                )}
                 <div className="border-b border-border-primary px-3.5 pb-2.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-text-muted">
                   Role
                 </div>
                 <div className="border-b border-border-primary px-3.5 pb-2.5" />
 
                 {workspace.members?.map((member) => (
-                  <div key={member.userId} className="contents group">
+                  <div
+                    key={member.userId}
+                    className="contents group"
+                    data-testid="member-row"
+                    data-user-id={member.userId}
+                  >
                     <div className="flex items-center gap-2.5 border-b border-border-primary px-3.5 py-2.5 group-hover:bg-background-elevated">
                       <Avatar src={member.user.image} size="sm" radius="xl">
                         {member.user.name?.charAt(0).toUpperCase() ?? 'U'}
                       </Avatar>
                       <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 text-[13px] font-medium text-text-primary truncate">
-                          {member.user.name ?? 'Unknown'}
+                        <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] font-medium text-text-primary">
+                          <PersonLink userId={member.userId} className="max-w-full truncate">
+                            {member.user.name ?? 'Unknown'}
+                          </PersonLink>
                           {member.user.isAgent && (
-                            <span className="inline-flex items-center gap-0.5 rounded border border-border-primary px-1 text-[10px] font-normal text-text-muted">
+                            <span className="inline-flex shrink-0 items-center gap-0.5 rounded border border-border-primary px-1 text-[10px] font-normal text-text-muted">
                               <IconRobotFace size={10} aria-hidden="true" />
                               agent
                             </span>
@@ -950,9 +1074,29 @@ export default function WorkspaceSettingsPage() {
                         <div className="text-[11.5px] text-text-muted truncate">
                           {member.user.email}
                         </div>
+                        {!isPersonalWorkspace && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1 empty:hidden sm:hidden">
+                            <MemberPositionsCell
+                              held={memberPositions.get(member.userId)}
+                              isAgent={member.user.isAgent}
+                              withTestIds={false}
+                            />
+                          </div>
+                        )}
                       </div>
                     </div>
-                    <div className="flex items-center border-b border-border-primary px-3.5 py-2.5 group-hover:bg-background-elevated">
+                    {!isPersonalWorkspace && (
+                      <div
+                        className="hidden flex-wrap items-center gap-1 border-b border-border-primary px-3.5 py-2.5 group-hover:bg-background-elevated sm:flex"
+                        data-testid="member-positions"
+                      >
+                        <MemberPositionsCell
+                          held={memberPositions.get(member.userId)}
+                          isAgent={member.user.isAgent}
+                        />
+                      </div>
+                    )}
+                    <div className="flex items-center border-b border-border-primary px-2 py-2.5 sm:px-3.5 group-hover:bg-background-elevated">
                       <SettingsPill
                         variant={
                           member.role === 'owner'
@@ -965,12 +1109,13 @@ export default function WorkspaceSettingsPage() {
                         {member.role}
                       </SettingsPill>
                     </div>
-                    <div className="flex items-center justify-end gap-1 border-b border-border-primary px-3.5 py-2.5 group-hover:bg-background-elevated">
+                    <div className="flex items-center justify-end gap-1 border-b border-border-primary px-2 py-2.5 sm:px-3.5 group-hover:bg-background-elevated">
                       {userRole === 'owner' && member.role !== 'owner' && (
                         <Tooltip label="Edit role">
                           <ActionIcon
                             variant="subtle"
                             color="gray"
+                            aria-label="Edit role"
                             onClick={() => handleEditRole(member)}
                           >
                             <IconPencil size={14} />
@@ -994,6 +1139,17 @@ export default function WorkspaceSettingsPage() {
                 ))}
               </div>
             </SettingsSection>
+
+            {/* Positions (ADR-0068): who does what. A personal workspace has one
+                human and nobody to route to, so neither the section nor the
+                members' Positions column renders there. */}
+            {!isPersonalWorkspace && (
+              <PositionsSection
+                workspaceId={workspace.id}
+                canManage={canManageMembers}
+                members={workspace.members ?? []}
+              />
+            )}
 
             {projectGuests && projectGuests.length > 0 && (
               <SettingsSection
@@ -1031,7 +1187,7 @@ export default function WorkspaceSettingsPage() {
                           <span key={project.id} className="text-[12.5px]">
                             <a
                               href={`/w/${workspace.slug}/projects/${project.slug}?tab=access`}
-                              className="text-brand-primary hover:underline"
+                              className="text-link hover:underline"
                             >
                               {project.name}
                             </a>
@@ -1152,18 +1308,6 @@ export default function WorkspaceSettingsPage() {
               }}
             />
             <FeatureRow
-              icon={IconCoin}
-              tag="Product"
-              title="Bounties"
-              description="Enable bounty rewards on actions in public projects. Projects can override."
-              enabled={bountiesEnabled}
-              disabled={!canEdit || updateBountiesMutation.isPending}
-              onToggle={(checked) => {
-                if (!workspaceId) return;
-                updateBountiesMutation.mutate({ workspaceId, enableBounties: checked });
-              }}
-            />
-            <FeatureRow
               icon={IconTarget}
               tag="Product"
               title="Key Results"
@@ -1240,6 +1384,7 @@ export default function WorkspaceSettingsPage() {
 
         {section === 'integrations' && (
           <>
+            <AiFeaturesSettings />
             <SettingsSection
               icon={IconMail}
               title="Email Account"
@@ -1386,6 +1531,16 @@ export default function WorkspaceSettingsPage() {
                   workspace={{ id: workspaceId, name: workspace.name }}
                   canManage={canEdit}
                 />
+              </SettingsSection>
+            )}
+
+            {workspaceId && (
+              <SettingsSection
+                icon={IconBrandGithub}
+                title="GitHub"
+                description="Choose the repositories this workspace tracks. Their pull requests and commits feed the activity feed, delivery metrics and the Decision Log."
+              >
+                <GithubRepositoriesSettings />
               </SettingsSection>
             )}
 
@@ -1612,6 +1767,8 @@ export default function WorkspaceSettingsPage() {
             members={workspace.members ?? []}
           />
         )}
+
+        {section === 'billing' && showBilling && <BillingSettings workspaceId={workspace.id} />}
 
         {section === 'danger' && userRole === 'owner' && (
           <SettingsDangerZone icon={IconShieldExclamation}>
@@ -1860,5 +2017,45 @@ function FeatureRow({
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * A member's Positions as pills, or the remit-gap warning (ADR-0068): a human
+ * with no Position, or an agent with neither a Position nor a description.
+ * An agent routed by its own description shows nothing — the description is
+ * routing data, not a label.
+ */
+function MemberPositionsCell({
+  held,
+  isAgent,
+  withTestIds = true,
+}: {
+  held: { titles: string[]; remitGap: boolean } | undefined;
+  isAgent: boolean;
+  /** Off for the phone-only copy, so each test id stays unique on the page. */
+  withTestIds?: boolean;
+}) {
+  if (!held) return null;
+  if (held.remitGap) {
+    const label = isAgent
+      ? "No Position or description — Zoe can't route work here"
+      : "No Position — Zoe can't route work here";
+    return (
+      <Tooltip label={label}>
+        <span className="inline-flex text-brand-warning" data-testid={withTestIds ? "remit-gap" : undefined} aria-label={label}>
+          <IconAlertTriangle size={14} />
+        </span>
+      </Tooltip>
+    );
+  }
+  return (
+    <>
+      {held.titles.map((title) => (
+        <SettingsPill key={title} variant="neutral">
+          {title}
+        </SettingsPill>
+      ))}
+    </>
   );
 }

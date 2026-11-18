@@ -1,6 +1,11 @@
 import type { PrismaClient } from "@prisma/client";
+import { TRPCError } from "@trpc/server";
 import { generateJWT } from "~/server/utils/jwt";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
+import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
+import { assembleLoadedScope, loadScopeInstructions } from "~/server/services/agentGuidance";
+import { readGenerateUsage } from "~/server/services/billing/mastraUsage";
+import { recordTurnUsage } from "~/server/services/billing/usage";
 import { onRunFinished } from "./finish";
 
 /**
@@ -33,6 +38,12 @@ export interface DispatchResult {
   cancelled: string[];
   failed: Array<{ id: string; error: string }>;
 }
+
+/**
+ * The model `assistantRunAgent` runs on, used to price a run only when
+ * Mastra's reply does not name the model itself.
+ */
+const RUN_AGENT_FALLBACK_MODEL_ID = "claude-sonnet-4-5";
 
 /** What the Mastra `generate` endpoint returns that we read (defensively). */
 interface GenerateOutput {
@@ -113,13 +124,21 @@ export function buildPersonaMessage(assistant: {
   return parts.join("\n\n");
 }
 
-/** The user turn: the action brief the run works from. */
+/**
+ * The user turn: the action brief the run works from. Hosted and local runs
+ * share it — only the closing protocol line differs — so both name the same
+ * person as the one a question goes to (`resolveRunQuestionRecipient`).
+ */
 export function buildActionBrief(input: {
   action: { id: string; name: string; description: string | null; dueDate: Date | null; project: { name: string } | null };
   ownerName: string | null;
   requesterName: string | null;
+  /** Who a question from this run goes to: the requester, else the owner. */
+  askName: string | null;
   predecessorSummary: string | null;
   wakeComment: string | null;
+  /** Who wrote the reply that resumed this run. */
+  wakeCommentAuthorName?: string | null;
   /** The last line; defaults to the hosted run tools' protocol. */
   closing?: string;
 }): string {
@@ -130,12 +149,13 @@ export function buildActionBrief(input: {
     input.action.dueDate ? `Due: ${input.action.dueDate.toISOString().slice(0, 10)}.` : "",
     input.requesterName ? `Assigned by ${input.requesterName}.` : "",
     input.ownerName ? `Your owner is ${input.ownerName}.` : "",
+    input.askName ? `If you need to ask a question, it goes to ${input.askName}.` : "",
   ];
   if (input.predecessorSummary) {
     lines.push(`You are resuming. Your previous run ended with:\n${input.predecessorSummary}`);
   }
   if (input.wakeComment) {
-    lines.push(`Your owner replied:\n${input.wakeComment}`);
+    lines.push(`${input.wakeCommentAuthorName ?? "The person you asked"} replied:\n${input.wakeComment}`);
   }
   lines.push(
     input.closing ??
@@ -144,14 +164,72 @@ export function buildActionBrief(input: {
   return lines.filter(Boolean).join("\n\n");
 }
 
+/**
+ * The workspace's and project's AI instructions for a run, assembled exactly
+ * as chat assembles them (demoted `<user_data>` guidance, ADR-0071), read as
+ * the run's shadow user. Null when no scope has text.
+ *
+ * A scope the shadow user can't read (it lost membership, or the action's
+ * project moved out of the workspace) runs without instructions rather than
+ * failing the run; the gap is reported.
+ */
+export async function loadRunScopeInstructions(
+  db: PrismaClient,
+  input: { shadowUserId: string; runId: string; workspaceId: string | null; projectId: string | null },
+): Promise<string | null> {
+  if (!input.workspaceId && !input.projectId) return null;
+  try {
+    const loaded = await loadScopeInstructions(db, {
+      userId: input.shadowUserId,
+      workspaceId: input.workspaceId,
+      projectId: input.projectId,
+    });
+    if (input.projectId && !loaded.project) {
+      // The project is hidden from the shadow user (restricted, or moved out
+      // of the workspace): the run goes ahead with the workspace scope only.
+      reportHandledErrorServer(new Error("Agent run could not read its action's project AI instructions"), {
+        area: "agentRuns.scopeInstructions",
+        kind: "PROJECT_NOT_VISIBLE",
+        context: { runId: input.runId, workspaceId: input.workspaceId ?? "", projectId: input.projectId },
+      });
+    }
+    return assembleLoadedScope(loaded);
+  } catch (err) {
+    if (!(err instanceof TRPCError)) throw err;
+    reportHandledErrorServer(err, {
+      area: "agentRuns.scopeInstructions",
+      kind: err.code,
+      context: { runId: input.runId, workspaceId: input.workspaceId ?? "", projectId: input.projectId ?? "" },
+    });
+    return null;
+  }
+}
+
+/**
+ * The messages a run starts from: the persona, the scope's AI instructions
+ * (when there are any) as a second system message, then the brief.
+ */
+export function buildRunMessages(input: {
+  system: string;
+  scopeInstructions: string | null;
+  brief: string;
+}): Array<{ role: "system" | "user"; content: string }> {
+  return [
+    { role: "system", content: input.system },
+    ...(input.scopeInstructions ? [{ role: "system" as const, content: input.scopeInstructions }] : []),
+    { role: "user", content: input.brief },
+  ];
+}
+
 /** The closing line a local runner's brief ends with: the runner reports through `agentRun.finish`. */
 export const LOCAL_RUNNER_CLOSING =
   "Do the work, then finish with a short public summary and whether the action is ready to close " +
-  "(or a question for your owner if you are stuck).";
+  "(or a question, if you are stuck).";
 
 /**
  * Everything an executor needs to start a run: the run row with its action,
- * agent, requester and predecessor, the persona system message and the brief.
+ * agent, requester and predecessor, the persona system message, the scope's
+ * AI instructions and the brief.
  * Shared by the hosted dispatcher and `agentRun.claim` (V2) so a local runner
  * works from exactly the brief Mastra would have.
  */
@@ -159,7 +237,7 @@ export async function loadRunBrief(db: PrismaClient, runId: string, options: { c
   const run = await db.agentRun.findUniqueOrThrow({
     where: { id: runId },
     include: {
-      action: { include: { project: { select: { name: true } } } },
+      action: { include: { project: { select: { name: true, workspaceId: true } } } },
       agent: {
         include: {
           shadowUser: { select: { id: true, email: true, name: true, image: true } },
@@ -175,7 +253,10 @@ export async function loadRunBrief(db: PrismaClient, runId: string, options: { c
   });
 
   const wakeComment = run.wakeCommentId
-    ? await db.actionComment.findUnique({ where: { id: run.wakeCommentId }, select: { content: true } })
+    ? await db.actionComment.findUnique({
+        where: { id: run.wakeCommentId },
+        select: { content: true, author: { select: { name: true } } },
+      })
     : null;
 
   const persona = run.agent.assistant ?? {
@@ -186,15 +267,26 @@ export async function loadRunBrief(db: PrismaClient, runId: string, options: { c
     userContext: null,
   };
 
+  const scopeInstructions = await loadRunScopeInstructions(db, {
+    shadowUserId: run.agent.shadowUser.id,
+    runId: run.id,
+    workspaceId: run.action.workspaceId,
+    projectId: run.action.projectId,
+  });
+
   return {
     run,
     system: buildPersonaMessage(persona),
+    scopeInstructions,
     brief: buildActionBrief({
       action: run.action,
       ownerName: run.agent.owner.name,
       requesterName: run.requestedBy?.name ?? null,
+      // `resolveRunQuestionRecipient`, by name: the requester, else the owner.
+      askName: run.requestedById ? (run.requestedBy?.name ?? null) : run.agent.owner.name,
       predecessorSummary: run.predecessor?.summary ?? null,
       wakeComment: wakeComment?.content ?? null,
+      wakeCommentAuthorName: wakeComment?.author.name ?? null,
       closing: options.closing,
     }),
   };
@@ -212,7 +304,7 @@ async function runOne(
   db: PrismaClient,
   runId: string,
 ): Promise<"SUCCEEDED" | "WAITING_ON_OWNER" | "CANCELLED"> {
-  const { run, system, brief } = await loadRunBrief(db, runId);
+  const { run, system, scopeInstructions, brief } = await loadRunBrief(db, runId);
 
   const shadow = run.agent.shadowUser;
   // The run acts as the Assistant's own principal: every write the callbacks
@@ -223,10 +315,7 @@ async function runOne(
     { tokenType: "agent-context", expiryMinutes: RUN_JWT_MINUTES, extraClaims: { runId: run.id } },
   );
 
-  const messages = [
-    { role: "system", content: system },
-    { role: "user", content: brief },
-  ];
+  const messages = buildRunMessages({ system, scopeInstructions, brief });
 
   const res = await fetch(`${MASTRA_API_URL}/api/agents/assistantRunAgent/generate`, {
     method: "POST",
@@ -252,6 +341,24 @@ async function runOne(
     throw new Error(`Mastra assistantRunAgent failed (${res.status}): ${errText.slice(0, 500)}`);
   }
   const output = (await res.json()) as GenerateOutput;
+
+  // Meter what the run cost, whatever becomes of it below: a run that ends
+  // waiting on its owner, or that a human cancelled meanwhile, was still
+  // paid for. A no-op unless this install meters, and it never throws.
+  // `AgentRun` has no workspace of its own: it is the action's (as finish.ts).
+  const meteredWorkspaceId = run.action.workspaceId ?? run.action.project?.workspaceId;
+  if (meteredWorkspaceId) {
+    const used = readGenerateUsage(output);
+    await recordTurnUsage(db, {
+      workspaceId: meteredWorkspaceId,
+      source: "AGENT_RUN",
+      modelId: used.modelId ?? RUN_AGENT_FALLBACK_MODEL_ID,
+      turnUsage: used.turnUsage,
+      stepUsages: used.stepUsages,
+      onOwnKey: used.onOwnKey,
+      refId: run.id,
+    });
+  }
 
   // Re-read: the callbacks may have recorded a finish or a question while
   // the HTTP call was in flight, and a human may have cancelled.

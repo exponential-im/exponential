@@ -22,6 +22,8 @@ import { effortPillLabel } from "~/types/effort";
 import { DateInput } from "@mantine/dates";
 import { modals } from "@mantine/modals";
 import { api } from "~/trpc/react";
+import { useProductDetailTitle } from "../../ProductDetailTitle";
+import { CycleTimeStat } from "~/app/_components/TimeLoggedSummary";
 
 const STATUS_OPTIONS = [
   { value: "PLANNED", label: "Planned" },
@@ -45,6 +47,7 @@ export function CycleDetailClient() {
     { id: cycleId },
     { enabled: !!cycleId },
   );
+  useProductDetailTitle(cycle?.name);
 
   const [status, setStatus] = useState<CycleStatus | null>(null);
   const [cycleGoal, setCycleGoal] = useState("");
@@ -278,6 +281,7 @@ export function CycleDetailClient() {
               {donePoints} / {totalPoints}
             </Title>
           </div>
+          <CycleTimeStat cycleId={cycleId} workspaceShared={cycle.productId === null} />
         </Group>
       </Card>
 

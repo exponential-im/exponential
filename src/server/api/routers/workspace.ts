@@ -4,11 +4,14 @@ import { TRPCError } from "@trpc/server";
 import {
   cascadeOwnerRemovedFromWorkspace,
   cascadeOwnerRoleChanged,
+  revokeAgentProjectMembershipsInWorkspace,
 } from "~/server/services/externalAgentAccess";
 import {
   getWorkspaceMembership,
   buildWorkspaceAccessWhere,
   buildWorkspaceVisibilityWhere,
+  canEditWorkspaceContent,
+  type WorkspaceRole,
 } from "~/server/services/access";
 import { requireWorkspaceMembership } from "~/server/services/access/middleware";
 import { apiKeyMiddleware } from "~/server/api/middleware/apiKeyAuth";
@@ -108,6 +111,10 @@ async function loadWorkspaceForUser(
               email: true,
               image: true,
               isAgent: true,
+              // An agent member's description lives on its ExternalAgent row
+              // (global to the agent, not per workspace); shown read-only in
+              // the Edit Role modal.
+              externalAgentShadow: { select: { description: true } },
             },
           },
         },
@@ -168,6 +175,13 @@ async function loadWorkspaceForUser(
 
   return { status: "forbidden" as const };
 }
+
+/**
+ * `workspace.list` for an agent in no workspace. Its key authenticated, so the
+ * credential is fine; the fix is a membership, which only the owner can grant.
+ */
+export const UNPROVISIONED_AGENT_MESSAGE =
+  "This agent's key works, but the agent is in no workspace yet, so there is nothing to see. Its owner can add it to a workspace in Settings → Agents.";
 
 export const workspaceRouter = createTRPCRouter({
   // API endpoint for browser extension - uses API key authentication
@@ -314,6 +328,20 @@ export const workspaceRouter = createTRPCRouter({
       orderBy: [{ type: "asc" }, { createdAt: "desc" }],
     });
 
+    // A person always has at least their Personal workspace, so an empty list
+    // is only ever an agent nobody has added anywhere. Say so instead of
+    // returning [], which callers (the CLI, MCP tools) read as "you have
+    // nothing" and report cheerfully (raw.ledge).
+    if (workspaces.length === 0) {
+      const caller = await ctx.db.user.findUnique({
+        where: { id: userId },
+        select: { isAgent: true },
+      });
+      if (caller?.isAgent) {
+        throw new TRPCError({ code: "PRECONDITION_FAILED", message: UNPROVISIONED_AGENT_MESSAGE });
+      }
+    }
+
     return workspaces.map((workspace) => {
       const currentMember = workspace.members.find((m) => m.userId === userId);
 
@@ -330,6 +358,8 @@ export const workspaceRouter = createTRPCRouter({
       return {
         ...workspaceData,
         currentUserRole,
+        /** Can create or modify content here (member or above). */
+        canAddContent: canEditWorkspaceContent(currentUserRole as WorkspaceRole | null),
       };
     });
   }),
@@ -373,7 +403,6 @@ export const workspaceRouter = createTRPCRouter({
         effortUnit: z.enum(["STORY_POINTS", "T_SHIRT", "HOURS"]).optional(),
         enableAdvancedActions: z.boolean().optional(),
         enableDetailedActions: z.boolean().optional(),
-        enableBounties: z.boolean().optional(),
         enableDailyPlanBanner: z.boolean().optional(),
         enableWeeklyReviewBanner: z.boolean().optional(),
         enableEmailNotifications: z.boolean().optional(),
@@ -409,7 +438,6 @@ export const workspaceRouter = createTRPCRouter({
           effortUnit: input.effortUnit,
           enableAdvancedActions: input.enableAdvancedActions,
           enableDetailedActions: input.enableDetailedActions,
-          enableBounties: input.enableBounties,
           enableDailyPlanBanner: input.enableDailyPlanBanner,
           enableWeeklyReviewBanner: input.enableWeeklyReviewBanner,
           enableEmailNotifications: input.enableEmailNotifications,
@@ -885,7 +913,7 @@ export const workspaceRouter = createTRPCRouter({
             workspaceId: input.workspaceId,
           },
         },
-        include: { user: { select: { email: true } } },
+        include: { user: { select: { email: true, isAgent: true } } },
       });
 
       if (memberToRemove?.role === "owner") {
@@ -908,6 +936,13 @@ export const workspaceRouter = createTRPCRouter({
       // Delegation invariant (ADR-0049): the removed member's external agents
       // lose their memberships here too — agent access never outlives its owner's.
       await cascadeOwnerRemovedFromWorkspace(ctx.db, input.userId, input.workspaceId);
+
+      // An agent removed here — someone's Assistant or External agent, which
+      // an owner or admin may take out of their workspace — also loses the
+      // direct project grants it held in it, as when its owner revokes it.
+      if (memberToRemove?.user.isAgent) {
+        await revokeAgentProjectMembershipsInWorkspace(ctx.db, [input.userId], input.workspaceId);
+      }
 
       // Retire any invitation row for this address. Its token renders a public
       // landing page carrying the workspace name, inviter and member count, and
@@ -967,6 +1002,21 @@ export const workspaceRouter = createTRPCRouter({
           code: "FORBIDDEN",
           message: "Only workspace owners can change member roles",
         });
+      }
+
+      // Agent principals always hold `member` (ADR-0049 §3): never admin, and
+      // no viewer tier. Reject rather than coerce, so the caller learns the rule.
+      if (input.role !== "member") {
+        const target = await ctx.db.user.findUnique({
+          where: { id: input.userId },
+          select: { isAgent: true },
+        });
+        if (target?.isAgent) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Agents always hold the member role in a workspace",
+          });
+        }
       }
 
       // Update role
@@ -2175,6 +2225,7 @@ export const workspaceRouter = createTRPCRouter({
 
       return getActivityFeed(ctx.db, {
         workspaceId: input.workspaceId,
+        viewerId: ctx.session.user.id,
         cursor: input.cursor,
         limit: input.limit ?? FEED_PAGE_SIZE,
         source: input.source,
@@ -2296,6 +2347,7 @@ export const workspaceRouter = createTRPCRouter({
 
       return getAggregatedActivityFeed(ctx.db, {
         workspaceIds: workspaces.map((w) => w.id),
+        viewerId: ctx.session.user.id,
         cursor: input.cursor,
         limit: input.limit ?? FEED_PAGE_SIZE,
         source: input.source,

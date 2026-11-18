@@ -1138,7 +1138,7 @@ export function ProjectIntegrations({ project }: ProjectIntegrationsProps) {
                                 href={matrixRoomPermalink(matrixBinding.room.roomId) ?? undefined}
                                 target="_blank"
                                 rel="noopener noreferrer"
-                                className="text-brand-primary hover:underline"
+                                className="text-link hover:underline"
                               >
                                 Open in Matrix
                               </a>
@@ -1165,6 +1165,12 @@ export function ProjectIntegrations({ project }: ProjectIntegrationsProps) {
                       Choosing <strong>Off</strong> keeps this project&apos;s summaries out of Matrix even when the workspace has a default room.
                     </Text>
                     <MatrixRoomBinding workspaceId={workspaceId} projectId={project.id} />
+                    <Text size="xs" c="dimmed" pt="xs">
+                      <strong>Decisions → Matrix.</strong> Posted when a person confirms, accepts or supersedes one of this
+                      project&apos;s decisions; agent drafts never post. <strong>Off</strong> keeps them out of Matrix even
+                      when the workspace has a decisions room.
+                    </Text>
+                    <MatrixRoomBinding workspaceId={workspaceId} projectId={project.id} kind="decision" />
                   </Stack>
                 </Collapse>
               </Stack>

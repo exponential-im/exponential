@@ -4,8 +4,8 @@ import { useState } from 'react';
 import { IconPlus, IconSearch, IconChevronDown, IconChevronRight, IconBrandWhatsapp } from '@tabler/icons-react';
 import { TextInput, Avatar, Collapse } from '@mantine/core';
 import { api } from '~/trpc/react';
-import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { WhatsAppGatewayModal } from '../WhatsAppGatewayModal';
+import { SectionHeader } from "~/app/_components/ui";
 
 interface ChatSidebarProps {
   onSelectConversation: (conversationId: string) => void;
@@ -35,12 +35,8 @@ export function ChatSidebar({
     workspaceId: scopedWorkspaceId,
   });
 
-  const { workspaceId } = useWorkspace();
   const { data: agents } = api.mastra.getMastraAgents.useQuery();
-  const { data: customAssistant } = api.assistant.getDefault.useQuery(
-    { workspaceId: workspaceId ?? '' },
-    { enabled: !!workspaceId }
-  );
+  const { data: customAssistant } = api.assistant.getMine.useQuery();
 
   const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').toUpperCase();
 
@@ -75,9 +71,7 @@ export function ChatSidebar({
 
         {/* Your Chats Section */}
         <div className="mb-6">
-          <h3 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-text-muted">
-            Your Chats
-          </h3>
+          <SectionHeader as="h3" size="md" className="mb-2 px-3" title="Your Chats" />
           <ul className="space-y-1">
             {conversations?.map((conv) => {
               const isActive = conv.conversationId === activeConversationId;
@@ -110,9 +104,7 @@ export function ChatSidebar({
         {/* Custom Assistant */}
         {customAssistant && (
           <div className="mb-6">
-            <h3 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-text-muted">
-              Your Assistant
-            </h3>
+            <SectionHeader as="h3" size="md" className="mb-2 px-3" title="Your Assistant" />
             <ul className="space-y-1">
               <li>
                 <button

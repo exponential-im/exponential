@@ -1,4 +1,6 @@
 import { MastraClient } from "@mastra/client-js";
+import { TRPCError } from "@trpc/server";
+import { after } from "next/server";
 import { RequestContext } from "@mastra/core/di";
 import type { MessageListInput } from "@mastra/core/agent/message-list";
 
@@ -18,29 +20,44 @@ import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import {
   capToolCallsForTurn,
   formatUserFacingStreamError,
+  maskContextEntriesForLog,
   maskTokenLike,
   redactToolArgs,
   USER_FACING_PROVIDER_UNAVAILABLE,
   type LoggedToolCall,
 } from "~/server/utils/redactToolArgs";
 import {
+  agentErrorTraceContext,
   classifyProviderError,
   isNonRetryableProviderError,
+  PROVIDER_OUTAGE_RENOTIFY_MS,
   type ProviderErrorKind,
 } from "~/server/services/ai/providerError";
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
-import { computeRequestCost, PER_REQUEST_COST_ALERT_USD } from "~/server/services/ai/cost";
-import { assembleScopeInstructions } from "~/server/services/ai/scopeInstructions";
-import { buildProjectAccessWhere } from "~/server/services/access";
+import { classifyToolError, isReportableToolError, summarizeToolError } from "~/lib/chat/toolErrors";
+import { isValidTimeZone } from "~/lib/chat/localNow";
+import {
+  PER_REQUEST_COST_ALERT_USD,
+  priceTokenBreakdown,
+  turnTokenBreakdown,
+} from "~/server/services/ai/cost";
+import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
+import { readUsedOwnKey } from "~/server/services/billing/mastraUsage";
+import {
+  assembleLoadedScope,
+  loadScopeInstructions,
+  type LoadedScopeInstructions,
+} from "~/server/services/agentGuidance";
 import {
   pickModelTier,
   isHaikuTier,
   sonnetVariantOf,
 } from "~/server/services/ai/pickModelTier";
 import { PRODUCT_NAME } from "~/lib/brand";
+import { resolveMastraUrl } from "~/server/services/ai/capabilities";
+import { aiNotConfiguredMessage } from "~/server/services/ai/requireAi";
 
-const MASTRA_API_URL = process.env.MASTRA_API_URL ?? "http://localhost:4111";
 
 // Extend Vercel function timeout for streaming AI responses (default is 10s hobby / 60s pro)
 export const maxDuration = 300;
@@ -111,6 +128,16 @@ export async function POST(req: Request) {
       });
     }
 
+    // No Assistant on this install (MASTRA_API_URL unset in production): say
+    // so plainly rather than dialling localhost and failing mid-stream.
+    const mastraUrl = resolveMastraUrl(process.env);
+    if (!mastraUrl) {
+      return new Response(
+        JSON.stringify({ error: aiNotConfiguredMessage("assistant", "The Assistant"), code: "AI_NOT_CONFIGURED" }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    }
+
     // Rate limits on the LLM-spend path (this route had none — a single
     // caller could run up the model bill without ceiling). Three layers,
     // cheapest proxy for spend we have without a billing store:
@@ -158,7 +185,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform } = (await req.json()) as {
+    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, timezone: rawTimezone } = (await req.json()) as {
       messages: CoreMessage[];
       agentId?: string;
       assistantId?: string;
@@ -166,6 +193,7 @@ export async function POST(req: Request) {
       projectId?: string;
       conversationId?: string;
       platform?: string;
+      timezone?: string;
     };
 
     // "web-canvas" stamps Zoe canvas turns (ADR-0040) so engagement volume and
@@ -244,7 +272,7 @@ export async function POST(req: Request) {
     });
 
     const client = new MastraClient({
-      baseUrl: MASTRA_API_URL,
+      baseUrl: mastraUrl,
       headers: {
         Authorization: `Bearer ${agentJWT}`,
       },
@@ -264,55 +292,66 @@ export async function POST(req: Request) {
           "http://localhost:3000",
       ],
     ];
+    // The person's IANA time zone, for tools that place things on a clock
+    // (calendar events). Client-supplied, so only a zone this runtime
+    // recognises is passed on; a tool with no zone must ask, not assume UTC.
+    if (isValidTimeZone(rawTimezone)) {
+      entries.push(["timezone", rawTimezone]);
+    }
     
-    // Verify workspace access and fetch workspace details for agent context.
-    // `aiInstructions` is fetched here, server-side by workspace ID (demoted
-    // scope-instructions ADR) — never trusted from the client — for the block.
-    let workspaceInfo: { slug: string; name: string; type: string; description: string | null } | null = null;
-    let workspaceAiInstructions: string | null = null;
-    if (workspaceId) {
-      const workspaceAccess = await db.workspaceUser.findFirst({
-        where: {
-          workspaceId,
-          userId: session.user.id,
-        },
-        include: { workspace: { select: { slug: true, name: true, type: true, description: true, aiInstructions: true } } },
-      });
-
-      if (!workspaceAccess) {
+    // Verify workspace access and fetch the in-scope AI instructions for the
+    // demoted scope-instruction block. `loadScopeInstructions` is shared with
+    // the agentGuidance context capability, so both assemble identical text:
+    // `aiInstructions` is fetched server-side by ID (never trusted from the
+    // client); the project goes through buildProjectAccessWhere, so a spoofed
+    // projectId can't leak another project's text; and a project outside the
+    // workspace is rejected.
+    let scope: LoadedScopeInstructions = { workspace: null, project: null };
+    try {
+      scope = await loadScopeInstructions(db, { userId: session.user.id, workspaceId, projectId });
+    } catch (error) {
+      if (error instanceof TRPCError && (error.code === "FORBIDDEN" || error.code === "BAD_REQUEST")) {
         return new Response(
           JSON.stringify({
-            error: "Forbidden: You do not have access to this workspace"
+            error: error.code === "FORBIDDEN"
+              ? "Forbidden: You do not have access to this workspace"
+              : `Bad request: ${error.message}`,
           }),
           {
-            status: 403,
+            status: error.code === "FORBIDDEN" ? 403 : 400,
             headers: { "Content-Type": "application/json" },
           }
         );
       }
+      throw error;
+    }
 
+    // The workspace this turn's cost is metered to: the one the scope load
+    // above verified membership of (never the raw request body), or, for a
+    // chat with no workspace (the global drawer, /agent), the person's
+    // Personal workspace. Resolved lazily, once, when the turn is metered, so
+    // it adds nothing to the path that streams the reply. Null on an install
+    // that does not meter.
+    let meteredWorkspace: Promise<string | null> | undefined;
+    const resolveMeteredWorkspace = () =>
+      (meteredWorkspace ??= resolveMeteredWorkspaceId(db, {
+        workspaceId: scope.workspace?.id,
+        userId: session.user.id,
+      }));
+
+    let workspaceInfo: { slug: string; name: string; type: string; description: string | null } | null = null;
+    if (workspaceId) {
       entries.push(["workspaceId", workspaceId]);
-      if (workspaceAccess.workspace) {
-        const { aiInstructions, ...navInfo } = workspaceAccess.workspace;
-        workspaceInfo = navInfo;
-        workspaceAiInstructions = aiInstructions;
-        entries.push(["workspaceSlug", workspaceAccess.workspace.slug]);
-        entries.push(["workspaceName", workspaceAccess.workspace.name]);
-        entries.push(["workspaceType", workspaceAccess.workspace.type]);
+      if (scope.workspace) {
+        const { slug, name, type, description } = scope.workspace;
+        workspaceInfo = { slug, name, type, description };
+        entries.push(["workspaceSlug", slug]);
+        entries.push(["workspaceName", name]);
+        entries.push(["workspaceType", type]);
       }
     }
-    let projectAiInstructions: string | null = null;
     if (projectId) {
       entries.push(["projectId", projectId]);
-
-      // Fetch the in-scope project's `aiInstructions` server-side by ID for the
-      // demoted scope-instruction block. Scoped by buildProjectAccessWhere so a
-      // spoofed projectId can't leak another project's instruction text.
-      const projectScope = await db.project.findFirst({
-        where: { id: projectId, ...buildProjectAccessWhere(session.user.id) },
-        select: { aiInstructions: true },
-      });
-      projectAiInstructions = projectScope?.aiInstructions ?? null;
 
       // Look up project's configured Slack channel so agent knows where to search
       const projectSlackConfig = await db.slackChannelConfig.findUnique({
@@ -364,7 +403,7 @@ export async function POST(req: Request) {
     // simply doesn't resolve, and the request falls through to the default agent.
     if (assistantId) {
       const assistant = await db.assistant.findFirst({
-        where: { id: assistantId, createdById: session.user.id },
+        where: { id: assistantId, createdById: session.user.id, retiredAt: null },
       });
 
       if (assistant) {
@@ -404,10 +443,7 @@ export async function POST(req: Request) {
     // → specific: workspace first, then the in-scope project last so it wins on
     // conflict. With no project in scope (global drawer, /agent), only the
     // workspace applies. Empty scopes are skipped by the assembler.
-    const scopeInstructionsBlock = assembleScopeInstructions([
-      { scope: 'workspace', label: 'Workspace', instructions: workspaceAiInstructions },
-      { scope: 'project', label: 'Project', instructions: projectAiInstructions },
-    ]);
+    const scopeInstructionsBlock = assembleLoadedScope(scope);
     if (scopeInstructionsBlock) {
       promptSizeChars.scopeInstructions = scopeInstructionsBlock.length;
       finalMessages = [
@@ -512,7 +548,7 @@ export async function POST(req: Request) {
     // includes SECURITY_POLICY if it handles user data.
 
     console.log(`🔗 [chat/stream] agentId=${agentId ?? "none"}, assistantId=${assistantId ?? "none"}, projectId=${projectId ?? "none"}, workspaceId=${workspaceId ?? "none"}, messages=${finalMessages.length}`);
-    console.log('📤 [chat/stream] RequestContext entries:', entries.map(([k, v]) => [k, k.includes('Token') || k.includes('token') || k.includes('JWT') || k.includes('auth') ? `${v.slice(0, 20)}...` : v]));
+    console.log('📤 [chat/stream] RequestContext entries:', maskContextEntriesForLog(entries));
     console.log('📤 [chat/stream] Messages to agent:', finalMessages.map(m => ({ role: m.role, contentLength: m.content.length, contentPreview: m.content.slice(0, 150) })));
     // Sources we control on this side. The actual prompt at Anthropic is
     // larger because Mastra layers in agent instructions (SOUL ~6K tokens),
@@ -608,6 +644,31 @@ export async function POST(req: Request) {
     const loggedToolCallIndexById = new Map<string, number>();
     let lastStepFinishReason: string | undefined;
     let hadToolError = false;
+    // Tools already reported as broken this turn. A retried call fails the
+    // same way; one report per tool per turn, and the ingest fingerprint
+    // collapses turns onto one ticket.
+    const reportedToolFaults = new Set<string>();
+    // A tool that the app rejects, or that fails its own output schema, fails
+    // on EVERY call for EVERY user while the agent narrates around it. The
+    // daily digest lists those, but nothing asked anyone to fix them: one ran
+    // red for six months. File the Bug on first sight instead.
+    const reportToolFault = (toolName: string, unmaskedError: string) => {
+      // Masked here, at the sink, not left to each caller: this text is
+      // persisted on a ticket, and error text routinely echoes inputs.
+      const rawError = maskTokenLike(unmaskedError);
+      const kind = classifyToolError(rawError);
+      if (!isReportableToolError(kind) || reportedToolFaults.has(toolName)) return;
+      reportedToolFaults.add(toolName);
+      reportHandledErrorServer(new Error(summarizeToolError(toolName, rawError)), {
+        area: "agent-tool",
+        context: {
+          tool: toolName,
+          toolErrorKind: kind,
+          platform,
+          rawError: rawError.slice(0, 1500),
+        },
+      });
+    };
     let hadAgentError = false;
     // The masked top-level agent error, captured for the durable interaction
     // record (the user only ever sees the generic line). Tool errors flow via
@@ -617,6 +678,16 @@ export async function POST(req: Request) {
     // the Sonnet retry (same key, same outcome) and change the user line.
     let agentErrorKind: ProviderErrorKind | undefined;
     const firstToolErrorMessages: string[] = [];
+    // The turn's usage is written to the ledger once the stream has finished
+    // (one write per model attempt). `after()` keeps the function alive until
+    // every write lands, so metering never holds the response open and is not
+    // lost when the platform freezes the function at the end of the stream.
+    const usageWrites: Promise<unknown>[] = [];
+    let releaseUsageWrites: () => void = () => undefined;
+    const usageWritesSettled = new Promise<void>((resolve) => {
+      releaseUsageWrites = resolve;
+    });
+    after(() => usageWritesSettled);
     const textStream = new ReadableStream({
       async start(controller) {
         // Timer-based heartbeat: emit U+200B every HEARTBEAT_MS regardless
@@ -645,15 +716,38 @@ export async function POST(req: Request) {
         // call indicators, keepalive zwsp) we inject. Used by the Haiku→
         // Sonnet retry safety net to detect "model produced nothing".
         let modelTextChars = 0;
-        let finishUsage:
-          | {
-              inputTokens: number;
-              outputTokens: number;
-              cacheReadInputTokens?: number;
-              cacheCreationInputTokens?: number;
-            }
-          | undefined;
+        // What Mastra reported the turn used: the summed total from the
+        // `finish` chunk, and each model step's own usage from `step-finish`.
+        // The steps are what price cache reads and writes exactly; see
+        // `services/ai/cost.ts` for why the total alone cannot.
+        let turnUsage: unknown;
+        const stepUsages: unknown[] = [];
         let responseModelId: string | undefined;
+        // Whether Mastra ran the attempt on the workspace's own Anthropic key,
+        // as the latest step (and finally the `finish` chunk) reports it. Such
+        // a turn is recorded but never counted against the allowance.
+        let attemptOnOwnKey = false;
+
+        // Record what the current model attempt cost (a no-op unless this
+        // install meters), at most once per attempt. Never throws. `refId` is
+        // the AiInteractionHistory row, when there is one. The attempt's usage
+        // is captured here and now: a retry resets it straight afterwards.
+        let attemptMetered = false;
+        const meterAttempt = (refId?: string): Promise<unknown> => {
+          if (attemptMetered) return Promise.resolve();
+          attemptMetered = true;
+          const attempt = {
+            modelId: responseModelId,
+            turnUsage,
+            stepUsages: [...stepUsages],
+            onOwnKey: attemptOnOwnKey,
+          };
+          return resolveMeteredWorkspace().then((workspaceId) =>
+            workspaceId
+              ? recordTurnUsage(db, { workspaceId, source: "CHAT", ...attempt, refId })
+              : undefined,
+          );
+        };
 
         const emit = (snippet: string) => {
           const { text: safeText, redacted } = sanitizeAIOutput(snippet);
@@ -743,29 +837,8 @@ export async function POST(req: Request) {
                   new TextEncoder().encode(safeText),
                 );
               } else if (chunk.type === "finish") {
-                const usage = chunk.payload.output.usage as {
-                  inputTokens?: number;
-                  outputTokens?: number;
-                  cachedInputTokens?: number;
-                  raw?: {
-                    cache_read_input_tokens?: number;
-                    cache_creation_input_tokens?: number;
-                  };
-                };
-                const providerMeta = (chunk.payload.metadata as { providerMetadata?: Record<string, Record<string, unknown>> } | undefined)
-                  ?.providerMetadata?.anthropic;
-                const cacheCreationFromMeta =
-                  typeof providerMeta?.cacheCreationInputTokens === 'number'
-                    ? providerMeta.cacheCreationInputTokens
-                    : undefined;
-                finishUsage = {
-                  inputTokens: usage.inputTokens ?? 0,
-                  outputTokens: usage.outputTokens ?? 0,
-                  cacheReadInputTokens:
-                    usage.raw?.cache_read_input_tokens ?? usage.cachedInputTokens,
-                  cacheCreationInputTokens:
-                    usage.raw?.cache_creation_input_tokens ?? cacheCreationFromMeta,
-                };
+                turnUsage = readUnknown(readUnknown(chunk.payload, 'output'), 'usage');
+                attemptOnOwnKey = readUsedOwnKey(chunk.payload);
                 const fr = readString(chunk.payload, 'finishReason');
                 if (fr) lastStepFinishReason = fr;
               } else if (chunk.type === "tool-call") {
@@ -788,10 +861,18 @@ export async function POST(req: Request) {
                 // Provider-executed tools (webSearch/webFetch) report failures
                 // as tool-result + isError, not tool-error — without this branch
                 // a refused web_fetch is invisible in the log row.
-                if (readUnknown(chunk.payload, 'isError') === true) {
-                  const result = readUnknown(chunk.payload, 'result');
-                  const errorCode =
-                    readString(result, 'errorCode') ?? readString(result, 'error');
+                const result = readUnknown(chunk.payload, 'result');
+                // Mastra reports a tool whose output failed its schema as a
+                // *successful* result carrying `{ error: true, message }`.
+                // The model works around it, so without this branch the
+                // failure leaves no trace in the log row or the digest.
+                const isMastraToolFailure =
+                  readUnknown(result, 'error') === true &&
+                  readString(result, 'message') !== undefined;
+                if (readUnknown(chunk.payload, 'isError') === true || isMastraToolFailure) {
+                  const errorCode = isMastraToolFailure
+                    ? readString(result, 'message')?.split('\n')[0]
+                    : readString(result, 'errorCode') ?? readString(result, 'error');
                   const idx = loggedToolCallIndexById.get(id);
                   const logged = idx !== undefined ? loggedToolCalls[idx] : undefined;
                   if (logged) {
@@ -804,6 +885,11 @@ export async function POST(req: Request) {
                     );
                   }
                   hadToolError = true;
+                  // An output that fails the tool's own schema is a contract
+                  // fault by definition: the tool and the app disagree.
+                  if (isMastraToolFailure) {
+                    reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
+                  }
                 }
                 toolFrame({ phase: 'result', id, name });
               } else if (chunk.type === "tool-error") {
@@ -821,7 +907,18 @@ export async function POST(req: Request) {
                   logged.isError = true;
                   logged.errorCode = msg.slice(0, 200);
                 }
-                toolFrame({ phase: 'error', id, name, msg });
+                reportToolFault(name, msg);
+                // Everyone gets the kind (the client turns it into one plain
+                // sentence). The raw text is a tRPC envelope or a zod issue
+                // list: useful to an admin debugging, noise or worse to
+                // anyone else, so only admins receive it.
+                toolFrame({
+                  phase: 'error',
+                  id,
+                  name,
+                  kind: classifyToolError(msg),
+                  ...(session.user.isAdmin ? { msg } : {}),
+                });
               } else if (chunk.type === "error") {
                 // The raw error (often a Zod "Type validation failed" blob, and
                 // capable of echoing credentials) must never reach the user.
@@ -852,7 +949,15 @@ export async function POST(req: Request) {
                       threadId,
                       platform,
                       providerErrorKind: errorKind,
+                      ...agentErrorTraceContext(readString(chunk, 'runId'), new Date()),
                     },
+                    // An exhausted or revoked provider account fails every
+                    // turn for every user until someone acts, so keep saying
+                    // so (hourly) rather than once on a ticket that may be
+                    // months old.
+                    ...(isNonRetryableProviderError(errorKind)
+                      ? { renotifyAfterMs: PROVIDER_OUTAGE_RENOTIFY_MS }
+                      : {}),
                   });
                 }
                 hadAgentError = true;
@@ -874,8 +979,17 @@ export async function POST(req: Request) {
                   }
                 }
                 const response = readUnknown(chunk.payload, 'response');
-                const modelId = readString(response, 'modelId');
+                // Mastra 1.28 carries the model on the step's metadata; older
+                // builds put it on the response.
+                const stepMetadata = readUnknown(chunk.payload, 'metadata');
+                const modelId =
+                  readString(response, 'modelId') ??
+                  readString(stepMetadata, 'modelId') ??
+                  readString(stepMetadata, 'model');
                 if (modelId) responseModelId = modelId;
+                const stepUsage = readUnknown(readUnknown(chunk.payload, 'output'), 'usage');
+                if (stepUsage !== undefined) stepUsages.push(stepUsage);
+                attemptOnOwnKey = readUsedOwnKey(chunk.payload);
               } else if (chunk.type === "text-start") {
                 // Model text blocks stream as raw markdown deltas; blocks
                 // separated by tool calls (or step boundaries) would
@@ -931,6 +1045,10 @@ export async function POST(req: Request) {
                     firstToolErrorMessages: [...firstToolErrorMessages],
                   },
                 );
+                // The discarded attempt was still paid for: meter it before
+                // its usage is reset for the retry.
+                usageWrites.push(meterAttempt());
+                attemptMetered = false;
                 chunkCount = 0;
                 textChunkCount = 0;
                 nonTextChunkTypes.clear();
@@ -943,7 +1061,9 @@ export async function POST(req: Request) {
                 hadAgentError = false;
                 agentErrorMessage = undefined;
                 agentErrorKind = undefined;
-                finishUsage = undefined;
+                turnUsage = undefined;
+                stepUsages.length = 0;
+                attemptOnOwnKey = false;
                 responseModelId = undefined;
                 activeAgentId = sonnetId;
                 agent = client.getAgent(activeAgentId);
@@ -969,14 +1089,19 @@ export async function POST(req: Request) {
           // tool-only turns trigger the "No response from the assistant"
           // warning even though the agent successfully did the work.
           const emptyResponse = fullText.trim() === '' && toolCallNames.length === 0;
-          const cost = finishUsage
-            ? computeRequestCost(responseModelId, {
-                inputTokens: finishUsage.inputTokens,
-                outputTokens: finishUsage.outputTokens,
-                cacheReadInputTokens: finishUsage.cacheReadInputTokens,
-                cacheCreationInputTokens: finishUsage.cacheCreationInputTokens,
-              })
+          const tokens = turnTokenBreakdown(turnUsage, stepUsages);
+          // `inputTokens` stays the whole prompt (cache traffic included), as
+          // the logs and AiInteractionHistory have always recorded it.
+          const finishUsage = tokens
+            ? {
+                inputTokens:
+                  tokens.noCacheInputTokens + tokens.cacheReadInputTokens + tokens.cacheWriteInputTokens,
+                outputTokens: tokens.outputTokens,
+                cacheReadInputTokens: tokens.cacheReadInputTokens,
+                cacheCreationInputTokens: tokens.cacheWriteInputTokens,
+              }
             : undefined;
+          const cost = tokens ? priceTokenBreakdown(responseModelId, tokens) : undefined;
           // Mastra-side overhead = inputTokens - (route-side chars / 4).
           // Knowing this number tells us how much of every prompt is
           // unobservable (agent SOUL, tool schema deltas, memory recall,
@@ -1089,6 +1214,7 @@ export async function POST(req: Request) {
               console.error("Failed to save AI history:", err);
               return undefined;
             });
+          usageWrites.push(logPromise.then(meterAttempt));
 
           const interactionId = await Promise.race([
             logPromise,
@@ -1121,6 +1247,14 @@ export async function POST(req: Request) {
             finishReason: lastStepFinishReason ?? 'unknown',
             error: err instanceof Error ? err.message : (typeof err === 'string' ? err : 'unknown error'),
           });
+          // A provider billing/auth failure can also surface as a throw (the
+          // Sonnet retry's agent.stream(), or a provider error Mastra rethrows
+          // rather than yielding as an `error` chunk). Same treatment as the
+          // chunk path: deterministic, so say "unavailable" and keep paging.
+          const thrownProviderKind = classifyProviderError(
+            maskTokenLike(err instanceof Error ? err.message : String(err)),
+          );
+          const thrownNonRetryable = isNonRetryableProviderError(thrownProviderKind);
           // Server-side failures abort the stream before the client can
           // classify anything, so this is the only place they can be reported.
           reportHandledErrorServer(err, {
@@ -1130,8 +1264,12 @@ export async function POST(req: Request) {
               threadId,
               platform,
               partialChars: String(fullText.length),
+              providerErrorKind: thrownProviderKind,
             },
+            ...(thrownNonRetryable ? { renotifyAfterMs: PROVIDER_OUTAGE_RENOTIFY_MS } : {}),
           });
+          // The steps that finished before the failure were still billed.
+          usageWrites.push(meterAttempt());
           // Persist the failed turn so stream failures are queryable in the DB,
           // not just the server console. hadError=true keeps these rows out of
           // success analytics (the onFinish path above uses the same flag). No
@@ -1182,9 +1320,24 @@ export async function POST(req: Request) {
           } catch (logErr) {
             console.error("Failed-turn logging threw:", logErr);
           }
-          controller.error(err);
+          if (thrownNonRetryable) {
+            // Erroring the stream reads as a dropped connection to the client,
+            // which auto-retries it as transport — three more calls into an
+            // account that cannot answer. Close cleanly on a plain sentence.
+            try {
+              controller.enqueue(
+                new TextEncoder().encode(`\n\n${USER_FACING_PROVIDER_UNAVAILABLE}\n`),
+              );
+              controller.close();
+            } catch {
+              controller.error(err);
+            }
+          } else {
+            controller.error(err);
+          }
         } finally {
           clearInterval(heartbeat);
+          void Promise.allSettled(usageWrites).then(releaseUsageWrites);
         }
       },
     });
@@ -1198,6 +1351,24 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     console.error("Streaming error:", error);
+    // The first agent.stream() runs before the response stream exists, so a
+    // provider that rejects the request outright (credit exhausted, revoked
+    // key) lands here. Answer with the calm provider-unavailable sentence and
+    // a 503 the client shows as-is, instead of a bare 500 it retries.
+    const providerKind = classifyProviderError(
+      maskTokenLike(error instanceof Error ? error.message : String(error)),
+    );
+    if (isNonRetryableProviderError(providerKind)) {
+      reportHandledErrorServer(error, {
+        area: "chat-stream-server",
+        context: { stage: "agent-stream-start", providerErrorKind: providerKind },
+        renotifyAfterMs: PROVIDER_OUTAGE_RENOTIFY_MS,
+      });
+      return new Response(
+        JSON.stringify({ error: USER_FACING_PROVIDER_UNAVAILABLE }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    }
     return new Response(
       JSON.stringify({ error: "Failed to stream response" }),
       {

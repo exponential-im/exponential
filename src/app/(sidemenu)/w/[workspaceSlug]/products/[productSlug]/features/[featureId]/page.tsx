@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -11,10 +11,10 @@ import {
   Group,
   Menu,
   NumberInput,
-  Select,
   Skeleton,
   Stack,
   Text,
+  Textarea,
 } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import {
@@ -40,9 +40,11 @@ import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { MoveFeatureModal } from "~/app/_components/product/MoveFeatureModal";
 import {
   PropertiesSidebar,
-  PropertyRow,
   PropertyDivider,
+  PropertyRow,
+  SearchableSelect,
 } from "~/app/_components/PropertiesSidebar";
+import { FeatureTimeRow } from "~/app/_components/TimeLoggedSummary";
 import { PriorityIcon } from "~/app/_components/product/PriorityIcon";
 import { LabelsCombobox } from "~/app/_components/product/LabelsCombobox";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
@@ -52,6 +54,7 @@ import { FeatureDocsSection } from "~/app/_components/product/FeatureDocsSection
 import { FeatureScopesSection } from "~/app/_components/product/FeatureScopesSection";
 import { FeatureRequirementsSection } from "~/app/_components/product/FeatureRequirementsSection";
 import { FeatureTicketsSection } from "~/app/_components/product/FeatureTicketsSection";
+import { FeatureDecisionsSection } from "~/app/_components/product/FeatureDecisionsSection";
 import { ActivityTimeline } from "~/app/_components/shared/ActivityTimeline";
 import {
   ActivityFilterMenu,
@@ -63,6 +66,7 @@ import {
   FEATURE_STATUS_COLORS,
 } from "~/lib/feature-statuses";
 import type { JSONContent } from "@tiptap/core";
+import { useProductDetailTitle } from "../../ProductDetailTitle";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -92,6 +96,7 @@ export default function FeatureDetailPage() {
     { id: featureId },
     { enabled: !!featureId },
   );
+  useProductDetailTitle(feature?.name);
 
   const { data: tags } = api.tag.list.useQuery(
     { workspaceId: workspaceId ?? "" },
@@ -119,6 +124,23 @@ export default function FeatureDetailPage() {
   });
 
   const [moveModalOpen, setMoveModalOpen] = useState(false);
+  const [nameValue, setNameValue] = useState("");
+  // Esc-cancel guard: blur() fires before the revert setState applies, so
+  // without this flag onBlur would read the stale draft and commit exactly
+  // the edit the user just cancelled.
+  const cancelingNameEdit = useRef(false);
+  useEffect(() => {
+    if (feature) setNameValue(feature.name);
+    // Sync only when the ENTITY changes: keying on the object identity
+    // re-ran on every background refetch and clobbered in-progress edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feature?.id]);
+  // Effort commits on blur/Enter, not per keystroke: typing "12" used to
+  // save 1 then 12, and the server-controlled value could snap back mid-type.
+  const [effortDraft, setEffortDraft] = useState<string | number>("");
+  useEffect(() => {
+    setEffortDraft(feature?.effort ?? "");
+  }, [feature?.id, feature?.effort]);
   const activity = useFeatureActivity(featureId);
   const [activityFilter, setActivityFilter] = useActivityFilter();
 
@@ -236,9 +258,38 @@ export default function FeatureDetailPage() {
             </Group>
 
             <Group justify="space-between" align="flex-start">
-              <Text size="xl" fw={700} className="text-text-primary flex-1">
-                {feature.name}
-              </Text>
+              <Textarea
+                value={nameValue}
+                onChange={(e) => setNameValue(e.currentTarget.value)}
+                aria-label="Feature name"
+                autosize
+                minRows={1}
+                maxRows={3}
+                variant="unstyled"
+                classNames={{ input: "text-text-primary font-bold p-0 leading-tight resize-none" }}
+                styles={{ root: { flex: 1 }, input: { fontWeight: 700, fontSize: "1.25rem" } }}
+                onKeyDown={(e) => {
+                  // A feature name has no newlines - Enter commits.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  }
+                  if (e.key === "Escape") {
+                    cancelingNameEdit.current = true;
+                    setNameValue(feature.name);
+                    e.currentTarget.blur();
+                  }
+                }}
+                onBlur={() => {
+                  if (cancelingNameEdit.current) {
+                    cancelingNameEdit.current = false;
+                    return;
+                  }
+                  const trimmed = nameValue.trim();
+                  if (trimmed && trimmed !== feature.name) handleFieldUpdate("name", trimmed);
+                  else setNameValue(feature.name);
+                }}
+              />
               <Menu position="bottom-end" withinPortal>
                 <Menu.Target>
                   <ActionIcon variant="subtle" className="text-text-muted">
@@ -338,6 +389,14 @@ export default function FeatureDetailPage() {
             />
           </CollapsibleSection>
 
+          {/* Decisions - linked "implemented by" this feature (ADR-0060).
+              Hidden until something is linked. */}
+          <FeatureDecisionsSection
+            featureId={featureId}
+            workspaceId={workspaceId}
+            workspaceSlug={workspace?.slug}
+          />
+
           {/* Docs - Knowledge pages (PRDs, research, technical specs) linked
               to this feature. The body above stays the living description;
               these are the moment-in-time arguments. */}
@@ -392,7 +451,7 @@ export default function FeatureDetailPage() {
       {/* Properties sidebar */}
       <PropertiesSidebar>
         <PropertyRow icon={<IconCircleDot size={14} />} label="Status">
-          <Select
+          <SearchableSelect
             value={feature.status}
             onChange={(val) => val && handleStatusChange(val)}
             data={FEATURE_STATUS_OPTIONS}
@@ -405,7 +464,7 @@ export default function FeatureDetailPage() {
         </PropertyRow>
 
         <PropertyRow icon={<IconMap2 size={14} />} label="Area">
-          <Select
+          <SearchableSelect
             value={feature.areaId}
             onChange={(val) => handleFieldUpdate("areaId", val)}
             data={(areas ?? []).map((a) => ({ value: a.id, label: a.name }))}
@@ -421,7 +480,7 @@ export default function FeatureDetailPage() {
         </PropertyRow>
 
         <PropertyRow icon={<IconFlag size={14} />} label="Priority">
-          <Select
+          <SearchableSelect
             value={feature.priority != null ? String(feature.priority) : undefined}
             onChange={(val) => handleFieldUpdate("priority", val != null ? Number(val) : null)}
             data={PRIORITY_OPTIONS}
@@ -444,8 +503,16 @@ export default function FeatureDetailPage() {
 
         <PropertyRow icon={<IconFlame size={14} />} label="Effort">
           <NumberInput
-            value={feature.effort ?? ""}
-            onChange={(val) => handleFieldUpdate("effort", val === "" ? null : Number(val))}
+            value={effortDraft}
+            onChange={setEffortDraft}
+            onBlur={() => {
+              const next = effortDraft === "" ? null : Number(effortDraft);
+              if (Number.isNaN(next)) return setEffortDraft(feature.effort ?? "");
+              if (next !== (feature.effort ?? null)) handleFieldUpdate("effort", next);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+            }}
             size="xs"
             variant="unstyled"
             min={0}
@@ -458,14 +525,13 @@ export default function FeatureDetailPage() {
         <PropertyDivider />
 
         <PropertyRow icon={<IconTarget size={14} />} label="Goal">
-          <Select
+          <SearchableSelect
             value={feature.goalId != null ? String(feature.goalId) : null}
             onChange={(val) => handleFieldUpdate("goalId", val != null ? Number(val) : null)}
             data={(goals ?? []).map((g) => ({ value: String(g.id), label: g.title }))}
             size="xs"
             variant="unstyled"
             clearable
-            searchable
             placeholder="None"
             nothingFoundMessage="No goals"
             comboboxProps={{ withinPortal: true }}
@@ -485,6 +551,9 @@ export default function FeatureDetailPage() {
             {feature.scopes.length}
           </Text>
         </PropertyRow>
+
+        {/* Time logged on this feature's tickets, by anyone */}
+        <FeatureTimeRow featureId={feature.id} />
 
         <PropertyRow icon={<IconTag size={14} />} label="Labels">
           <LabelsCombobox

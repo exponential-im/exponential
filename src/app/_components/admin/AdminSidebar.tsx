@@ -3,8 +3,9 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { adminNavigation } from "~/lib/admin/navigation";
+import { SectionHeader } from "~/app/_components/ui";
 
-export function AdminSidebar() {
+export function AdminSidebar({ isMeteringOn }: { isMeteringOn: boolean }) {
   const pathname = usePathname();
 
   return (
@@ -19,14 +20,12 @@ export function AdminSidebar() {
           <div key={section.title || `section-${sectionIndex}`} className="mb-6">
             {/* Section header */}
             {section.title && (
-              <h3 className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-text-muted">
-                {section.title}
-              </h3>
+              <SectionHeader as="h3" size="md" className="mb-2 px-3" title={section.title} />
             )}
 
             {/* Section items */}
             <ul className="space-y-1">
-              {section.items.map((item) => {
+              {section.items.filter((item) => isMeteringOn || !item.meteredOnly).map((item) => {
                 const isActive = pathname === item.href;
                 const Icon = item.icon;
 

@@ -26,6 +26,7 @@ import { slackRouter } from "./routers/slack";
 import { aiInteractionRouter } from "./routers/aiInteraction";
 import { calendarRouter } from "./routers/calendar";
 import { workspaceSchedulingRouter } from "./routers/workspaceScheduling";
+import { availabilityRouter } from "./routers/availability";
 import { feedbackRouter } from "./routers/feedback";
 import { docsRouter } from "./routers/docs";
 import { featureRequestRouter } from "./routers/featureRequest";
@@ -38,6 +39,7 @@ import { matrixRoomRouter } from "./routers/matrixRoom";
 import { notificationRouter } from "./routers/notification";
 import { inboxRouter } from "./routers/inbox";
 import { agentRunRouter } from "./routers/agentRun";
+import { agentGuidanceRouter } from "./routers/agentGuidance";
 import { pushSubscriptionRouter } from "./routers/pushSubscription";
 import { weeklyPlanningRouter } from "./routers/weeklyPlanning";
 import { projectWorkflowRouter } from "./routers/projectWorkflow";
@@ -49,7 +51,10 @@ import { wheelOfLifeRouter } from "./routers/wheelOfLife";
 import { navigationPreferenceRouter } from "./routers/navigationPreference";
 import { habitRouter } from "./routers/habit";
 import { workspaceRouter } from "./routers/workspace";
+import { personRouter } from "./routers/person";
 import { externalAgentRouter } from "./routers/externalAgent";
+import { oauthConnectionRouter } from "./routers/oauthConnection";
+import { positionRouter } from "./routers/position";
 import { resourceRouter } from "./routers/resource";
 import { knowledgeChunkRouter } from "./routers/knowledgeChunk";
 import { transcriptionSessionParticipantRouter } from "./routers/transcriptionSessionParticipant";
@@ -79,7 +84,6 @@ import { contentRouter } from "./routers/content";
 import { sprintAnalyticsRouter } from "./routers/sprintAnalytics";
 import { briefingRouter } from "./routers/briefing";
 import { pmSchedulerRouter } from "./routers/pmScheduler";
-import { bountyRouter } from "./routers/bounty";
 import { bugReportRouter } from "./routers/bugReport";
 import { actionCommentRouter } from "./routers/actionComment";
 import { blogCommentRouter } from "./routers/blogComment";
@@ -93,10 +97,13 @@ import { keyResultRouter } from "~/plugins/okr/server/routers/keyResult";
 import { productPluginRouter } from "~/plugins/product/server/routers";
 import { favoriteRouter } from "~/server/api/routers/favorite";
 import { authRouter } from "./routers/auth";
+import { aiRouter } from "./routers/ai";
+import { billingRouter } from "./routers/billing";
 import { documentRouter } from "./routers/document";
 import { voiceRouter } from "./routers/voice";
 import { pageRouter } from "./routers/page";
 import { pageCommentRouter } from "./routers/pageComment";
+import { databaseRouter } from "./routers/database";
 import { yourWorkRouter } from "./routers/yourWork";
 /**
  * This is the primary router for your server.
@@ -131,6 +138,7 @@ export const appRouter = createTRPCRouter({
   aiInteraction: aiInteractionRouter,
   calendar: calendarRouter,
   workspaceScheduling: workspaceSchedulingRouter,
+  availability: availabilityRouter,
   feedback: feedbackRouter,
   docs: docsRouter,
   featureRequest: featureRequestRouter,
@@ -141,9 +149,12 @@ export const appRouter = createTRPCRouter({
   matrixServer: matrixServerRouter,
   matrixRoom: matrixRoomRouter,
   externalAgent: externalAgentRouter,
+  oauthConnection: oauthConnectionRouter,
+  position: positionRouter,
   notification: notificationRouter,
   inbox: inboxRouter,
   agentRun: agentRunRouter,
+  agentGuidance: agentGuidanceRouter,
   pushSubscription: pushSubscriptionRouter,
   weeklyPlanning: weeklyPlanningRouter,
   projectWorkflow: projectWorkflowRouter,
@@ -155,6 +166,7 @@ export const appRouter = createTRPCRouter({
   navigationPreference: navigationPreferenceRouter,
   habit: habitRouter,
   workspace: workspaceRouter,
+  person: personRouter,
   resource: resourceRouter,
   knowledgeChunk: knowledgeChunkRouter,
   transcriptionSessionParticipant: transcriptionSessionParticipantRouter,
@@ -184,7 +196,6 @@ export const appRouter = createTRPCRouter({
   sprintAnalytics: sprintAnalyticsRouter,
   briefing: briefingRouter,
   pmScheduler: pmSchedulerRouter,
-  bounty: bountyRouter,
   bugReport: bugReportRouter,
   actionComment: actionCommentRouter,
   blogComment: blogCommentRouter,
@@ -193,10 +204,13 @@ export const appRouter = createTRPCRouter({
   goalActivity: goalActivityRouter,
   crmApi: crmApiRouter,
   auth: authRouter,
+  ai: aiRouter,
+  billing: billingRouter,
   document: documentRouter,
   voice: voiceRouter,
   page: pageRouter,
   pageComment: pageCommentRouter,
+  database: databaseRouter,
   yourWork: yourWorkRouter,
   // Plugin system
   pluginConfig: pluginConfigRouter,

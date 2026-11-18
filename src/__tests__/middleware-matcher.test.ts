@@ -159,6 +159,9 @@ describe('middleware matcher', () => {
       '/teams/core/members/user_1',
       // Bare /features is the app's own page; only /features/ is marketing.
       '/features',
+      // The OAuth consent page: a signed-out visitor goes through sign-in and
+      // comes back to the same request (hosted MCP Agent PRD, D11).
+      '/oauth/authorize',
     ])('%s requires a session', (route) => {
       expect(requiresSession(route)).toBe(true);
     });
@@ -231,7 +234,6 @@ describe('middleware matcher', () => {
       '/docs/getting-started',
       '/docs/features/fireflies',
       '/blog',
-      '/explore',
       '/features/some-marketing-page',
       '/p/published-page',
       '/updates/acme',
@@ -239,8 +241,13 @@ describe('middleware matcher', () => {
       '/f/intake-form',
       '/',
       '/privacy',
+      '/pricing',
       '/robots.txt',
       '/sitemap.xml',
+      // OAuth discovery for MCP clients, read before any session exists.
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/api/mcp',
+      '/.well-known/oauth-authorization-server',
     ])('%s renders for anonymous visitors', (route) => {
       expect(requiresSession(route)).toBe(false);
     });
@@ -268,7 +275,6 @@ describe('middleware matcher', () => {
     it.each([
       ['/docs', '/docs/features/fireflies'],
       ['/blog', '/blog/some-post'],
-      ['/explore', '/explore/a-project/bounties/1'],
       ['/learn', '/learn/a-lesson'],
     ])('%s opens itself and %s', (index, child) => {
       expect(isPublicPath(index)).toBe(true);

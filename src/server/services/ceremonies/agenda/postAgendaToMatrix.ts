@@ -16,6 +16,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { getMatrixClientForServer, listMatrixServers } from "~/server/services/matrix/matrixServer";
+import { MatrixEncryptedRoomError } from "~/server/services/matrix/MatrixClient";
 import { readAgendaSnapshot, type AgendaMatrixPost, type AgendaSnapshot } from "./types";
 import { withAgendaTransaction } from "./items";
 import { renderAgendaMessage } from "./renderAgendaMessage";
@@ -33,6 +34,10 @@ export type PostAgendaResult =
 interface MinimalClient {
   joinedRooms(): Promise<string[]>;
   send(roomId: string, body: { html: string; text: string; txnId: string }): Promise<{ eventId: string }>;
+}
+
+interface RedactingClient {
+  redact(roomId: string, eventId: string, opts: { txnId: string; reason?: string }): Promise<{ eventId: string }>;
 }
 
 export function buildAgendaTransactionId(occurrenceId: string, roomId: string, attempt: number): string {
@@ -75,9 +80,12 @@ export async function postAgendaToMatrix(
   if (!agenda) return { kind: "no-agenda" };
 
   const previous = agenda.matrixPosts ?? [];
+  // Every post here counts toward the txn id, removed or not — the homeserver
+  // has seen those ids. Only a post still in the room needs a repost confirmed.
   const priorHere = previous.filter((p) => p.roomId === roomId);
-  if (priorHere.length > 0 && !input.confirmRepost) {
-    return { kind: "already-posted", roomId, postedAt: priorHere[priorHere.length - 1]!.postedAt };
+  const liveHere = priorHere.filter((p) => !p.removedAt);
+  if (liveHere.length > 0 && !input.confirmRepost) {
+    return { kind: "already-posted", roomId, postedAt: liveHere[liveHere.length - 1]!.postedAt };
   }
 
   const resolved = await resolveServerId(db, occurrence.ceremony.workspaceId, roomId, input.client);
@@ -110,6 +118,14 @@ export async function postAgendaToMatrix(
       txnId: buildAgendaTransactionId(occurrence.id, roomId, priorHere.length),
     }));
   } catch (error) {
+    // An encrypted room is a configuration state, not a fault: the client
+    // refused before anything reached the homeserver, and every hourly sweep
+    // would refuse again until the room (or ADR-0043's E2EE retrofit)
+    // changes. Its message already says what to do, so hand it back as the
+    // reason and keep it out of Sentry.
+    if (error instanceof MatrixEncryptedRoomError) {
+      return { kind: "failed", reason: error.message };
+    }
     reportHandledErrorServer(error, { area: "ceremonies.postAgendaToMatrix", context: { occurrenceId: occurrence.id, roomId, serverId } });
     return { kind: "failed", reason: error instanceof Error ? error.message : "Matrix rejected the post." };
   }
@@ -137,4 +153,75 @@ export async function postAgendaToMatrix(
     });
   }
   return { kind: "posted", roomId, eventId };
+}
+
+export type RemoveAgendaPostResult =
+  | { kind: "removed"; roomId: string; eventId: string }
+  | { kind: "already-removed"; roomId: string; removedAt: string }
+  | { kind: "not-found" }
+  | { kind: "failed"; reason: string };
+
+export function buildAgendaRedactionTransactionId(occurrenceId: string, eventId: string): string {
+  return `expo-agenda-redact-${occurrenceId}-${eventId.replace(/[^a-zA-Z0-9]/g, "")}`;
+}
+
+/**
+ * Take an agenda post back out of its Matrix room. Matrix lets only the
+ * sender or a room moderator delete a message, so a person who is neither
+ * has no way to undo the bot's post from their own client; the bot can
+ * always redact its own event. The post is found by its event id in the
+ * ledger, not by the ceremony's current room, so a post stays removable
+ * after the ceremony's room has been cleared or changed.
+ */
+export async function removeAgendaFromMatrix(
+  db: PrismaClient,
+  input: { occurrenceId: string; eventId: string; actorUserId: string | null; client?: RedactingClient },
+): Promise<RemoveAgendaPostResult> {
+  const occurrence = await db.ceremonyOccurrence.findUnique({
+    where: { id: input.occurrenceId },
+    select: { id: true, agenda: true, ceremony: { select: { workspaceId: true } } },
+  });
+  const agenda = readAgendaSnapshot(occurrence?.agenda);
+  const post = agenda?.matrixPosts?.find((p) => p.eventId === input.eventId);
+  if (!occurrence || !post) return { kind: "not-found" };
+  if (post.removedAt) return { kind: "already-removed", roomId: post.roomId, removedAt: post.removedAt };
+
+  try {
+    const client = input.client ?? (await getMatrixClientForServer(db, post.serverId, occurrence.ceremony.workspaceId)).client;
+    await client.redact(post.roomId, post.eventId, {
+      txnId: buildAgendaRedactionTransactionId(occurrence.id, post.eventId),
+      reason: "Removed from Exponential",
+    });
+  } catch (error) {
+    reportHandledErrorServer(error, {
+      area: "ceremonies.removeAgendaFromMatrix",
+      context: { occurrenceId: occurrence.id, roomId: post.roomId, eventId: post.eventId, serverId: post.serverId },
+    });
+    return { kind: "failed", reason: error instanceof Error ? error.message : "Matrix rejected the removal." };
+  }
+
+  const removedAt = new Date().toISOString();
+  // Same re-read-and-patch as the post: only the ledger entry changes.
+  try {
+    await withAgendaTransaction(db, async (tx) => {
+      const fresh = await tx.ceremonyOccurrence.findUnique({ where: { id: occurrence.id }, select: { agenda: true } });
+      const current = readAgendaSnapshot(fresh?.agenda) ?? agenda!;
+      const next: AgendaSnapshot = {
+        ...current,
+        matrixPosts: (current.matrixPosts ?? []).map((p) =>
+          p.eventId === post.eventId ? { ...p, removedAt, removedById: input.actorUserId } : p,
+        ),
+      };
+      await tx.ceremonyOccurrence.update({
+        where: { id: occurrence.id },
+        data: { agenda: next as unknown as Prisma.InputJsonValue },
+      });
+    });
+  } catch (error) {
+    reportHandledErrorServer(error, {
+      area: "ceremonies.removeAgendaFromMatrix: could not record the removal",
+      context: { occurrenceId: occurrence.id, eventId: post.eventId },
+    });
+  }
+  return { kind: "removed", roomId: post.roomId, eventId: post.eventId };
 }

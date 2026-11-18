@@ -251,7 +251,18 @@ export class MatrixClient {
    */
   async send(
     roomId: string,
-    { html, text, txnId }: { html: string; text: string; txnId: string },
+    {
+      html,
+      text,
+      txnId,
+      mentions,
+    }: {
+      html: string;
+      text: string;
+      txnId: string;
+      /** MXIDs to ping (`m.mentions`, Matrix 1.7). Omitted or empty → no intentional mentions. */
+      mentions?: readonly string[];
+    },
   ): Promise<{ eventId: string }> {
     const encryption = await this.roomState<{ algorithm?: string }>(
       roomId,
@@ -269,7 +280,31 @@ export class MatrixClient {
         body: text,
         format: "org.matrix.custom.html",
         formatted_body: html,
+        // Intentional mentions: clients ping these users rather than scanning the body
+        // for display names, which is both more reliable and harder to spoof.
+        ...(mentions && mentions.length > 0
+          ? { "m.mentions": { user_ids: [...mentions] } }
+          : {}),
       },
+    );
+
+    return { eventId: body.event_id ?? "" };
+  }
+
+  /**
+   * Redact (delete) an event. Matrix only lets the sender or a room moderator do this,
+   * so for a bot-posted message the bot is the one account that can always take it
+   * back. `txnId` makes a retry idempotent, as it does for `send`.
+   */
+  async redact(
+    roomId: string,
+    eventId: string,
+    { txnId, reason }: { txnId: string; reason?: string },
+  ): Promise<{ eventId: string }> {
+    const body = await this.request<{ event_id?: string }>(
+      "PUT",
+      `/rooms/${encodeURIComponent(roomId)}/redact/${encodeURIComponent(eventId)}/${encodeURIComponent(txnId)}`,
+      reason ? { reason } : {},
     );
 
     return { eventId: body.event_id ?? "" };

@@ -18,9 +18,14 @@ export type { EmitNotificationInput } from "./types";
  * delivery — recording the per-channel outcome. Failures stay for the
  * `/api/cron/process-notifications` worker to retry.
  *
- * Fire-and-forget: callers `void` this; it never throws.
+ * Never throws. On serverless request/cron paths, await it (or hand it to
+ * `emitAfterResponse`, which also reports a failure): a `void`ed call can be frozen with the function once
+ * the response is sent and the notification silently dropped. Resolves to the
+ * recipients it notified (after the actor and access filters), so a caller
+ * can record who an event reached, or to `null` when resolving them failed:
+ * an empty list means nobody was due the notification, never an error.
  */
-export async function emitNotification(input: EmitNotificationInput): Promise<void> {
+export async function emitNotification(input: EmitNotificationInput): Promise<string[] | null> {
   const { actorUserId } = input;
 
   try {
@@ -41,9 +46,20 @@ export async function emitNotification(input: EmitNotificationInput): Promise<vo
         );
       }
     }
+    return recipientIds;
   } catch (error) {
     console.error(`[emitNotification] ${input.category} failed:`, error);
+    return null;
   }
+}
+
+/** Prisma's P2002: a unique constraint rejected the write. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "P2002"
+  );
 }
 
 async function emitForRecipient(
@@ -66,18 +82,27 @@ async function emitForRecipient(
   });
   if (existing) return;
 
-  const notification = await db.notification.create({
-    data: {
-      userId: recipientId,
-      category: content.category,
-      title: content.title,
-      message: content.message,
-      deeplink: content.deeplink,
-      metadata: (content.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
-      dedupeKey: content.dedupeKey,
-      scheduledFor: input.scheduledFor ?? null,
-    },
-  });
+  let notification;
+  try {
+    notification = await db.notification.create({
+      data: {
+        userId: recipientId,
+        category: content.category,
+        title: content.title,
+        message: content.message,
+        deeplink: content.deeplink,
+        metadata: (content.metadata ?? undefined) as Prisma.InputJsonValue | undefined,
+        dedupeKey: content.dedupeKey,
+        scheduledFor: input.scheduledFor ?? null,
+      },
+    });
+  } catch (error) {
+    // A concurrent emit (overlapping cron ticks, or the request path racing
+    // the cron) won between the guard above and this insert. The unique index
+    // did its job: the notification exists, so this one is a no-op, not an error.
+    if (isUniqueViolation(error)) return;
+    throw error;
+  }
 
   // Resolve the recipient's enabled channels from their category × channel
   // matrix (seeded defaults + per-workspace email override). Only enabled

@@ -1,7 +1,13 @@
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
-import { navLayoutSchema } from "~/lib/navLayout";
+import {
+  NAV_ITEM_CONFIG,
+  applyNavVisibility,
+  navLayoutSchema,
+  parseNavLayout,
+} from "~/lib/navLayout";
+import { requireWorkspaceMembership } from "~/server/services/access";
 
 // Valid section and item keys (legacy - kept for backwards compat with old mutations)
 const VALID_SECTIONS = ["projects", "alignment", "teams", "tools"] as const;
@@ -186,6 +192,69 @@ export const navigationPreferenceRouter = createTRPCRouter({
       });
     }),
 
+  /**
+   * The menu picker's write: show exactly these built-in sidebar items and
+   * hide the rest, for this person everywhere.
+   *
+   * "Everywhere" is the user-wide layout plus every per-workspace layout they
+   * have (ADR-0073). Writing only the user-wide one would do nothing in a
+   * workspace that has its own row, and a row is created by something as
+   * small as folding a section, so the person would switch an item on and
+   * not see it appear. Order, section names, folds and custom shortcuts are
+   * left alone; only visibility changes.
+   */
+  setVisibleItems: protectedProcedure
+    .input(
+      z.object({
+        visibleItemIds: z
+          .array(
+            z.string().refine((id) => Object.hasOwn(NAV_ITEM_CONFIG, id), {
+              message: "Unknown sidebar item",
+            }),
+          )
+          .max(100),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const userId = ctx.session.user.id;
+      const [preference, workspaceLayouts] = await Promise.all([
+        ctx.db.navigationPreference.findUnique({
+          where: { userId },
+          select: { navLayout: true },
+        }),
+        ctx.db.workspaceNavLayout.findMany({
+          where: { userId },
+          select: { id: true, navLayout: true },
+        }),
+      ]);
+
+      const navLayout = applyNavVisibility(
+        parseNavLayout(preference?.navLayout ?? null),
+        input.visibleItemIds,
+      );
+
+      await ctx.db.$transaction([
+        ctx.db.navigationPreference.upsert({
+          where: { userId },
+          update: { navLayout },
+          create: { userId, hiddenSections: [], hiddenItems: [], navLayout },
+        }),
+        ...workspaceLayouts.map((row) =>
+          ctx.db.workspaceNavLayout.update({
+            where: { id: row.id },
+            data: {
+              navLayout: applyNavVisibility(
+                parseNavLayout(row.navLayout),
+                input.visibleItemIds,
+              ),
+            },
+          }),
+        ),
+      ]);
+
+      return { navLayout };
+    }),
+
   // Toggle inspiring quote visibility
   toggleInspiringQuote: protectedProcedure
     .input(z.object({ visible: z.boolean() }))
@@ -232,5 +301,52 @@ export const navigationPreferenceRouter = createTRPCRouter({
           showGamification: input.visible,
         },
       });
+    }),
+
+  // --- Per-workspace sidebar layout (ADR-0073) ---
+  //
+  // All three procedures gate on `requireWorkspaceMembership("view")`. That
+  // already excludes guests (project-only members): "guest" ranks below
+  // "viewer" in WORKSPACE_ROLE_HIERARCHY, so the reduced guest sidebar can
+  // neither read nor write a layout row, matching the client's `canCustomize`.
+
+  /**
+   * The caller's sidebar layout for one workspace, or null when they have not
+   * customised that workspace (the client then falls back to the user-wide
+   * `navLayout`, then to the defaults).
+   */
+  getWorkspaceLayout: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      const row = await ctx.db.workspaceNavLayout.findUnique({
+        where: { userId_workspaceId: { userId: ctx.session.user.id, workspaceId: input.workspaceId } },
+        select: { navLayout: true },
+      });
+      return { navLayout: row?.navLayout ?? null };
+    }),
+
+  // Save the caller's full sidebar layout for one workspace
+  updateWorkspaceLayout: protectedProcedure
+    .input(z.object({ workspaceId: z.string(), layout: navLayoutSchema }))
+    .use(requireWorkspaceMembership("view"))
+    .mutation(async ({ ctx, input }) => {
+      const userId = ctx.session.user.id;
+      return ctx.db.workspaceNavLayout.upsert({
+        where: { userId_workspaceId: { userId, workspaceId: input.workspaceId } },
+        update: { navLayout: input.layout },
+        create: { userId, workspaceId: input.workspaceId, navLayout: input.layout },
+      });
+    }),
+
+  // Drop the per-workspace override so the workspace follows the user-wide layout again
+  resetWorkspaceLayout: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .mutation(async ({ ctx, input }) => {
+      await ctx.db.workspaceNavLayout.deleteMany({
+        where: { userId: ctx.session.user.id, workspaceId: input.workspaceId },
+      });
+      return { ok: true };
     }),
 });

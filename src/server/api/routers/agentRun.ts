@@ -5,8 +5,8 @@ import { getActionAccess, canViewAction, buildActionEditWhere } from "~/server/s
 import { appendRunEvent, appendRunEvents } from "~/server/services/agentRuns/events";
 import { onRunFinished } from "~/server/services/agentRuns/finish";
 import { requireAgentKeyPrincipal, requireClaimedRunForRunner } from "~/server/services/agentRuns/callbacks";
-import { loadRunBrief, LOCAL_RUNNER_CLOSING } from "~/server/services/agentRuns/dispatch";
-import { createActionComment } from "~/server/services/actions/comments";
+import { buildRunMessages, loadRunBrief, LOCAL_RUNNER_CLOSING } from "~/server/services/agentRuns/dispatch";
+import { postRunQuestion } from "~/server/services/agentRuns/question";
 import { isWaitingForRunner } from "~/server/services/agentRuns/presentation";
 
 /** How many times `claim` retries when another runner wins the row it picked. */
@@ -174,7 +174,9 @@ export const agentRunRouter = createTRPCRouter({
         // Build the brief before the guarded write: a failure here (a deleted
         // action, a bad row) must leave the run QUEUED for the next claim,
         // never stranded RUNNING until the sweep times it out.
-        const { run, system, brief } = await loadRunBrief(ctx.db, next.id, { closing: LOCAL_RUNNER_CLOSING });
+        const { run, system, scopeInstructions, brief } = await loadRunBrief(ctx.db, next.id, {
+          closing: LOCAL_RUNNER_CLOSING,
+        });
         const now = new Date();
         const claimed = await ctx.db.agentRun.updateMany({
           where: { id: next.id, status: "QUEUED" },
@@ -212,11 +214,8 @@ export const agentRunRouter = createTRPCRouter({
             project: run.action.project,
           },
           owner: run.agent.owner,
-          /** The persona system message and the brief, as the hosted executor would send them. */
-          messages: [
-            { role: "system" as const, content: system },
-            { role: "user" as const, content: brief },
-          ],
+          /** The persona, the scope's AI instructions and the brief, as the hosted executor sends them. */
+          messages: buildRunMessages({ system, scopeInstructions, brief }),
         };
       }
       return null;
@@ -317,40 +316,24 @@ export const agentRunRouter = createTRPCRouter({
       const summary = input.summary?.trim();
 
       if (input.status === "WAITING_ON_OWNER") {
-        // Park the row first, guarded on RUNNING: a cancel that landed
-        // meanwhile wins, and then no mention and no transcript entry is
-        // written for a CANCELLED run.
-        const updated = await ctx.db.agentRun.updateMany({
-          where: { id: run.id, status: "RUNNING" },
-          data: {
-            status: "WAITING_ON_OWNER",
+        // The same question path as mastra.askOwner (`postRunQuestion`): the
+        // row is parked first, guarded on RUNNING, so a cancel that landed
+        // meanwhile wins and no mention or transcript entry is written.
+        const asked = await postRunQuestion(ctx.db, {
+          run: { ...run, agent: { ownerId: agent.ownerId } },
+          authorId: ctx.session.user.id,
+          question: input.question!,
+          park: {
             finishedAt: now,
             lastEventAt: now,
             ...(summary ? { summary } : {}),
             ...(input.usage !== undefined ? { usage: input.usage as never } : {}),
           },
         });
-        if (updated.count !== 1) {
+        if (!asked) {
           return { finished: false, status: "WAITING_ON_OWNER" as const, commentId: null };
         }
-        const owner = await ctx.db.user.findUniqueOrThrow({
-          where: { id: agent.ownerId },
-          select: { id: true, name: true },
-        });
-        // Same mention shape as mastra.askOwner: `@[Name](id)`, with the
-        // characters that would break the parser stripped from the label.
-        const label = (owner.name ?? "Owner").replace(/[[\]()]/g, "").trim() || "Owner";
-        const comment = await createActionComment(ctx.db, {
-          actionId: run.actionId,
-          authorId: ctx.session.user.id,
-          content: `@[${label}](${owner.id}) ${input.question!}`,
-        });
-        await appendRunEvent(ctx.db, {
-          runId: run.id,
-          kind: "tool_call",
-          payload: { tool: "ask-owner", commentId: comment.id, snippet: input.question!.slice(0, 200) },
-        });
-        return { finished: true, status: "WAITING_ON_OWNER" as const, commentId: comment.id };
+        return { finished: true, status: "WAITING_ON_OWNER" as const, commentId: asked.commentId };
       }
 
       const updated = await ctx.db.agentRun.updateMany({

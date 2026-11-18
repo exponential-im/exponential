@@ -11,6 +11,7 @@ import { buildActionAccessWhere, buildDecisionAccessWhereAcrossWorkspaces } from
 import {
   OVERDUE_WINDOW,
   WAITING_ROW_CAP,
+  agentDraftsToReviewWhere,
   countWaitingOnMe,
   decisionsAwaitingMeWhere,
   listWaitingOnMe,
@@ -41,6 +42,18 @@ describe("waiting-on-me WHERE builders", () => {
     });
   });
 
+  it("agent drafts: meeting-less drafts my agent or Zoe-as-me logged, where I still have access", () => {
+    const where = agentDraftsToReviewWhere(USER) as { AND: Array<Record<string, unknown>> };
+    expect(where.AND[0]).toEqual({ reviewState: "DRAFT", transcriptionSessionId: null });
+    expect(where.AND[1]).toEqual({
+      OR: [
+        { createdById: USER },
+        { createdBy: { externalAgentShadow: { ownerId: USER } } },
+      ],
+    });
+    expect(where.AND).toHaveLength(4);
+  });
+
   it("QA tickets: assigned to me, or mine and unassigned, in workspaces I belong to", () => {
     const where = qaTicketsWaitingOnMeWhere(USER);
     expect(where.status).toBe("QA");
@@ -53,10 +66,10 @@ describe("waiting-on-me WHERE builders", () => {
 });
 
 describe("assistant questions (ADR-0067)", () => {
-  it("my Assistants' latest runs that are waiting on me — not yet resumed", () => {
+  it("waiting runs that asked me — I requested them, or nobody did and the Assistant is mine — not yet resumed", () => {
     expect(assistantQuestionsWaitingOnMeWhere(USER)).toEqual({
       status: "WAITING_ON_OWNER",
-      agent: { ownerId: USER },
+      OR: [{ requestedById: USER }, { requestedById: null, agent: { ownerId: USER } }],
       successors: { none: {} },
       action: buildActionAccessWhere(USER),
     });
@@ -120,7 +133,7 @@ describe("countWaitingOnMe", () => {
   });
 
   it("counts each kind with its builder and sums the total", async () => {
-    db.decision.count.mockResolvedValue(2);
+    db.decision.count.mockResolvedValueOnce(2).mockResolvedValueOnce(6);
     db.transcriptionSession.count.mockResolvedValue(1);
     db.ticket.count.mockResolvedValue(3);
     db.action.count.mockResolvedValue(4);
@@ -131,10 +144,11 @@ describe("countWaitingOnMe", () => {
     expect(counts).toEqual({
       decisions: 2,
       draftReviews: 1,
+      agentDrafts: 6,
       qaTickets: 3,
       overdueActions: 4,
       assistantQuestions: 5,
-      total: 15,
+      total: 21,
     });
     // Overdue is anchored to the viewer's midnight as passed in, not "now".
     const where = db.action.count.mock.calls[0]![0]!.where!;
@@ -164,10 +178,13 @@ describe("listWaitingOnMe", () => {
 
   it("labels decisions and marks the ones I own", async () => {
     const ws = { slug: "acme", name: "Acme" };
-    db.decision.findMany.mockResolvedValue([
-      { id: "d1", number: 7, statement: "Pick a DB", status: "PROPOSED", ownerId: USER, createdAt: TODAY, workspace: ws },
-      { id: "d2", number: 12, statement: "Ship Friday?", status: "OPEN", ownerId: "u2", createdAt: TODAY, workspace: ws },
-    ] as never);
+    // The first decision read is "awaiting me"; the second, agent drafts.
+    db.decision.findMany
+      .mockResolvedValueOnce([
+        { id: "d1", number: 7, statement: "Pick a DB", status: "PROPOSED", ownerId: USER, createdAt: TODAY, workspace: ws },
+        { id: "d2", number: 12, statement: "Ship Friday?", status: "OPEN", ownerId: "u2", createdAt: TODAY, workspace: ws },
+      ] as never)
+      .mockResolvedValueOnce([] as never);
 
     const { decisions } = await listWaitingOnMe(db, USER, TODAY);
 
@@ -176,6 +193,46 @@ describe("listWaitingOnMe", () => {
       ["D-0012", false],
     ]);
     expect(decisions[0]).not.toHaveProperty("ownerId");
+  });
+
+  it("lists agent drafts with their label and who logged them", async () => {
+    const ws = { slug: "acme", name: "Acme" };
+    db.decision.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([
+      { id: "a1", number: 5, statement: "Use Redis", createdAt: TODAY, workspace: ws, createdBy: { name: "Robo", isAgent: true } },
+      { id: "a2", number: 6, statement: "Cut scope", createdAt: TODAY, workspace: ws, createdBy: { name: "Dev", isAgent: false } },
+    ] as never);
+
+    const { agentDrafts } = await listWaitingOnMe(db, USER, TODAY);
+
+    expect(agentDrafts.map((d) => [d.label, d.authorName])).toEqual([
+      ["D-0005", "Robo"],
+      ["D-0006", "Zoe"],
+    ]);
+  });
+
+  it("marks which agent drafts the user may confirm, resolving each workspace once", async () => {
+    const ws = { slug: "acme", name: "Acme" };
+    db.decision.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([
+      { id: "a1", number: 5, statement: "Use Redis", createdAt: TODAY, workspaceId: "w1", projectId: null, workspace: ws, createdBy: { name: "Robo", isAgent: true } },
+      { id: "a2", number: 6, statement: "Cut scope", createdAt: TODAY, workspaceId: "w1", projectId: null, workspace: ws, createdBy: { name: "Robo", isAgent: true } },
+      { id: "a3", number: 2, statement: "Elsewhere", createdAt: TODAY, workspaceId: "w2", projectId: null, workspace: ws, createdBy: { name: "Robo", isAgent: true } },
+    ] as never);
+    // A member of w1 (may confirm), a viewer of w2 (may not).
+    db.workspaceUser.findUnique.mockImplementation(((args: { where: { userId_workspaceId: { workspaceId: string } } }) =>
+      Promise.resolve(
+        args.where.userId_workspaceId.workspaceId === "w1"
+          ? { role: "member", workspaceId: "w1" }
+          : { role: "viewer", workspaceId: "w2" },
+      )) as never);
+
+    const { agentDrafts } = await listWaitingOnMe(db, USER, TODAY);
+
+    expect(agentDrafts.map((d) => [d.id, d.workspaceId, d.canEdit])).toEqual([
+      ["a1", "w1", true],
+      ["a2", "w1", true],
+      ["a3", "w2", false],
+    ]);
+    expect(db.workspaceUser.findUnique).toHaveBeenCalledTimes(2);
   });
 
   it("reports each meeting's draft count", async () => {

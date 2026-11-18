@@ -1,0 +1,652 @@
+import { z } from "zod";
+import { TRPCError } from "@trpc/server";
+import type { Prisma, PrismaClient } from "@prisma/client";
+import { createTRPCRouter, humanOnlyProcedure, protectedProcedure } from "~/server/api/trpc";
+import { requireWorkspaceMembership } from "~/server/services/access/middleware";
+import {
+  assertCanEditPosition,
+  hasRemitGap,
+  loadPositionCoverage,
+  planPositionImport,
+  POSITION_SUMMARY_SELECT,
+  positionTitleKey,
+  shouldOfferPositionImport,
+} from "~/server/services/positions";
+import { blankToNull } from "~/server/utils/blankToNull";
+import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
+import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
+
+/**
+ * Positions (ADR-0068): who does what in a workspace, for humans and agents
+ * alike. Routing data only — a Position never grants or restricts anything;
+ * `WorkspaceUser.role` stays the only input to access control.
+ *
+ * Every write is `humanOnlyProcedure` (ADR-0049 denylist): no agent principal
+ * can give itself or another agent a Position, however it authenticated.
+ * Owners and admins (`manage_members`) create, rename, delete, set holders
+ * and import; a holder who is at least a `member` may edit the Remit of a
+ * Position they hold (`update`); a viewer is read-only even as a holder. A
+ * person may withdraw their own agent from any Position (`withdrawMyAgent`).
+ * `coverage` is a read for any member (the chat's import pill).
+ *
+ * Every procedure takes `workspaceId` so `requireWorkspaceMembership` gates
+ * it, and a `positionId` from another workspace answers NOT_FOUND — no
+ * cross-workspace oracle.
+ */
+
+const titleSchema = z.string().trim().min(1).max(80);
+const remitSchema = z.string().trim().min(1).max(2000);
+const notAccountableForSchema = z.string().trim().max(2000);
+/** A sanity bound on the `IN` clause, not a product limit. */
+const holderUserIdsSchema = z.array(z.string()).max(50);
+
+const POSITION_WITH_HOLDERS_SELECT = {
+  ...POSITION_SUMMARY_SELECT,
+  holders: {
+    select: {
+      workspaceUser: {
+        select: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              image: true,
+              isAgent: true,
+              // Who may withdraw an agent holder (`withdrawMyAgent`): its owner.
+              externalAgentShadow: { select: { ownerId: true } },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const satisfies Prisma.PositionSelect;
+
+type PositionWithHolders = Prisma.PositionGetPayload<{ select: typeof POSITION_WITH_HOLDERS_SELECT }>;
+
+function presentPosition(position: PositionWithHolders) {
+  const { holders, ...summary } = position;
+  return {
+    ...summary,
+    holders: holders.map(({ workspaceUser: { user } }) => ({
+      userId: user.id,
+      name: user.name,
+      image: user.image,
+      isAgent: user.isAgent,
+      /** The person accountable for an agent holder, who may withdraw it; null for a person. */
+      agentOwnerId: user.externalAgentShadow?.ownerId ?? null,
+    })),
+  };
+}
+
+function prismaErrorCode(error: unknown): string | null {
+  return !!error && typeof error === "object" && "code" in error
+    ? ((error as { code?: unknown }).code as string | null) ?? null
+    : null;
+}
+
+/** P2002 on the `(workspaceId, title)` unique, and no other unique. */
+function isDuplicateTitle(error: unknown): boolean {
+  if (prismaErrorCode(error) !== "P2002") return false;
+  const target = (error as { meta?: { target?: unknown } }).meta?.target;
+  return Array.isArray(target) ? target.includes("title") : typeof target === "string" && target.includes("title");
+}
+
+/**
+ * P2003: a holder's `WorkspaceUser` row vanished between the membership check
+ * and the write (the member was removed concurrently). The write rolled back;
+ * answer as the check would have.
+ */
+function isMissingHolderMembership(error: unknown): boolean {
+  return prismaErrorCode(error) === "P2003";
+}
+
+const DUPLICATE_TITLE = () =>
+  new TRPCError({ code: "CONFLICT", message: "A Position with this title already exists" });
+const HOLDER_NOT_MEMBER = () =>
+  new TRPCError({ code: "NOT_FOUND", message: "Member not found in this workspace" });
+
+/** Map a failed Position write to its tRPC error, or rethrow. */
+function rethrowPositionWrite(error: unknown): never {
+  if (isDuplicateTitle(error)) throw DUPLICATE_TITLE();
+  if (isMissingHolderMembership(error)) throw HOLDER_NOT_MEMBER();
+  throw error;
+}
+
+/** The Position, or NOT_FOUND when it is missing or belongs to another workspace. */
+async function requirePositionInWorkspace(
+  db: PrismaClient,
+  positionId: string,
+  workspaceId: string,
+) {
+  const position = await db.position.findUnique({
+    where: { id: positionId },
+    select: { id: true, workspaceId: true },
+  });
+  if (!position || position.workspaceId !== workspaceId) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "Position not found" });
+  }
+  return position;
+}
+
+/**
+ * Map holder userIds to their `WorkspaceUser` rows in `workspaceId`. Every
+ * holder must be a member; a miss is NOT_FOUND and never names the id (the
+ * same rule as `assignability.ts`, so this cannot confirm foreign CUIDs).
+ */
+async function findHolderMemberships(
+  db: PrismaClient | Prisma.TransactionClient,
+  workspaceId: string,
+  userIds: string[],
+): Promise<Array<{ id: string; userId: string }>> {
+  const unique = [...new Set(userIds)];
+  if (unique.length === 0) return [];
+  const memberships = await db.workspaceUser.findMany({
+    where: { workspaceId, userId: { in: unique } },
+    select: { id: true, userId: true },
+  });
+  if (memberships.length !== unique.length) {
+    throw HOLDER_NOT_MEMBER();
+  }
+  return memberships;
+}
+
+/**
+ * Make `memberships` the Position's exact holder set, inside the caller's
+ * transaction: remove the holders no longer named, add the new ones, and
+ * leave an unchanged holder's row (and its `createdAt`) alone. Returns the
+ * userIds of the holders this write added — what `POSITION_ASSIGNED` is
+ * emitted for, so re-saving an unchanged set notifies no one.
+ */
+async function replaceHolders(
+  tx: Prisma.TransactionClient,
+  positionId: string,
+  memberships: Array<{ id: string; userId: string }>,
+): Promise<string[]> {
+  const current = await tx.positionHolder.findMany({
+    where: { positionId },
+    select: { workspaceUserId: true },
+  });
+  const held = new Set(current.map((holder) => holder.workspaceUserId));
+  const added = memberships.filter((membership) => !held.has(membership.id));
+
+  await tx.positionHolder.deleteMany({
+    where: { positionId, workspaceUserId: { notIn: memberships.map((m) => m.id) } },
+  });
+  if (added.length > 0) {
+    await tx.positionHolder.createMany({
+      data: added.map((membership) => ({ positionId, workspaceUserId: membership.id })),
+      skipDuplicates: true,
+    });
+  }
+  return added.map((membership) => membership.userId);
+}
+
+/**
+ * Tell the person behind each agent just made a holder (Agent PRD D9). Called
+ * after the write commits; fire-and-forget like every emit. Human holders are
+ * filtered out by the category's recipient rule, and an admin appointing
+ * their own Assistant is the actor, so is never notified.
+ */
+function notifyNewHolders(
+  db: PrismaClient,
+  actorUserId: string,
+  positionId: string,
+  addedHolderUserIds: string[],
+): void {
+  if (addedHolderUserIds.length === 0) return;
+  emitAfterResponse("position.assignedNotification", () =>
+    emitNotification({
+      db,
+      actorUserId,
+      category: NOTIFICATION_CATEGORIES.POSITION_ASSIGNED,
+      subject: { positionId, addedHolderUserIds },
+    }),
+    { positionId },
+  );
+}
+
+/** The holders' `WorkspaceUser` ids keyed by userId, so an import can map each row's holders. */
+async function mapHolderMemberships(
+  db: PrismaClient | Prisma.TransactionClient,
+  workspaceId: string,
+  userIds: string[],
+): Promise<Map<string, string>> {
+  const memberships = await findHolderMemberships(db, workspaceId, userIds);
+  return new Map(memberships.map((membership) => [membership.userId, membership.id]));
+}
+
+/** The workspace's Positions with their holders' userIds, for an import to match against. */
+async function loadPositionsForImport(db: PrismaClient | Prisma.TransactionClient, workspaceId: string) {
+  const positions = await db.position.findMany({
+    where: { workspaceId },
+    orderBy: { title: "asc" },
+    select: {
+      id: true,
+      title: true,
+      notAccountableFor: true,
+      holders: { select: { workspaceUser: { select: { userId: true } } } },
+    },
+  });
+  return positions.map((position) => ({
+    id: position.id,
+    title: position.title,
+    notAccountableFor: position.notAccountableFor,
+    holderUserIds: position.holders.map((holder) => holder.workspaceUser.userId),
+  }));
+}
+
+/**
+ * Distinct holder ids across one import. Each row's list is already capped at
+ * 50, but an import flattens every row into one membership lookup, so the
+ * `IN` clause gets its own bound.
+ */
+const MAX_IMPORT_HOLDER_IDS = 200;
+
+const importRowSchema = z.object({
+  title: titleSchema,
+  remit: remitSchema,
+  notAccountableFor: notAccountableForSchema.optional(),
+  holderUserIds: holderUserIdsSchema,
+});
+
+export const positionRouter = createTRPCRouter({
+  /**
+   * Every Position in the workspace with its holders, plus one row per
+   * `WorkspaceUser` saying which Positions they hold and whether their row
+   * needs the "no stated remit" warning. The settings page's one read.
+   */
+  list: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      const [positions, members] = await Promise.all([
+        ctx.db.position.findMany({
+          where: { workspaceId: input.workspaceId },
+          orderBy: { title: "asc" },
+          select: POSITION_WITH_HOLDERS_SELECT,
+        }),
+        ctx.db.workspaceUser.findMany({
+          where: { workspaceId: input.workspaceId },
+          select: {
+            userId: true,
+            user: {
+              select: {
+                isAgent: true,
+                // An agent's own description is its fallback Remit (ADR-0068 §3).
+                externalAgentShadow: { select: { description: true } },
+              },
+            },
+            positionHolders: { select: { positionId: true } },
+          },
+        }),
+      ]);
+
+      return {
+        positions: positions.map(presentPosition),
+        members: members.map((member) => ({
+          userId: member.userId,
+          positionIds: member.positionHolders.map((holder) => holder.positionId),
+          remitGap: hasRemitGap({
+            isAgent: member.user.isAgent,
+            positionCount: member.positionHolders.length,
+            agentDescription: member.user.externalAgentShadow?.description ?? null,
+          }),
+        })),
+      };
+    }),
+
+  /**
+   * Should the chat offer "Import roles & responsibilities" here? A read for
+   * any member — the pill shows to everyone (Agent PRD D12), and the import
+   * itself is what needs owner/admin.
+   */
+  coverage: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .query(async ({ ctx, input }) => {
+      const coverage = await loadPositionCoverage(ctx.db, input.workspaceId);
+      return {
+        offerImport: shouldOfferPositionImport(coverage),
+        memberCount: coverage.memberCount,
+        eligibleCount: coverage.eligibleCount,
+        coveredCount: coverage.coveredCount,
+      };
+    }),
+
+  create: humanOnlyProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        title: titleSchema,
+        remit: remitSchema,
+        notAccountableFor: notAccountableForSchema.optional(),
+        holderUserIds: holderUserIdsSchema.optional(),
+      }),
+    )
+    .use(requireWorkspaceMembership("manage_members"))
+    .mutation(async ({ ctx, input }) => {
+      const memberships = await findHolderMemberships(
+        ctx.db,
+        input.workspaceId,
+        input.holderUserIds ?? [],
+      );
+      try {
+        // Row and holders in one nested write, so a Position never exists
+        // half-made.
+        const created = await ctx.db.position.create({
+          data: {
+            workspaceId: input.workspaceId,
+            title: input.title,
+            remit: input.remit,
+            notAccountableFor: blankToNull(input.notAccountableFor),
+            holders: {
+              create: memberships.map((membership) => ({ workspaceUserId: membership.id })),
+            },
+          },
+          select: POSITION_WITH_HOLDERS_SELECT,
+        });
+        notifyNewHolders(
+          ctx.db,
+          ctx.session.user.id,
+          created.id,
+          memberships.map((membership) => membership.userId),
+        );
+        return presentPosition(created);
+      } catch (error) {
+        rethrowPositionWrite(error);
+      }
+    }),
+
+  /**
+   * Title, "not accountable for" and the holder set need owner/admin; the
+   * Remit needs owner/admin or that the caller holds this Position. The
+   * decision is `assertCanEditPosition` in services/positions — one place,
+   * not per router. Row and holders are written in one transaction, so an
+   * admin's edit never lands half-way (the same guarantee `create` gives).
+   */
+  update: humanOnlyProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        positionId: z.string(),
+        title: titleSchema.optional(),
+        remit: remitSchema.optional(),
+        notAccountableFor: notAccountableForSchema.nullable().optional(),
+        /** When present, replaces the holder set (owner/admin only). */
+        holderUserIds: holderUserIdsSchema.optional(),
+      })
+      // An update that edits nothing would pass neither gate below and still
+      // run a mutation as any viewer; refuse it before authorization.
+      .refine(
+        (input) =>
+          input.title !== undefined ||
+          input.remit !== undefined ||
+          input.notAccountableFor !== undefined ||
+          input.holderUserIds !== undefined,
+        { message: "Nothing to update" },
+      ),
+    )
+    .use(requireWorkspaceMembership("view"))
+    .mutation(async ({ ctx, input }) => {
+      await requirePositionInWorkspace(ctx.db, input.positionId, input.workspaceId);
+      await assertCanEditPosition(ctx.db, {
+        userId: ctx.session.user.id,
+        workspaceId: input.workspaceId,
+        positionId: input.positionId,
+        edits: {
+          titleOrScope:
+            input.title !== undefined ||
+            input.notAccountableFor !== undefined ||
+            input.holderUserIds !== undefined,
+          remit: input.remit !== undefined,
+        },
+      });
+      const memberships =
+        input.holderUserIds !== undefined
+          ? await findHolderMemberships(ctx.db, input.workspaceId, input.holderUserIds)
+          : null;
+
+      const data: Prisma.PositionUpdateInput = {
+        ...(input.title !== undefined && { title: input.title }),
+        ...(input.remit !== undefined && { remit: input.remit }),
+        ...(input.notAccountableFor !== undefined && {
+          notAccountableFor: blankToNull(input.notAccountableFor),
+        }),
+      };
+
+      try {
+        if (memberships === null) {
+          const updated = await ctx.db.position.update({
+            where: { id: input.positionId },
+            data,
+            select: POSITION_WITH_HOLDERS_SELECT,
+          });
+          return presentPosition(updated);
+        }
+        const { updated, added } = await ctx.db.$transaction(async (tx) => {
+          const added = await replaceHolders(tx, input.positionId, memberships);
+          const updated = await tx.position.update({
+            where: { id: input.positionId },
+            data,
+            select: POSITION_WITH_HOLDERS_SELECT,
+          });
+          return { updated, added };
+        });
+        notifyNewHolders(ctx.db, ctx.session.user.id, input.positionId, added);
+        return presentPosition(updated);
+      } catch (error) {
+        rethrowPositionWrite(error);
+      }
+    }),
+
+  delete: humanOnlyProcedure
+    .input(z.object({ workspaceId: z.string(), positionId: z.string() }))
+    .use(requireWorkspaceMembership("manage_members"))
+    .mutation(async ({ ctx, input }) => {
+      await requirePositionInWorkspace(ctx.db, input.positionId, input.workspaceId);
+      // Holders cascade (FK).
+      await ctx.db.position.delete({ where: { id: input.positionId } });
+      return { id: input.positionId };
+    }),
+
+  /**
+   * Bring in a set of Positions at once — Zoe's import of a roles &
+   * responsibilities document (Agent PRD D3/D10). Owner/admin, human-only.
+   *
+   * Upsert by title, matched case-insensitively on the trimmed title within
+   * the workspace (`planPositionImport`). Every holder must be a member,
+   * checked before anything is planned. `dryRun: true` validates and returns
+   * the plan without writing, so Zoe can show a draft and ask first; a real
+   * run writes the same plan in one transaction, all or nothing.
+   *
+   * A row that omits `notAccountableFor` keeps the stored value on an
+   * update; an empty string clears it. At most 200 distinct holders per
+   * import.
+   *
+   * Returns `{ written, results }`, results in input order, each with the
+   * Position's `notAccountableFor` and holders as they stand after the
+   * import, so the draft shows what will change.
+   */
+  importMany: humanOnlyProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        dryRun: z.boolean(),
+        positions: z
+          .array(importRowSchema)
+          .min(1)
+          .max(50)
+          .refine(
+            (rows) => new Set(rows.flatMap((row) => row.holderUserIds)).size <= MAX_IMPORT_HOLDER_IDS,
+            { message: `An import can name at most ${MAX_IMPORT_HOLDER_IDS} distinct holders` },
+          ),
+      }),
+    )
+    .use(requireWorkspaceMembership("manage_members"))
+    .mutation(async ({ ctx, input }) => {
+      const seen = new Set<string>();
+      for (const row of input.positions) {
+        const key = positionTitleKey(row.title);
+        if (seen.has(key)) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `"${row.title}" appears more than once in this import`,
+          });
+        }
+        seen.add(key);
+      }
+
+      const holderUserIds = input.positions.flatMap((row) => row.holderUserIds);
+
+      const present = (plan: ReturnType<typeof planPositionImport>) =>
+        plan.map(({ title, outcome, notAccountableFor, holderUserIds }) => ({
+          title,
+          outcome,
+          notAccountableFor,
+          holderUserIds,
+        }));
+
+      if (input.dryRun) {
+        await mapHolderMemberships(ctx.db, input.workspaceId, holderUserIds);
+        const plan = planPositionImport(await loadPositionsForImport(ctx.db, input.workspaceId), input.positions);
+        return { written: false, results: present(plan) };
+      }
+
+      // All or nothing: memberships and the plan are read and written inside
+      // one transaction, so a concurrent edit cannot leave half an import and
+      // a holder removed meanwhile is a NOT_FOUND, not a foreign-key error.
+      try {
+        const appointments: Array<{ positionId: string; userIds: string[] }> = [];
+        const plan = await ctx.db.$transaction(
+          async (tx) => {
+            const memberships = await mapHolderMemberships(tx, input.workspaceId, holderUserIds);
+            const workspaceUserIdOf = (userId: string) => {
+              const workspaceUserId = memberships.get(userId);
+              if (!workspaceUserId) {
+                throw HOLDER_NOT_MEMBER();
+              }
+              return workspaceUserId;
+            };
+            const planned = planPositionImport(await loadPositionsForImport(tx, input.workspaceId), input.positions);
+            for (const row of planned) {
+              if (row.outcome === "create") {
+                const created = await tx.position.create({
+                  data: {
+                    workspaceId: input.workspaceId,
+                    title: row.title,
+                    remit: row.remit,
+                    notAccountableFor: row.notAccountableFor,
+                    holders: {
+                      create: row.holderUserIds.map((userId) => ({ workspaceUserId: workspaceUserIdOf(userId) })),
+                    },
+                  },
+                  select: { id: true },
+                });
+                appointments.push({ positionId: created.id, userIds: row.holderUserIds });
+              } else {
+                await tx.position.update({
+                  where: { id: row.positionId },
+                  data: { remit: row.remit, notAccountableFor: row.notAccountableFor },
+                  select: { id: true },
+                });
+                // Adds only; an import never removes a holder.
+                if (row.addedHolderUserIds.length > 0) {
+                  await tx.positionHolder.createMany({
+                    data: row.addedHolderUserIds.map((userId) => ({
+                      positionId: row.positionId,
+                      workspaceUserId: workspaceUserIdOf(userId),
+                    })),
+                    skipDuplicates: true,
+                  });
+                  appointments.push({ positionId: row.positionId, userIds: row.addedHolderUserIds });
+                }
+              }
+            }
+            return planned;
+          },
+          // Up to 50 rows of sequential writes; the 5s default is tight.
+          { timeout: 20_000 },
+        );
+        for (const { positionId, userIds } of appointments) {
+          notifyNewHolders(ctx.db, ctx.session.user.id, positionId, userIds);
+        }
+        return { written: true, results: present(plan) };
+      } catch (error) {
+        // A Position created under the same title since the plan was read, or
+        // a holder removed mid-write: the same answers as create/setHolders.
+        rethrowPositionWrite(error);
+      }
+    }),
+
+  /**
+   * Take your own agent — normally your Assistant — out of a Position an
+   * owner or admin made it a holder of (Agent PRD D9). Authorised not by
+   * `manage_members` but by owning the holder's External agent: you are
+   * accountable for what it does there, so you may always withdraw it. A
+   * stranger's agent is FORBIDDEN; a Position from another workspace, or one
+   * the agent does not hold, is NOT_FOUND. Deletes the one holder row; the
+   * Position reads "Vacant" if that was its last holder.
+   */
+  withdrawMyAgent: humanOnlyProcedure
+    .input(z.object({ workspaceId: z.string(), positionId: z.string(), userId: z.string() }))
+    .use(requireWorkspaceMembership("view"))
+    .mutation(async ({ ctx, input }) => {
+      await requirePositionInWorkspace(ctx.db, input.positionId, input.workspaceId);
+      const agent = await ctx.db.externalAgent.findUnique({
+        where: { shadowUserId: input.userId },
+        select: { ownerId: true },
+      });
+      if (agent?.ownerId !== ctx.session.user.id) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only the person whose agent holds this Position can withdraw it",
+        });
+      }
+      const { count } = await ctx.db.positionHolder.deleteMany({
+        where: {
+          positionId: input.positionId,
+          workspaceUser: { userId: input.userId, workspaceId: input.workspaceId },
+        },
+      });
+      if (count === 0) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Your agent does not hold this Position" });
+      }
+      return { positionId: input.positionId, userId: input.userId };
+    }),
+
+  /**
+   * Replace the holder set. Same member check and NOT_FOUND rule as `create`.
+   * The person behind each newly added agent holder is notified
+   * (`POSITION_ASSIGNED`); an unchanged holder never is.
+   */
+  setHolders: humanOnlyProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        positionId: z.string(),
+        userIds: holderUserIdsSchema,
+      }),
+    )
+    .use(requireWorkspaceMembership("manage_members"))
+    .mutation(async ({ ctx, input }) => {
+      await requirePositionInWorkspace(ctx.db, input.positionId, input.workspaceId);
+      const memberships = await findHolderMemberships(ctx.db, input.workspaceId, input.userIds);
+
+      try {
+        const { updated, added } = await ctx.db.$transaction(async (tx) => {
+          const added = await replaceHolders(tx, input.positionId, memberships);
+          const updated = await tx.position.findUniqueOrThrow({
+            where: { id: input.positionId },
+            select: POSITION_WITH_HOLDERS_SELECT,
+          });
+          return { updated, added };
+        });
+        notifyNewHolders(ctx.db, ctx.session.user.id, input.positionId, added);
+        return presentPosition(updated);
+      } catch (error) {
+        rethrowPositionWrite(error);
+      }
+    }),
+});

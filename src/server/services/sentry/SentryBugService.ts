@@ -1,6 +1,9 @@
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTicketWithNumber } from "~/plugins/product/server/services/createTicket";
+import { notifyTicketAssigned } from "~/plugins/product/server/services/notifyTicketAssigned";
+import { getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
 import { ticketUrlId } from "~/lib/fun-ids";
+import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 import { buildBugBody, type SentryBug } from "./sentryPayload";
 import { notifyZulipOfSentryBug } from "./sentryZulip";
 import { notifyMatrixOfSentryBug } from "./sentryMatrix";
@@ -21,6 +24,16 @@ import { notifyMatrixOfSentryBug } from "./sentryMatrix";
 
 // The Exponential product is the default bug destination (overridable via env).
 const DEFAULT_BUG_PRODUCT_ID = "cmp2ztu9y0003jv04kk2l8sm0";
+
+/**
+ * The product auto-filed bugs land in when the caller names none: the env
+ * override, else the Exponential product. Exported for code that has to find
+ * those tickets again (the tool canary's recovery sweep).
+ */
+export function resolveBugProductId(): string {
+  return process.env.SENTRY_BUG_PRODUCT_ID ?? DEFAULT_BUG_PRODUCT_ID;
+}
+
 const DEFAULT_BOT_EMAIL = "errol@bots.exponential.im";
 const DEFAULT_BOT_NAME = "Errol";
 
@@ -38,6 +51,41 @@ async function findOrCreateErrol(db: PrismaClient): Promise<{ id: string }> {
     update: {},
     select: { id: true },
   });
+}
+
+/**
+ * Who an auto-filed bug is assigned to, so one person is told about it (the
+ * Assignment notification, on whichever channels they chose) and owns its
+ * triage. Set by `SENTRY_BUG_ASSIGNEE_ID`; unset means unassigned, as before.
+ *
+ * The env value describes the platform's own bug product, so it applies only
+ * there: a workspace-scoped Sentry integration that files into its own
+ * product is never assigned to the platform's on-call. A user who is not a
+ * member of the product's workspace is ignored as well, since they could not
+ * open the ticket.
+ */
+export async function resolveBugAssigneeId(
+  db: PrismaClient,
+  product: { id: string; workspaceId: string },
+): Promise<string | null> {
+  const assigneeId = process.env.SENTRY_BUG_ASSIGNEE_ID?.trim();
+  if (!assigneeId) return null;
+
+  const platformProductId = resolveBugProductId();
+  if (product.id !== platformProductId) return null;
+
+  const membership = await getWorkspaceMembership(
+    db,
+    assigneeId,
+    product.workspaceId,
+  );
+  if (!membership) {
+    console.warn(
+      "[sentry bug] SENTRY_BUG_ASSIGNEE_ID is not a member of the bug product's workspace; leaving the ticket unassigned",
+    );
+    return null;
+  }
+  return assigneeId;
 }
 
 // Workspace labels applied to every Sentry-filed ticket. `avatar-plum` ≈ Sentry's
@@ -157,6 +205,26 @@ export interface IngestResult {
   ticketId: string;
 }
 
+/**
+ * Whether a recurring error is due another announcement. `lastNotifiedAt`
+ * lives in the ticket's `links` JSON so the throttle survives across
+ * serverless invocations without a schema change; a ticket that predates it
+ * (no timestamp) is due.
+ */
+export function isDueForRenotify(
+  links: Prisma.JsonValue | null,
+  renotifyAfterMs: number,
+  now: Date,
+): boolean {
+  const last =
+    links && typeof links === "object" && !Array.isArray(links)
+      ? links.lastNotifiedAt
+      : undefined;
+  if (typeof last !== "string") return true;
+  const lastMs = Date.parse(last);
+  return Number.isNaN(lastMs) || now.getTime() - lastMs >= renotifyAfterMs;
+}
+
 export async function ingestSentryBug(
   db: PrismaClient,
   bug: SentryBug,
@@ -175,16 +243,22 @@ export async function ingestSentryBug(
      * label should keep meaning what it says.
      */
     labels?: readonly { name: string; slug: string; color: string }[];
+    /** Lead-in for the creation announcement. Defaults to "New Sentry bug". */
+    heading?: string;
+    /**
+     * Re-announce a recurring error at most once per this many ms instead of
+     * only on creation. For failures that need a person *now* every time they
+     * keep happening (an exhausted provider account), where one ping on a
+     * months-old ticket is easy to miss. Unset ⇒ creation-only, as before.
+     */
+    renotifyAfterMs?: number;
   },
 ): Promise<IngestResult> {
   // Destination precedence: an explicit per-workspace product (from a
   // workspace-scoped Sentry integration) wins; otherwise fall back to the
   // global env default, then the hardcoded Exponential product. This keeps the
   // legacy global `/api/webhooks/sentry` route working unchanged.
-  const productId =
-    options?.productId ??
-    process.env.SENTRY_BUG_PRODUCT_ID ??
-    DEFAULT_BUG_PRODUCT_ID;
+  const productId = options?.productId ?? resolveBugProductId();
   const product = await db.product.findUnique({
     where: { id: productId },
     select: {
@@ -207,13 +281,53 @@ export async function ingestSentryBug(
       productId: product.id,
       links: { path: ["sentryIssueId"], equals: bug.issueId },
     },
-    select: { id: true },
+    select: { id: true, number: true, links: true, updatedAt: true },
   });
+  const now = new Date();
+  const baseUrl = getPublicBaseUrlFromEnv();
+  const ticketUrlFor = (ticket: { id: string; number: number }) =>
+    `${baseUrl}/w/${product.workspace.slug}/products/${product.slug}/tickets/${ticketUrlId(ticket)}`;
+
   if (existing) {
+    const renotifyAfterMs = options?.renotifyAfterMs;
+    if (
+      renotifyAfterMs !== undefined &&
+      isDueForRenotify(existing.links, renotifyAfterMs, now)
+    ) {
+      // Claim the slot before announcing, so a failed send is not retried on
+      // every request in a burst. The claim is a compare-and-set on
+      // `updatedAt`: during an outage every turn fails at once, and several
+      // requests can all read the ticket as due. Only the one whose write
+      // still sees the row it read wins; the rest find it changed and stay
+      // quiet.
+      const links =
+        existing.links && typeof existing.links === "object" && !Array.isArray(existing.links)
+          ? existing.links
+          : {};
+      const claim = await db.ticket.updateMany({
+        where: { id: existing.id, updatedAt: existing.updatedAt },
+        data: { links: { ...links, lastNotifiedAt: now.toISOString() } },
+      });
+      if (claim.count === 0) {
+        return { created: false, ticketId: existing.id };
+      }
+      const errol = await findOrCreateErrol(db);
+      const repeat = {
+        workspaceId: product.workspaceId,
+        authorId: errol.id,
+        title: bug.title,
+        ticketUrl: ticketUrlFor(existing),
+        sentryUrl: bug.url,
+        heading: "Still happening",
+      };
+      await notifyZulipOfSentryBug(db, repeat);
+      await notifyMatrixOfSentryBug(repeat);
+    }
     return { created: false, ticketId: existing.id };
   }
 
   const errol = await findOrCreateErrol(db);
+  const assigneeId = await resolveBugAssigneeId(db, product);
 
   const ticket = await createTicketWithNumber(db, {
     productId: product.id,
@@ -223,11 +337,19 @@ export async function ingestSentryBug(
     body: options?.body ?? buildBugBody(bug),
     type: "BUG",
     status: "BACKLOG",
+    assigneeId,
     // Priority is left unset — a human assigns it during triage.
     // `sentryIssueId` stays the key for non-Sentry origins too: it is the dedup
     // path queried above, and a second path would mean a second lookup for no
     // gain. The value's `client:` prefix says where it came from.
-    links: { sentryIssueId: bug.issueId, sentryUrl: bug.url },
+    links: {
+      sentryIssueId: bug.issueId,
+      sentryUrl: bug.url,
+      // Creation announces below, so the repeat-alert clock starts now.
+      ...(options?.renotifyAfterMs !== undefined
+        ? { lastNotifiedAt: now.toISOString() }
+        : {}),
+    },
   });
 
   // Tag it so these are filterable. `labelTicket` now takes the complete set
@@ -242,19 +364,29 @@ export async function ingestSentryBug(
     ...(source ? [source] : []),
   ]);
 
-  // Announce the new bug in Zulip (best-effort) with a deep link to the ticket.
-  // Only on creation — recurring errors that dedup above do not re-notify.
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://www.exponential.im";
-  const ticketUrl = `${baseUrl}/w/${product.workspace.slug}/products/${product.slug}/tickets/${ticketUrlId(ticket)}`;
+  // Announce the new bug in Zulip and Matrix (best-effort) with a deep link to
+  // the ticket. Recurring errors that dedup above re-notify only when the
+  // caller asked for it via `renotifyAfterMs`.
   const bugNotification = {
     workspaceId: product.workspaceId,
     authorId: errol.id,
     title: bug.title,
-    ticketUrl,
+    ticketUrl: ticketUrlFor(ticket),
     sentryUrl: bug.url,
+    ...(options?.heading ? { heading: options.heading } : {}),
   };
   await notifyZulipOfSentryBug(db, bugNotification);
   await notifyMatrixOfSentryBug(bugNotification);
+
+  // And tell the assignee directly. Errol is the actor, so this reaches them
+  // even though nobody "assigned" it by hand. After the labels, so the ticket
+  // they open is complete.
+  await notifyTicketAssigned(db, {
+    ticketId: ticket.id,
+    assigneeId,
+    previousAssigneeId: null,
+    actorUserId: errol.id,
+  });
 
   return { created: true, ticketId: ticket.id };
 }

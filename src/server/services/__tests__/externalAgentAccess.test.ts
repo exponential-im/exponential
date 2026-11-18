@@ -11,12 +11,17 @@ import type { PrismaClient } from "@prisma/client";
 import {
   cascadeOwnerRemovedFromWorkspace,
   cascadeOwnerRoleChanged,
+  revokeAgentWorkspace,
 } from "../externalAgentAccess";
 
 const db = mockDeep<PrismaClient>();
 
 beforeEach(() => {
   mockReset(db);
+  // Losing a workspace also drops the agents' direct project grants there,
+  // and the owner's assignments on what those agents filed for them.
+  db.projectMember.deleteMany.mockResolvedValue({ count: 0 });
+  db.actionAssignee.deleteMany.mockResolvedValue({ count: 0 });
 });
 
 describe("cascadeOwnerRemovedFromWorkspace", () => {
@@ -43,6 +48,45 @@ describe("cascadeOwnerRemovedFromWorkspace", () => {
     });
   });
 
+  it("also removes the agents' direct project memberships in that workspace", async () => {
+    db.externalAgent.findMany.mockResolvedValue([{ shadowUserId: "shadow-1" }] as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 });
+
+    await cascadeOwnerRemovedFromWorkspace(db, "owner-1", "ws-1");
+
+    expect(db.projectMember.deleteMany).toHaveBeenCalledWith({
+      where: {
+        userId: { in: ["shadow-1"] },
+        project: { workspaceId: "ws-1" },
+      },
+    });
+  });
+
+  it("unassigns the owner from the project-less actions their agents created in that workspace", async () => {
+    // A project-less action an agent files is assigned to its owner
+    // (`resolveAgentOwnerAssignee`). An assignee keeps an action whatever
+    // their workspace standing, so the assignment has to leave with them.
+    db.externalAgent.findMany.mockResolvedValue([
+      { shadowUserId: "shadow-1" },
+      { shadowUserId: "shadow-2" },
+    ] as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 2 });
+
+    await cascadeOwnerRemovedFromWorkspace(db, "owner-1", "ws-1");
+
+    expect(db.actionAssignee.deleteMany).toHaveBeenCalledTimes(1);
+    expect(db.actionAssignee.deleteMany).toHaveBeenCalledWith({
+      where: {
+        userId: "owner-1",
+        action: {
+          createdById: { in: ["shadow-1", "shadow-2"] },
+          projectId: null,
+          workspaceId: "ws-1",
+        },
+      },
+    });
+  });
+
   it("is a no-op for owners with no agents", async () => {
     db.externalAgent.findMany.mockResolvedValue([]);
 
@@ -50,6 +94,7 @@ describe("cascadeOwnerRemovedFromWorkspace", () => {
 
     expect(removed).toBe(0);
     expect(db.workspaceUser.deleteMany).not.toHaveBeenCalled();
+    expect(db.actionAssignee.deleteMany).not.toHaveBeenCalled();
   });
 
   it("scopes the delete to the one workspace, not the owner's other grants", async () => {
@@ -74,6 +119,22 @@ describe("cascadeOwnerRoleChanged", () => {
     expect(db.workspaceUser.deleteMany).toHaveBeenCalled();
   });
 
+  it("demotion to viewer also unassigns the owner from what their agents filed there", async () => {
+    // A viewer reads these actions through the agent-owner path; an
+    // assignment would let them edit, which the role no longer allows.
+    db.externalAgent.findMany.mockResolvedValue([{ shadowUserId: "shadow-1" }] as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 });
+
+    await cascadeOwnerRoleChanged(db, "owner-1", "ws-1", "viewer");
+
+    expect(db.actionAssignee.deleteMany).toHaveBeenCalledWith({
+      where: {
+        userId: "owner-1",
+        action: { createdById: { in: ["shadow-1"] }, projectId: null, workspaceId: "ws-1" },
+      },
+    });
+  });
+
   it.each(["member", "admin", "owner"])(
     "role change to %s keeps the delegation valid and is a no-op",
     async (role) => {
@@ -82,6 +143,68 @@ describe("cascadeOwnerRoleChanged", () => {
       expect(removed).toBe(0);
       expect(db.externalAgent.findMany).not.toHaveBeenCalled();
       expect(db.workspaceUser.deleteMany).not.toHaveBeenCalled();
+      expect(db.actionAssignee.deleteMany).not.toHaveBeenCalled();
     },
   );
+});
+
+describe("revokeAgentWorkspace", () => {
+  it("deletes the one membership and the agent's project grants in that workspace", async () => {
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 });
+
+    await expect(revokeAgentWorkspace(db, "shadow-1", "ws-1")).resolves.toBe(true);
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { userId: "shadow-1", workspaceId: "ws-1" },
+    });
+    expect(db.projectMember.deleteMany).toHaveBeenCalledWith({
+      where: { userId: { in: ["shadow-1"] }, project: { workspaceId: "ws-1" } },
+    });
+  });
+
+  it("reports false when the agent was not a member there", async () => {
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 0 });
+
+    await expect(revokeAgentWorkspace(db, "shadow-1", "ws-1")).resolves.toBe(false);
+  });
+});
+
+describe("the cascades cover an Assistant-backed agent (Agent PRD V2, D7 regression)", () => {
+  // The owner has a plain External agent and an Assistant, whose principal is
+  // an External agent too (ADR-0067). The fake honours an `assistant` filter
+  // the way Postgres would, so a cascade that started skipping Assistants
+  // would drop its shadow user from the delete and fail here.
+  const agents = [
+    { ownerId: "owner-1", shadowUserId: "shadow-plain", assistant: null },
+    { ownerId: "owner-1", shadowUserId: "shadow-assistant", assistant: { id: "asst-1" } },
+  ];
+
+  beforeEach(() => {
+    db.externalAgent.findMany.mockImplementation(((args: {
+      where: { ownerId: string; assistant?: unknown };
+    }) =>
+      Promise.resolve(
+        agents
+          .filter((a) => a.ownerId === args.where.ownerId)
+          .filter((a) => !("assistant" in args.where) || a.assistant === null)
+          .map(({ shadowUserId }) => ({ shadowUserId })),
+      )) as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 2 });
+  });
+
+  it("removing the person takes their Assistant out of that workspace", async () => {
+    await cascadeOwnerRemovedFromWorkspace(db, "owner-1", "ws-1");
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1", userId: { in: ["shadow-plain", "shadow-assistant"] } },
+    });
+  });
+
+  it("demoting the person to viewer takes their Assistant out too", async () => {
+    await cascadeOwnerRoleChanged(db, "owner-1", "ws-1", "viewer");
+
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: "ws-1", userId: { in: ["shadow-plain", "shadow-assistant"] } },
+    });
+  });
 });

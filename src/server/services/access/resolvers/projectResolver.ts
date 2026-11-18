@@ -29,6 +29,7 @@ const WORKSPACE_WRITE_ROLES = ["owner", "admin", "member"] as const;
 import {
   canEditWorkspaceContent,
   getWorkspaceMembership,
+  isWorkspaceGuest,
 } from "./workspaceResolver";
 
 export async function getProjectAccess(
@@ -140,9 +141,9 @@ export function hasProjectAccess(access: ProjectAccess): boolean {
  * sibling projects, workspace settings. Public visibility grants the project,
  * never the workspace behind it.
  *
- * Concretely: bounty action ids for public projects are served by the
- * unauthenticated `/api/bounties` feed, and public projects are SEO-indexed via
- * the sitemap. So "caller passed hasProjectAccess" can mean nothing more than
+ * Concretely: public projects are SEO-indexed via the sitemap (and, until Nov
+ * 2026, their action ids were served by the unauthenticated bounty feed). So
+ * "caller passed hasProjectAccess" can mean nothing more than
  * "caller read a public URL and signed up".
  *
  * This is `hasProjectAccess` minus the `isPublic` short-circuit.
@@ -187,6 +188,47 @@ export function canManageProjectMembers(access: ProjectAccess): boolean {
 }
 
 /**
+ * The membership paths into a project, as Prisma clauses: the DB-level mirror
+ * of {@link isProjectInsider}. The creator comes first; the rest follow.
+ */
+function projectInsiderClauses(userId: string): Prisma.ProjectWhereInput[] {
+  return [
+    { createdById: userId },
+    { projectMembers: { some: { userId } } },
+    // Unrestricted projects: any team/workspace path grants access
+    {
+      AND: [
+        { isRestricted: false },
+        {
+          OR: [
+            { team: { members: { some: { userId } } } },
+            { workspace: { members: { some: { userId } } } },
+            {
+              workspace: {
+                teams: { some: { members: { some: { userId } } } },
+              },
+            },
+          ],
+        },
+      ],
+    },
+    // Restricted projects: workspace owner/admin escape hatch
+    {
+      AND: [
+        { isRestricted: true },
+        {
+          workspace: {
+            members: {
+              some: { userId, role: { in: ["owner", "admin"] } },
+            },
+          },
+        },
+      ],
+    },
+  ];
+}
+
+/**
  * Prisma WHERE clause for projects a user can access.
  *
  * Use for bulk queries (getAll, getProjectsWithActions, etc.) so that
@@ -195,43 +237,42 @@ export function canManageProjectMembers(access: ProjectAccess): boolean {
 export function buildProjectAccessWhere(
   userId: string,
 ): Prisma.ProjectWhereInput {
+  const [creator, ...memberships] = projectInsiderClauses(userId);
   return {
-    OR: [
-      { createdById: userId },
-      { isPublic: true },
-      { projectMembers: { some: { userId } } },
-      // Unrestricted projects: any team/workspace path grants access
-      {
-        AND: [
-          { isRestricted: false },
-          {
-            OR: [
-              { team: { members: { some: { userId } } } },
-              { workspace: { members: { some: { userId } } } },
-              {
-                workspace: {
-                  teams: { some: { members: { some: { userId } } } },
-                },
-              },
-            ],
-          },
-        ],
-      },
-      // Restricted projects: workspace owner/admin escape hatch
-      {
-        AND: [
-          { isRestricted: true },
-          {
-            workspace: {
-              members: {
-                some: { userId, role: { in: ["owner", "admin"] } },
-              },
-            },
-          },
-        ],
-      },
-    ],
+    OR: [creator!, { isPublic: true }, ...memberships],
   };
+}
+
+/**
+ * Prisma WHERE clause for the projects a user can access inside ONE workspace.
+ * A workspace guest (project-only access) sees just the projects they are a
+ * member of; everyone else gets {@link buildProjectAccessWhere}. Mirrors the
+ * scoping of the project picker in global search.
+ */
+export async function buildWorkspaceProjectAccessWhere(
+  db: PrismaClient,
+  userId: string,
+  workspaceId: string,
+): Promise<Prisma.ProjectWhereInput> {
+  const scope = (await isWorkspaceGuest(db, userId, workspaceId))
+    ? { projectMembers: { some: { userId } } }
+    : buildProjectAccessWhere(userId);
+  return { AND: [{ workspaceId }, scope] };
+}
+
+/**
+ * Prisma WHERE clause for projects a user reaches by a *membership* path: the
+ * DB-level mirror of {@link isProjectInsider}, which is
+ * {@link buildProjectAccessWhere} without the `isPublic` path.
+ *
+ * Use where being able to read a public project must not be enough, because
+ * what is exposed belongs to the people in the project and not to the project
+ * page: the Resources its members filed under it (ADR-0082).
+ */
+export function buildProjectInsiderWhere(
+  userId: string,
+): Prisma.ProjectWhereInput {
+  return { OR: projectInsiderClauses(userId) };
 }
 
 /**

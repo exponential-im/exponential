@@ -1,10 +1,12 @@
 import * as Sentry from "@sentry/nextjs";
 
 import { db } from "~/server/db";
-import { ingestSentryBug } from "~/server/services/sentry/SentryBugService";
+import { ingestSentryBug, type IngestResult } from "~/server/services/sentry/SentryBugService";
+import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import {
   buildClientErrorBody,
   buildClientErrorBug,
+  clientErrorLabels,
   shouldFileClientError,
   type ClientErrorReport,
 } from "~/server/services/clientErrors/clientErrorBug";
@@ -24,12 +26,6 @@ import {
  * env gate as the route, so per-environment filing stays one decision.
  */
 
-/** Same "bug" labels the /api/client-errors route files under. */
-const CLIENT_ERROR_LABELS = [
-  { name: "client-error", slug: "client-error", color: "avatar-orange" },
-  { name: "bug", slug: "bug", color: "avatar-red" },
-] as const;
-
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -46,6 +42,29 @@ function messageOf(error: unknown): string {
   return "";
 }
 
+/**
+ * File (or dedup onto) the Bug Ticket for a handled failure, and wait for it.
+ *
+ * The half of {@link reportHandledErrorServer} that writes the ticket, for
+ * callers that need the result: a job that records state on the ticket it
+ * filed (the tool canary) cannot use a fire-and-forget report. Same
+ * `CLIENT_ERROR_BUGS` gate, same fingerprint, same labels, so a failure
+ * reported both ways lands on one ticket. Returns null when filing is off.
+ * Unlike the reporter this can throw: the caller is a job that should know.
+ */
+export async function fileHandledErrorBug(
+  report: ClientErrorReport,
+  options?: { heading?: string; renotifyAfterMs?: number },
+): Promise<IngestResult | null> {
+  if (!process.env.CLIENT_ERROR_BUGS) return null;
+  return ingestSentryBug(db, buildClientErrorBug(report), {
+    body: buildClientErrorBody(report),
+    labels: clientErrorLabels(report.area),
+    heading: options?.heading ?? "New app error",
+    ...(options?.renotifyAfterMs !== undefined ? { renotifyAfterMs: options.renotifyAfterMs } : {}),
+  });
+}
+
 export function reportHandledErrorServer(
   error: unknown,
   options: {
@@ -55,9 +74,15 @@ export function reportHandledErrorServer(
     kind?: string;
     /** Extra context rendered in the ticket body and attached to the Sentry event. */
     context?: Record<string, string>;
+    /**
+     * Re-announce in the ops room at most once per this many ms while the
+     * error keeps recurring, instead of only when its ticket is created. For
+     * failures someone has to act on right away (see SentryBugService).
+     */
+    renotifyAfterMs?: number;
   },
 ): void {
-  const { area, kind, context } = options;
+  const { area, kind, context, renotifyAfterMs } = options;
 
   try {
     Sentry.captureException(error, {
@@ -81,12 +106,13 @@ export function reportHandledErrorServer(
     context,
   };
 
-  // Fire-and-forget, like the client helper's fetch. Dedup on the error
-  // fingerprint happens inside ingestSentryBug.
-  void ingestSentryBug(db, buildClientErrorBug(report), {
-    body: buildClientErrorBody(report),
-    labels: CLIENT_ERROR_LABELS,
-  }).catch((ingestError: unknown) => {
-    console.error(`[reportHandledErrorServer] could not file a bug (${area}):`, ingestError);
-  });
+  // Filed after the response, with the platform keeping the function alive
+  // until it settles: a bare un-awaited promise can be frozen with the Vercel
+  // instance and the ticket silently lost. Callers stay synchronous. Dedup on
+  // the error fingerprint happens inside ingestSentryBug.
+  runAfterResponse(() =>
+    fileHandledErrorBug(report, { renotifyAfterMs }).catch((ingestError: unknown) => {
+      console.error(`[reportHandledErrorServer] could not file a bug (${area}):`, ingestError);
+    }),
+  );
 }

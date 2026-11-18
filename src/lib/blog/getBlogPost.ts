@@ -4,6 +4,7 @@ import path from "path";
 import matter from "gray-matter";
 import type { BlogPost } from "./types";
 import { extractHeadings } from "~/lib/docs/extractHeadings";
+import { isPublished } from "./schedule";
 
 const BLOG_PATH = path.join(process.cwd(), "content/blog");
 
@@ -13,6 +14,8 @@ export async function getBlogPost(slug: string): Promise<BlogPost | null> {
   try {
     const fileContent = await fs.readFile(filePath, "utf-8");
     const { data, content } = matter(fileContent);
+    // A post dated in the future stays hidden until its day (see schedule.ts).
+    if (!isPublished(data.date as string | undefined)) return null;
     const headings = extractHeadings(content);
 
     return {
@@ -60,13 +63,8 @@ export async function getAllBlogPosts(): Promise<BlogPost[]> {
   return posts;
 }
 
+/** Slugs of published posts only, so a scheduled post isn't prebuilt as a 404. */
 export async function getAllBlogSlugs(): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(BLOG_PATH, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
-      .map((entry) => entry.name.replace(/\.md$/, ""));
-  } catch {
-    return [];
-  }
+  const posts = await getAllBlogPosts();
+  return posts.map((post) => post.slug);
 }

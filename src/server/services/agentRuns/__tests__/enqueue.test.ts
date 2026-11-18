@@ -3,10 +3,10 @@
  * agent principal, none for humans, none while a live run exists, none on a
  * parked or finished action. Mocked Prisma — no DB.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import { Prisma, type PrismaClient } from "@prisma/client";
-import { enqueueAgentRunsForAssignees, cancelQueuedRunsForUnassigned, resumeWaitingRunsOnOwnerReply } from "../enqueue";
+import { enqueueAgentRunsForAssignees, cancelQueuedRunsForUnassigned, resumeWaitingRunsOnReply } from "../enqueue";
 
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
 
@@ -37,10 +37,38 @@ describe("enqueueAgentRunsForAssignees", () => {
     });
   });
 
+  describe("on an install with no Assistant (production, MASTRA_API_URL unset)", () => {
+    beforeEach(() => {
+      vi.stubEnv("NODE_ENV", "production");
+      vi.stubEnv("MASTRA_API_URL", "");
+    });
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it("queues no hosted (MASTRA) run, which would never be dispatched", async () => {
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([]);
+      expect(db.agentRun.create).not.toHaveBeenCalled();
+    });
+
+    it("still queues a locally executed agent's run", async () => {
+      db.externalAgent.findMany.mockResolvedValue([{ id: AGENT, executor: "LOCAL_CLI" }] as never);
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([{ id: "run-1", agentId: AGENT, executor: "LOCAL_CLI" }]);
+    });
+
+    it("queues the hosted run again once MASTRA_API_URL is set (exponential.im)", async () => {
+      vi.stubEnv("MASTRA_API_URL", "https://mastra.example.test");
+      const runs = await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
+      expect(runs).toEqual([{ id: "run-1", agentId: AGENT, executor: "MASTRA" }]);
+    });
+  });
+
   it("only an Assistant's principal gets a run — plain External agents keep picking actions up themselves", async () => {
     await enqueueAgentRunsForAssignees(db, { actionId: ACTION, userIds: [SHADOW], requestedById: "human-1" });
     expect(db.externalAgent.findMany.mock.calls[0]?.[0]).toMatchObject({
-      where: { shadowUserId: { in: [SHADOW] }, assistant: { isNot: null } },
+      where: { shadowUserId: { in: [SHADOW] }, assistant: { is: { retiredAt: null } } },
     });
   });
 
@@ -118,35 +146,100 @@ describe("cancelQueuedRunsForUnassigned", () => {
   });
 });
 
-describe("resumeWaitingRunsOnOwnerReply", () => {
+describe("resumeWaitingRunsOnReply", () => {
   beforeEach(() => {
     mockReset(db);
-    db.externalAgent.findMany.mockResolvedValue([{ id: AGENT, executor: "MASTRA" }] as never);
+    // A waiting run by AGENT exists that the author was asked or owns.
+    db.agentRun.findMany.mockResolvedValue([{ agentId: AGENT }] as never);
+    db.externalAgent.findMany.mockResolvedValue([{ id: AGENT, ownerId: "owner-1", executor: "MASTRA" }] as never);
     db.agentRun.create.mockImplementation(((args: { data: Record<string, unknown> }) =>
       Promise.resolve({ id: "run-2", agentId: args.data.agentId, executor: args.data.executor })) as never);
   });
 
+  it("finds waiting runs the author was asked (as requester) or owns, and nothing else", async () => {
+    db.agentRun.findFirst.mockResolvedValue({ id: "run-1", status: "WAITING_ON_OWNER", requestedById: null } as never);
+    await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c-9" });
+    expect(db.agentRun.findMany.mock.calls[0]?.[0]).toEqual({
+      where: {
+        actionId: ACTION,
+        status: "WAITING_ON_OWNER",
+        agent: { assistant: { is: { retiredAt: null } } },
+        OR: [{ requestedById: "owner-1" }, { agent: { ownerId: "owner-1" } }],
+      },
+      select: { agentId: true },
+    });
+  });
+
   it("the owner's reply on an action whose latest run is WAITING_ON_OWNER starts a resume run", async () => {
-    db.agentRun.findFirst.mockResolvedValue({ id: "run-1", status: "WAITING_ON_OWNER" } as never);
-    const runs = await resumeWaitingRunsOnOwnerReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c-9" });
+    db.agentRun.findFirst.mockResolvedValue({ id: "run-1", status: "WAITING_ON_OWNER", requestedById: null } as never);
+    const runs = await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c-9" });
     expect(runs).toEqual([{ id: "run-2", agentId: AGENT, executor: "MASTRA" }]);
-    expect(db.externalAgent.findMany.mock.calls[0]?.[0]).toMatchObject({ where: { ownerId: "owner-1" } });
     expect(db.agentRun.create.mock.calls[0]?.[0]).toMatchObject({
       data: { actionId: ACTION, agentId: AGENT, requestedById: "owner-1", predecessorId: "run-1", wakeCommentId: "c-9" },
     });
   });
 
+  it("the person who assigned it — the one the run asked — resumes it too, and stays its requester", async () => {
+    db.agentRun.findFirst.mockResolvedValue({ id: "run-1", status: "WAITING_ON_OWNER", requestedById: "assigner-1" } as never);
+    const runs = await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "assigner-1", commentId: "c-9" });
+    expect(runs).toHaveLength(1);
+    expect(db.agentRun.create.mock.calls[0]?.[0]).toMatchObject({
+      data: { requestedById: "assigner-1", predecessorId: "run-1", wakeCommentId: "c-9" },
+    });
+  });
+
+  it("the owner answering a question the run asked someone else still resumes it, keeping that requester", async () => {
+    db.agentRun.findFirst.mockResolvedValue({ id: "run-1", status: "WAITING_ON_OWNER", requestedById: "assigner-1" } as never);
+    await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c-9" });
+    expect(db.agentRun.create.mock.calls[0]?.[0]).toMatchObject({ data: { requestedById: "assigner-1" } });
+  });
+
+  it("a bystander resumes nothing, even if an earlier waiting run once asked them", async () => {
+    // An earlier run asked the bystander; the latest waiting one asked someone else.
+    db.agentRun.findFirst.mockResolvedValue({ id: "run-3", status: "WAITING_ON_OWNER", requestedById: "assigner-1" } as never);
+    expect(await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "bystander", commentId: "c" })).toEqual([]);
+    expect(db.agentRun.create).not.toHaveBeenCalled();
+  });
+
   it("does nothing when the latest run is not waiting (finished, live, or none)", async () => {
     for (const latest of [{ id: "run-1", status: "SUCCEEDED" }, { id: "run-1", status: "RUNNING" }, null]) {
       db.agentRun.findFirst.mockResolvedValue(latest as never);
-      expect(await resumeWaitingRunsOnOwnerReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c" })).toEqual([]);
+      expect(await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "owner-1", commentId: "c" })).toEqual([]);
     }
     expect(db.agentRun.create).not.toHaveBeenCalled();
   });
 
-  it("a commenter who owns no agent never resumes anything", async () => {
-    db.externalAgent.findMany.mockResolvedValue([] as never);
-    expect(await resumeWaitingRunsOnOwnerReply(db, { actionId: ACTION, authorId: "teammate", commentId: "c" })).toEqual([]);
+  it("a commenter with no waiting run to answer never resumes anything", async () => {
+    db.agentRun.findMany.mockResolvedValue([] as never);
+    expect(await resumeWaitingRunsOnReply(db, { actionId: ACTION, authorId: "teammate", commentId: "c" })).toEqual([]);
+    expect(db.externalAgent.findMany).not.toHaveBeenCalled();
     expect(db.agentRun.findFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("a retired Assistant is never run-eligible (ADR-0072)", () => {
+  const db = mockDeep<PrismaClient>();
+
+  beforeEach(() => {
+    mockReset(db);
+    db.externalAgent.findMany.mockResolvedValue([] as never);
+  });
+
+  it("assignment filters on a non-retired Assistant, not merely an Assistant", async () => {
+    await enqueueAgentRunsForAssignees(db, { actionId: "action-1", userIds: ["shadow-1"], requestedById: "human-1" });
+
+    const where = db.externalAgent.findMany.mock.calls[0]?.[0]?.where;
+    expect(where).toEqual({ shadowUserId: { in: ["shadow-1"] }, assistant: { is: { retiredAt: null } } });
+    expect(db.agentRun.create).not.toHaveBeenCalled();
+  });
+
+  it("a reply resumes only non-retired Assistants' waiting runs", async () => {
+    db.agentRun.findMany.mockResolvedValue([] as never);
+    await resumeWaitingRunsOnReply(db, { actionId: "action-1", authorId: "owner-1", commentId: "c-1" });
+
+    expect(db.agentRun.findMany.mock.calls[0]?.[0]?.where).toMatchObject({
+      agent: { assistant: { is: { retiredAt: null } } },
+    });
+    expect(db.agentRun.create).not.toHaveBeenCalled();
   });
 });

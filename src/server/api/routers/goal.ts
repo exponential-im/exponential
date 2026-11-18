@@ -8,10 +8,15 @@ import {
   getWorkspaceMembership,
   canEditWorkspaceContent,
 } from "~/server/services/access/resolvers/workspaceResolver";
-import { getProjectAccess, hasProjectAccess } from "~/server/services/access";
+import {
+  getProjectAccess,
+  hasProjectAccess,
+  assertCanEditGoal,
+} from "~/server/services/access";
 import { TRPCError } from "@trpc/server";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import { resolveGoalProgress, isManualProgress } from "~/server/services/goalProgress";
+import { objectiveScopeWhere } from "~/plugins/okr/server/objectiveScope";
 
 import {
   getMyPublicGoals,
@@ -23,6 +28,7 @@ import {
   computeGoalHealth,
   updateGoalIcon,
   verifyGoalAccess,
+  verifyGoalWriteAccess,
   setGoalParent,
 } from "~/server/services/goalService";
 
@@ -49,11 +55,34 @@ export const goalRouter = createTRPCRouter({
       return goal;
     }),
 
+  /**
+   * The handful of active goals the sidebar discloses under "Goals": id and
+   * title only, most recently touched first. Workspace members see the
+   * workspace's goals, as `getAllMyGoals` does; non-members get nothing.
+   */
+  navChildren: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!membership) return [];
+      return ctx.db.goal.findMany({
+        where: { workspaceId: input.workspaceId, status: "active" },
+        select: { id: true, title: true },
+        orderBy: { updatedAt: "desc" },
+        take: 6,
+      });
+    }),
+
   getAllMyGoals: protectedProcedure
     .input(z.object({
       workspaceId: z.string().optional(),
-      // OKR period, a free-form string ("Q3-2026", "Annual-2026") — not an enum.
-      period: z.string().optional(),
+      // OKR period, a free-form string ("Q3-2026", "Annual-2026") — not an
+      // enum. Scopes by the Goals page rule (objectiveScopeWhere): the goal's
+      // own period matches, or it has a key result in that period. Omitted or
+      // null: no period scope at all, which is the only way a period-less
+      // goal is listed.
+      period: z.string().nullable().optional(),
+      // An explicit status wins over the default "everything but archived".
       status: z.enum(["planned", "active", "completed", "archived", "on-hold"]).optional(),
       // Workspace-scoped only: keep just the goals the caller is the DRI on
       // (directly, or via one of their key results). Ignored without a
@@ -77,18 +106,15 @@ export const goalRouter = createTRPCRouter({
           ...(workspaceId
             ? { workspaceId }
             : { userId: ctx.session.user.id }),
-          ...(input?.period ? { period: input.period } : {}),
+          // Period, archived and "mine" come from the one rule the OKRs view
+          // (keyResult.getByObjective) also uses, so both views of the Goals
+          // page list the same objectives for the same period.
+          ...objectiveScopeWhere({
+            period: input?.period ?? null,
+            onlyMine: !!workspaceId && !!input?.onlyMine,
+            userId: ctx.session.user.id,
+          }),
           ...(input?.status ? { status: input.status } : {}),
-          // Same DRI-only rule as the OKR dashboard's "mine" filter
-          // (keyResult.getByObjective): having created the goal is not enough.
-          ...(workspaceId && input?.onlyMine
-            ? {
-                OR: [
-                  { driUserId: ctx.session.user.id },
-                  { keyResults: { some: { driUserId: ctx.session.user.id } } },
-                ],
-              }
-            : {}),
         },
         include: {
           lifeDomain: true,
@@ -303,15 +329,11 @@ export const goalRouter = createTRPCRouter({
       if (!goal) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found or unauthorized" });
       }
-      // Check access: owner OR workspace member
-      if (goal.workspaceId) {
-        const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, goal.workspaceId);
-        if (!membership && goal.userId !== ctx.session.user.id) {
-          throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
-        }
-      } else if (goal.userId !== ctx.session.user.id) {
-        throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found or unauthorized" });
-      }
+      // A workspace goal needs a write role there; "owner or any member" let
+      // a viewer move the lifecycle. A personal goal stays its owner's.
+      await assertCanEditGoal(ctx.db, ctx.session.user.id, goal, {
+        notFound: "Goal not found or unauthorized",
+      });
       const updated = await ctx.db.goal.update({
         where: { id: input.id },
         data: { status: input.status },
@@ -348,7 +370,7 @@ export const goalRouter = createTRPCRouter({
       progress: z.number().min(0).max(100).nullable(),
     }))
     .mutation(async ({ ctx, input }) => {
-      await verifyGoalAccess({ ctx, goalId: input.id });
+      await verifyGoalWriteAccess({ ctx, goalId: input.id });
       return ctx.db.goal.update({
         where: { id: input.id },
         data: {
@@ -359,10 +381,14 @@ export const goalRouter = createTRPCRouter({
       });
     }),
 
-  // Trigger health recomputation for a goal
+  // Trigger health recomputation for a goal. Anyone who can see the goal may
+  // ask for it: the result is derived from data they can already read, and it
+  // is no one's authored change. It used to check nothing, so any signed-in
+  // user could read (and refresh) the health of any goal by id.
   recomputeHealth: protectedProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ ctx, input }) => {
+      await verifyGoalAccess({ ctx, goalId: input.id });
       return computeGoalHealth({ ctx, goalId: input.id });
     }),
 

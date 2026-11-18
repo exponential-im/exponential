@@ -1,7 +1,10 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   buildDecisionAccessWhereAcrossWorkspaces,
+  buildProjectAccessWhere,
   buildWorkspaceAccessWhere,
+  canEditDecision,
+  getDecisionAccess,
 } from "~/server/services/access";
 import { myOverdueActionsWhere } from "~/server/services/actions/myActionsWhere";
 import { buildActionAccessWhere } from "~/server/services/access";
@@ -17,7 +20,9 @@ import { formatDecisionLabel } from "~/lib/decision-label";
  *   on (confirmed only, through the decision resolver).
  * - **Draft decisions to review** — meetings the user owns with AI-extracted
  *   drafts awaiting confirm/reject (the same person the "draft decisions to
- *   review" notification goes to).
+ *   review" notification goes to), and meeting-less drafts an agent logged
+ *   for them: by their own Assistant / External agent, or by Zoe acting as
+ *   them (`source: AGENT`).
  * - **QA tickets** that are theirs to promote — the `yourWork.waitingOnYou`
  *   rule, widened to every workspace they belong to.
  * - **Overdue actions** — the `/today` overdue bucket (ADR-0034).
@@ -60,6 +65,31 @@ export function meetingsWithDraftsToReviewWhere(
     userId,
     archivedAt: null,
     decisions: { some: { reviewState: "DRAFT" } },
+  };
+}
+
+/**
+ * Meeting-less draft decisions an agent logged that are the user's to
+ * confirm or reject: authored by an agent they own, or by Zoe acting as them.
+ * Meeting drafts are reviewed per meeting (above), so they are left out here.
+ * Scoped to what the user can still reach — workspace membership, and the
+ * project when there is one.
+ */
+export function agentDraftsToReviewWhere(
+  userId: string,
+): Prisma.DecisionWhereInput {
+  return {
+    AND: [
+      { reviewState: "DRAFT", transcriptionSessionId: null },
+      {
+        OR: [
+          { createdById: userId },
+          { createdBy: { externalAgentShadow: { ownerId: userId } } },
+        ],
+      },
+      { workspace: buildWorkspaceAccessWhere(userId) },
+      { OR: [{ projectId: null }, { project: buildProjectAccessWhere(userId) }] },
+    ],
   };
 }
 
@@ -113,15 +143,20 @@ export async function mergedPrLookup(
 }
 
 /**
- * Assistant questions (ADR-0067): the latest run of one of MY Assistants on an
- * action is waiting on me — it asked by comment and paused. "Latest" means no
- * resume run has been created from it (`successors: none`); my reply on the
- * action creates one and the question leaves this list.
+ * Assistant questions (ADR-0067, widened 2026-10-11): an Assistant's latest
+ * run on an action asked **me** and paused. A run asks the person who
+ * assigned the Action, or the Assistant's owner when nobody did
+ * (`resolveRunQuestionRecipient`), so this is that rule as a filter: I
+ * requested the run, or nobody did and the Assistant is mine. The owner of an
+ * Assistant whose run asked someone else still sees it under Delegated (and
+ * may still answer it), just not here. "Latest" means no resume run has been
+ * created from it (`successors: none`); a reply on the action creates one and
+ * the question leaves this list.
  */
 export function assistantQuestionsWaitingOnMeWhere(userId: string): Prisma.AgentRunWhereInput {
   return {
     status: "WAITING_ON_OWNER",
-    agent: { ownerId: userId },
+    OR: [{ requestedById: userId }, { requestedById: null, agent: { ownerId: userId } }],
     successors: { none: {} },
     // Owning the Assistant is not a read grant on the action (same rule as
     // the Delegated tab): a revoked membership takes the question with it.
@@ -132,6 +167,7 @@ export function assistantQuestionsWaitingOnMeWhere(userId: string): Prisma.Agent
 export interface WaitingOnMeCounts {
   decisions: number;
   draftReviews: number;
+  agentDrafts: number;
   qaTickets: number;
   overdueActions: number;
   assistantQuestions: number;
@@ -144,12 +180,13 @@ export async function countWaitingOnMe(
   userId: string,
   startOfToday: Date,
 ): Promise<WaitingOnMeCounts> {
-  const [decisions, draftReviews, qaTickets, overdueActions, assistantQuestions] =
+  const [decisions, draftReviews, agentDrafts, qaTickets, overdueActions, assistantQuestions] =
     await Promise.all([
       db.decision.count({ where: decisionsAwaitingMeWhere(userId) }),
       db.transcriptionSession.count({
         where: meetingsWithDraftsToReviewWhere(userId),
       }),
+      db.decision.count({ where: agentDraftsToReviewWhere(userId) }),
       db.ticket.count({ where: qaTicketsWaitingOnMeWhere(userId) }),
       db.action.count({ where: myOverdueActionsWhere(userId, startOfToday) }),
       db.agentRun.count({ where: assistantQuestionsWaitingOnMeWhere(userId) }),
@@ -157,10 +194,12 @@ export async function countWaitingOnMe(
   return {
     decisions,
     draftReviews,
+    agentDrafts,
     qaTickets,
     overdueActions,
     assistantQuestions,
-    total: decisions + draftReviews + qaTickets + overdueActions + assistantQuestions,
+    total:
+      decisions + draftReviews + agentDrafts + qaTickets + overdueActions + assistantQuestions,
   };
 }
 
@@ -170,7 +209,7 @@ export async function listWaitingOnMe(
   userId: string,
   startOfToday: Date,
 ) {
-  const [counts, decisionRows, meetingRows, ticketRows, actionRows, questionRows] =
+  const [counts, decisionRows, meetingRows, agentDraftRows, ticketRows, actionRows, questionRows] =
     await Promise.all([
       countWaitingOnMe(db, userId, startOfToday),
       db.decision.findMany({
@@ -202,6 +241,21 @@ export async function listWaitingOnMe(
           },
         },
       }),
+      db.decision.findMany({
+        where: agentDraftsToReviewWhere(userId),
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: WAITING_ROW_CAP,
+        select: {
+          id: true,
+          number: true,
+          statement: true,
+          createdAt: true,
+          workspaceId: true,
+          projectId: true,
+          workspace: { select: { slug: true, name: true } },
+          createdBy: { select: { name: true, isAgent: true } },
+        },
+      }),
       db.ticket.findMany({
         where: qaTicketsWaitingOnMeWhere(userId),
         // Oldest first — the longest-waiting item is the most urgent.
@@ -212,6 +266,9 @@ export async function listWaitingOnMe(
           shortId: true,
           number: true,
           title: true,
+          // Always QA when read; carried so the tab's status pill and picker
+          // render the row's real value after an optimistic change.
+          status: true,
           prUrl: true,
           updatedAt: true,
           product: {
@@ -279,6 +336,27 @@ export async function listWaitingOnMe(
     ticketRows.map((t) => ({ prUrl: t.prUrl, workspaceId: t.product.workspaceId })),
   );
 
+  // Confirm is gated like the draft's own banner: on edit access to the
+  // decision. These drafts are meeting-less, so access turns on the workspace
+  // role and the project alone — resolve each pair once.
+  const editableByScope = new Map<string, Promise<boolean>>();
+  const agentDraftEditable = await Promise.all(
+    agentDraftRows.map((row) => {
+      const key = `${row.workspaceId}:${row.projectId ?? ""}`;
+      let editable = editableByScope.get(key);
+      if (!editable) {
+        editable = getDecisionAccess(db, userId, {
+          workspaceId: row.workspaceId,
+          projectId: row.projectId,
+          reviewState: "DRAFT",
+          transcriptionSession: null,
+        }).then(canEditDecision);
+        editableByScope.set(key, editable);
+      }
+      return editable;
+    }),
+  );
+
   // The WHERE already selected exactly the overdue set on the viewer's day;
   // only order it. Re-bucketing with partitionActions would re-derive "today"
   // in the server's timezone and drop rows the count includes.
@@ -294,6 +372,13 @@ export async function listWaitingOnMe(
     draftReviews: meetingRows.map(({ _count, ...m }) => ({
       ...m,
       draftCount: _count.decisions,
+    })),
+    agentDrafts: agentDraftRows.map(({ number, createdBy, ...d }, index) => ({
+      ...d,
+      label: formatDecisionLabel(number),
+      canEdit: agentDraftEditable[index] ?? false,
+      // Your own Assistant is named; a draft Zoe logged as you is "Zoe".
+      authorName: createdBy.isAgent ? (createdBy.name ?? "Your assistant") : "Zoe",
     })),
     qaTickets: ticketRows.map(({ prUrl, product, ...t }) => ({
       ...t,

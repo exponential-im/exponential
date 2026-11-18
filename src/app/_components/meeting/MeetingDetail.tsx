@@ -1,14 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
-import { Loader } from "@mantine/core";
+import { Loader, Text } from "@mantine/core";
+import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
-import { IconGavel, IconSparkles, IconFileText, IconPhoto, IconListCheck } from "@tabler/icons-react";
+import {
+  IconGavel,
+  IconSparkles,
+  IconFileText,
+  IconPhoto,
+  IconListCheck,
+  IconNotes,
+} from "@tabler/icons-react";
 import "./meeting-detail.css";
 import { MeetingHeader } from "./MeetingHeader";
 import { PostToMatrixButton } from "~/app/_components/matrix/PostToMatrixButton";
 import { SummaryTab } from "./SummaryTab";
+import { NotesTab } from "./NotesTab";
 import { OutputsTab } from "./OutputsTab";
 import { TranscriptView } from "./TranscriptView";
 import { ScreenshotsTab } from "./ScreenshotsTab";
@@ -39,11 +48,16 @@ interface MeetingDetailProps {
   /** True while a summary is being auto-generated on view for this meeting. */
   isGeneratingSummary: boolean;
   onSaveSummary: (value: string) => Promise<void>;
+  /** Replace the meeting's human-written notes (Notes tab). */
+  onSaveNotes: (value: string) => Promise<void>;
   /** Rename the meeting; the header only offers in-place editing to editors. */
   onRenameTitle: (title: string) => Promise<void>;
   onMeetingDateChange: (value: Date | null) => void;
   /** Place the meeting onto a project (null clears placement). */
   onProjectChange: (projectId: string | null) => void;
+  /** Move an unlinked meeting to another workspace (null = Personal). */
+  onWorkspaceChange: (workspaceId: string | null) => void;
+  isSavingWorkspace?: boolean;
   /** Turn the transcript into reviewable draft product features. */
   onIdeateFeatures: () => void;
   /** Re-run the AI summary, overwriting the stored one (manual refresh). */
@@ -52,7 +66,7 @@ interface MeetingDetailProps {
    * "Extract outputs": draft actions, decisions and open questions in one
    * run. Resolves true when it ran, so the page can open the Outputs tab.
    */
-  onExtractOutputs: () => Promise<boolean>;
+  onExtractOutputs: (options?: { replaceDrafts?: boolean }) => Promise<boolean>;
   isExtractingOutputs: boolean;
   onArchive: () => void;
 }
@@ -82,9 +96,12 @@ export function MeetingDetail({
   isIdeatingFeatures,
   isGeneratingSummary,
   onSaveSummary,
+  onSaveNotes,
   onRenameTitle,
   onMeetingDateChange,
   onProjectChange,
+  onWorkspaceChange,
+  isSavingWorkspace,
   onIdeateFeatures,
   onRegenerateSummary,
   onExtractOutputs,
@@ -103,6 +120,21 @@ export function MeetingDetail({
     setTab(urlTab);
   }, [urlTab]);
 
+  // On a phone the tab row scrolls sideways; keep the open tab in view (e.g. a
+  // shared `?tab=screenshots` link). scrollLeft, not scrollIntoView: the latter
+  // also scrolls the page's overflow-hidden ancestors.
+  const tabsRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const nav = tabsRef.current;
+    const on = nav?.querySelector<HTMLElement>('[aria-selected="true"]');
+    if (!nav || !on) return;
+    const navBox = nav.getBoundingClientRect();
+    const tabBox = on.getBoundingClientRect();
+    // 32px clears the right-edge fade (.mp-tabs mask on phones).
+    if (tabBox.left < navBox.left) nav.scrollLeft -= navBox.left - tabBox.left;
+    else if (tabBox.right > navBox.right - 32) nav.scrollLeft += tabBox.right - navBox.right + 32;
+  }, [tab]);
+
   function selectTab(next: MeetingTab) {
     if (next === tab) return;
     setTab(next);
@@ -115,11 +147,22 @@ export function MeetingDetail({
   const [pickerOpen, setPickerOpen] = useState(false);
 
   // Producing drafts takes edit access to the meeting; the server re-checks.
+  // A project-linked meeting's workspace is its project's, so only unlinked
+  // meetings get the workspace picker; moving a linked one goes via the project.
+  const canMoveWorkspace = session.canEdit && !session.projectId;
+  const { data: workspaces } = api.workspace.list.useQuery(undefined, {
+    enabled: canMoveWorkspace,
+  });
+  // Only workspaces the viewer can add content to: the server refuses a move
+  // into one where they are a viewer or project-only guest.
+  const workspaceOptions = useMemo(
+    () =>
+      (workspaces ?? [])
+        .filter((w) => w.id === session.workspaceId || w.canAddContent)
+        .map((w) => ({ id: w.id, name: w.name })),
+    [workspaces, session.workspaceId],
+  );
   const canExtractOutputs = session.canEdit && session.hasTranscript;
-  async function handleExtractOutputs() {
-    // Results are triaged on the Outputs tab, so land there once they exist.
-    if (await onExtractOutputs()) selectTab("outputs");
-  }
 
   // Decisions logged from this meeting (confirmed for viewers, drafts for
   // editors) feed the summary tab's Decisions / Open questions block.
@@ -138,6 +181,34 @@ export function MeetingDetail({
     { transcriptionId: session.id },
     { enabled: Boolean(session.id) },
   );
+
+  // Once a meeting has outputs the button re-extracts: a new reading replaces
+  // the drafts nobody has reviewed and leaves everything that was reviewed.
+  const draftCount = draftActions.length + vm.drafts.length;
+  const hasOutputs = draftCount > 0 || actions.length > 0 || (meetingDecisions?.decisions.length ?? 0) > 0;
+  async function runExtractOutputs(options?: { replaceDrafts?: boolean }) {
+    // Results are triaged on the Outputs tab, so land there once they exist.
+    if (await onExtractOutputs(options)) selectTab("outputs");
+  }
+  function handleExtractOutputs() {
+    if (!hasOutputs) {
+      void runExtractOutputs();
+      return;
+    }
+    modals.openConfirmModal({
+      title: "Re-extract outputs?",
+      children: (
+        <Text size="sm">
+          {draftCount > 0
+            ? `This reads the meeting again and replaces the ${draftCount} unreviewed ${draftCount === 1 ? "draft" : "drafts"} with what it finds.`
+            : "This reads the meeting again and drafts anything not captured yet."}{" "}
+          Anything already confirmed, created or rejected stays, and is not proposed again.
+        </Text>
+      ),
+      labels: { confirm: "Re-extract", cancel: "Cancel" },
+      onConfirm: () => void runExtractOutputs({ replaceDrafts: true }),
+    });
+  }
 
   // Evidence capture: transcript turns marked "Use as evidence" collect here
   // until the modal logs them with the decision.
@@ -183,6 +254,12 @@ export function MeetingDetail({
         // `[SCREENSHOT]` markers, so it needs the body too.
         (tab === "transcript" || (tab === "screenshots" && session.screenshots.length > 0)),
     },
+  );
+  // Notes are stripped from `getDetail` with the other bodies; fetch them
+  // when their tab opens, like the transcript.
+  const notesQuery = api.transcription.getNotes.useQuery(
+    { id: session.id },
+    { enabled: tab === "notes" },
   );
 
   // Identity keys already on the meeting so the picker hides existing people.
@@ -254,14 +331,44 @@ export function MeetingDetail({
         ceremonyId: o.ceremonyId,
         ceremonyName: o.ceremony.name,
         scheduledStart: new Date(o.scheduledStart),
+        cadenceStart: o.cadenceStart ? new Date(o.cadenceStart) : null,
       })),
     [occurrenceRows],
+  );
+  // The ceremonies themselves, so a meeting held off the cadence can get an
+  // occurrence added at its own date and be linked in one go. Only the ones
+  // the caller may manage (owner, or workspace admin): `addOccurrence`
+  // refuses anyone else, so the option is not offered to them.
+  const { data: ceremonyRows = [] } = api.ceremony.list.useQuery(
+    { workspaceId: session.workspaceId ?? "" },
+    { enabled: occurrencePickerOpened && Boolean(session.workspaceId) },
+  );
+  const ceremonyOptions = useMemo(
+    () => ceremonyRows.filter((c) => c.canManage).map((c) => ({ id: c.id, name: c.name })),
+    [ceremonyRows],
+  );
+  const addOccurrenceAt = useMemo(
+    () => (session.meetingDate ? new Date(session.meetingDate) : new Date(session.createdAt)),
+    [session.meetingDate, session.createdAt],
   );
   const attachOccurrence = api.ceremony.attachMeeting.useMutation({
     onSuccess: () => void utils.transcription.getDetail.invalidate({ id: session.id }),
     onError: (error) =>
       notifications.show({ title: "Couldn't link ceremony", message: error.message, color: "red" }),
   });
+  const addOccurrence = api.ceremony.addOccurrence.useMutation({
+    onSuccess: (occurrence) => {
+      attachOccurrence.mutate({ meetingId: session.id, occurrenceId: occurrence.id });
+      void utils.ceremony.listOccurrences.invalidate();
+    },
+    onError: (error) =>
+      notifications.show({ title: "Couldn't add occurrence", message: error.message, color: "red" }),
+  });
+  const meetingWorkspaceId = session.workspaceId;
+  const onAddOccurrence = meetingWorkspaceId
+    ? (ceremonyId: string) =>
+        addOccurrence.mutate({ workspaceId: meetingWorkspaceId, ceremonyId, scheduledStart: addOccurrenceAt })
+    : undefined;
   const detachOccurrence = api.ceremony.detachMeeting.useMutation({
     onSuccess: () => void utils.transcription.getDetail.invalidate({ id: session.id }),
     onError: (error) =>
@@ -429,7 +536,7 @@ export function MeetingDetail({
           }
         />
 
-        <nav className="mp-tabs" role="tablist" aria-label="Meeting sections">
+        <nav ref={tabsRef} className="mp-tabs" role="tablist" aria-label="Meeting sections">
           <button
             role="tab"
             aria-selected={tab === "summary"}
@@ -437,6 +544,15 @@ export function MeetingDetail({
             onClick={() => selectTab("summary")}
           >
             <IconSparkles size={14} /> Summary
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "notes"}
+            className={`mp-tab ${tab === "notes" ? "on" : ""}`}
+            onClick={() => selectTab("notes")}
+            data-testid="tab-notes"
+          >
+            <IconNotes size={14} /> Notes
           </button>
           <button
             role="tab"
@@ -490,6 +606,15 @@ export function MeetingDetail({
                 onRegenerate={onRegenerateSummary}
               />
             )}
+            {tab === "notes" && (
+              <NotesTab
+                notes={notesQuery.data?.notes ?? null}
+                isLoading={notesQuery.isLoading}
+                isError={notesQuery.isError}
+                canEdit={session.canEdit}
+                onSave={onSaveNotes}
+              />
+            )}
             {tab === "outputs" && (
               <OutputsTab
                 transcriptionSessionId={session.id}
@@ -498,7 +623,8 @@ export function MeetingDetail({
                 isActionsLoading={isActionsLoading}
                 canLogDecision={canLogDecision}
                 onLogDecision={() => setLogDecisionOpen(true)}
-                onExtractOutputs={canExtractOutputs ? () => void handleExtractOutputs() : undefined}
+                onExtractOutputs={canExtractOutputs ? handleExtractOutputs : undefined}
+                isReExtract={hasOutputs}
                 isExtractingOutputs={isExtractingOutputs}
                 decisionDraftsPanel={
                   session.workspaceId ? (
@@ -571,7 +697,8 @@ export function MeetingDetail({
           </main>
 
           <ContextRail
-            onExtractOutputs={canExtractOutputs ? () => void handleExtractOutputs() : undefined}
+            onExtractOutputs={canExtractOutputs ? handleExtractOutputs : undefined}
+                isReExtract={hasOutputs}
             isExtractingOutputs={isExtractingOutputs}
             participants={vm.participants}
             project={session.project ? { name: session.project.name } : null}
@@ -591,12 +718,20 @@ export function MeetingDetail({
             isLoadingProjects={projectPickerOpened && isLoadingProjects}
             onProjectChange={onProjectChange}
             workspaceName={session.workspace?.name ?? null}
+            workspaceId={session.workspaceId ?? null}
+            workspaceOptions={workspaceOptions}
+            allowPersonalWorkspace={session.isOwner || !session.workspaceId}
+            onWorkspaceChange={canMoveWorkspace ? onWorkspaceChange : undefined}
+            isSavingWorkspace={isSavingWorkspace}
             occurrence={vm.occurrence}
             occurrenceHref={occurrenceHref}
             occurrenceOptions={occurrenceOptions}
             onOccurrenceChange={onOccurrenceChange}
             onOccurrencePickerOpen={() => setOccurrencePickerOpened(true)}
             isLoadingOccurrences={occurrencePickerOpened && isLoadingOccurrences}
+            ceremonyOptions={ceremonyOptions}
+            onAddOccurrence={onAddOccurrence}
+            addOccurrenceAt={addOccurrenceAt}
             linkedFeatures={linkedFeatures}
             featureOptions={featureOptions}
             onFeatureToggle={onFeatureToggle}
@@ -605,7 +740,7 @@ export function MeetingDetail({
             onShare={handleShare}
             onExportTranscript={() => void handleExportTranscript()}
             canExport={session.hasTranscript}
-            onArchive={onArchive}
+            onArchive={session.canEdit ? onArchive : undefined}
             onAddParticipant={handleAddParticipant}
             onRemoveParticipant={handleRemoveParticipant}
             removingParticipantId={

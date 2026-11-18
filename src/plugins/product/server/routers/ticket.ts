@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { httpUrlSchema } from "~/lib/safeUrl";
 import type { JSONContent } from "@tiptap/core";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
@@ -15,6 +16,14 @@ import {
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import { checkStaleWrite } from "~/lib/prd/stale-write";
+import {
+  assertBaseRevision,
+  conflictAfterMiss,
+  isCompareAndSetMiss,
+  RevisionConflictError,
+  toConflictTRPCError,
+  withConflictAsTRPC,
+} from "~/server/services/revisions/revisionConflict";
 import { markdownToDocServer } from "~/server/services/prd/markdown-doc";
 import {
   anchorThreadInStoredDoc,
@@ -23,6 +32,7 @@ import {
   withCarriedCommentMarks,
 } from "~/server/services/prd/anchor-comment";
 import { emitTicketCommentMention } from "~/server/services/notifications/emit/mentionAdapters";
+import { notifyTicketAssigned } from "../services/notifyTicketAssigned";
 import { createTicketWithNumber } from "../services/createTicket";
 import { wouldCreateCycle } from "../services/ticketDependencies";
 import {
@@ -37,7 +47,9 @@ import {
 } from "~/lib/ticket-statuses";
 import { TEXT_LIMITS, boundedText } from "~/lib/text-limits";
 import { uploadToBlob } from "~/lib/blob";
-import { parseTicketUrlId, shortIdSearchWhere } from "~/lib/fun-ids";
+import { ticketRefWhere } from "../services/ticketRef";
+import { searchTicketsIdFirst } from "../services/ticketTextSearch";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 
 const prosemirrorDoc = z.record(z.string(), z.unknown());
 
@@ -64,6 +76,12 @@ const ticketStatusEnum = z.enum([
 ]);
 
 type TicketStatusValue = z.infer<typeof ticketStatusEnum>;
+
+/** A Ticket's current `docVersion`, or null when it is gone. */
+async function readTicketDocVersion(db: PrismaClient, id: string): Promise<number | null> {
+  const row = await db.ticket.findUnique({ where: { id }, select: { docVersion: true } });
+  return row?.docVersion ?? null;
+}
 
 async function loadTicketWithAccess(
   db: PrismaClient,
@@ -96,6 +114,7 @@ async function loadTicketWithAccess(
       cycleId: true,
       scopeId: true,
       assigneeId: true,
+      updatedAt: true,
       product: { select: { workspaceId: true } },
     },
   });
@@ -119,7 +138,11 @@ const DEP_TICKET_SELECT = {
   title: true,
   status: true,
   priority: true,
+  prUrl: true,
   assignee: { select: { id: true, name: true, image: true } },
+  // ADR-0002: a linked ticket may live in a sibling Product, so a dependency
+  // row (and a search result) says which one, for its link and display ID.
+  product: { select: { id: true, name: true, slug: true } },
 } as const;
 
 /** Filters shared by `list` and `listSummaries`. */
@@ -153,16 +176,47 @@ function ticketListWhere(
   };
 }
 
+/**
+ * `listSummaries` can leave out, or return only, completed tickets: the
+ * backlog loads its Completed section on demand, and on a mature product
+ * that section is most of the tickets.
+ */
+const ticketSummariesInput = ticketListInput.extend({
+  completed: z.enum(["include", "exclude", "only"]).default("include"),
+});
+
+function ticketSummariesWhere(
+  input: z.infer<typeof ticketSummariesInput>,
+): Prisma.TicketWhereInput {
+  const where = ticketListWhere(input);
+  if (input.completed === "include") return where;
+  // Under AND so it narrows an explicit `status` filter instead of replacing it.
+  const statuses = [...COMPLETED_TICKET_STATUSES];
+  return {
+    ...where,
+    AND: [
+      {
+        status:
+          input.completed === "only" ? { in: statuses } : { notIn: statuses },
+      },
+    ],
+  };
+}
+
 const TICKET_LIST_ORDER_BY: Prisma.TicketOrderByWithRelationInput[] = [
   { status: "asc" },
   { createdAt: "desc" },
 ];
 
-/** Swap each ticket's `depsOut` edges for its open-blocker count. */
+/**
+ * Swap each ticket's `depsOut` edges for its open-blocker count and the ids
+ * of the tickets it depends on (what the Backlog's "Nest dependencies" view
+ * nests beneath it).
+ */
 function withBlockerCounts<
   T extends {
     status: TicketStatusValue;
-    depsOut: Array<{ dependsOn: { status: TicketStatusValue } }>;
+    depsOut: Array<{ dependsOnId: string; dependsOn: { status: TicketStatusValue } }>;
   },
 >(tickets: T[]) {
   return tickets.map((t) => {
@@ -171,8 +225,9 @@ function withBlockerCounts<
     ).length;
     const isBlocked =
       openBlockerCount > 0 && IN_FLIGHT_TICKET_STATUSES.includes(t.status);
+    const dependsOnIds = t.depsOut.map((d) => d.dependsOnId);
     const { depsOut: _depsOut, ...rest } = t;
-    return { ...rest, openBlockerCount, isBlocked };
+    return { ...rest, openBlockerCount, isBlocked, dependsOnIds };
   });
 }
 
@@ -201,7 +256,7 @@ const TICKET_SUMMARY_SELECT = {
       tag: { select: { id: true, name: true, color: true, category: true } },
     },
   },
-  depsOut: { select: { dependsOn: { select: { status: true } } } },
+  depsOut: { select: { dependsOnId: true, dependsOn: { select: { status: true } } } },
   syncs: {
     select: {
       provider: true,
@@ -288,21 +343,6 @@ function shapeTicketDetail(ticket: TicketDetailRow) {
   return { ...rest, dependsOn, requiredFor, openBlockerCount, isBlocked };
 }
 
-/**
- * Where-clause for a ticket URL segment within one product: the sequential
- * number (`29`) or Linear-style id (`PLAT-29`), else a CUID or fun shortId.
- * Shared by resolveId and getByRef so the accepted URL forms can't drift.
- */
-function ticketRefWhere(
-  productId: string,
-  identifier: string,
-): Prisma.TicketWhereInput {
-  const number = parseTicketUrlId(identifier);
-  return number !== null
-    ? { productId, number }
-    : { productId, OR: [{ id: identifier }, { shortId: identifier }] };
-}
-
 function listTicketEvents(db: PrismaClient, workspaceId: string, ticketId: string) {
   return db.workspaceActivityEvent.findMany({
     where: { workspaceId, entityType: "ticket", entityId: ticketId },
@@ -352,7 +392,7 @@ export const ticketRouter = createTRPCRouter({
           epic: { select: { id: true, name: true } },
           cycle: { select: { id: true, name: true, status: true, startDate: true, endDate: true } },
           tags: { include: { tag: true } },
-          depsOut: { select: { dependsOn: { select: { status: true } } } },
+          depsOut: { select: { dependsOnId: true, dependsOn: { select: { status: true } } } },
           _count: { select: { actions: true, comments: true } },
           syncs: {
             select: {
@@ -376,17 +416,31 @@ export const ticketRouter = createTRPCRouter({
    * shows.
    */
   listSummaries: protectedProcedure
-    .input(ticketListInput)
+    .input(ticketSummariesInput)
     .query(async ({ ctx, input }) => {
       await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
 
       const tickets = await ctx.db.ticket.findMany({
-        where: ticketListWhere(input),
+        where: ticketSummariesWhere(input),
         orderBy: TICKET_LIST_ORDER_BY,
         select: TICKET_SUMMARY_SELECT,
       });
 
       return withBlockerCounts(tickets);
+    }),
+
+  /**
+   * How many completed tickets match `listSummaries`' filters: the count on
+   * the backlog's Completed header before that section's rows are loaded.
+   */
+  countCompleted: protectedProcedure
+    .input(ticketListInput)
+    .query(async ({ ctx, input }) => {
+      await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
+
+      return ctx.db.ticket.count({
+        where: ticketSummariesWhere({ ...input, completed: "only" }),
+      });
     }),
 
   getById: protectedProcedure
@@ -582,9 +636,9 @@ export const ticketRouter = createTRPCRouter({
         priority: z.number().int().min(0).max(4).optional(),
         points: z.number().optional(),
         branchName: boundedText("Branch name", TEXT_LIMITS.LABEL).optional(),
-        prUrl: z.string().url().max(500).optional(),
-        designUrl: z.string().url().max(500).optional(),
-        specUrl: z.string().url().max(500).optional(),
+        prUrl: httpUrlSchema.optional(),
+        designUrl: httpUrlSchema.optional(),
+        specUrl: httpUrlSchema.optional(),
         links: z.record(z.string(), z.string()).optional(),
         epicId: z.string().optional(),
         featureId: z.string().optional(),
@@ -665,6 +719,13 @@ export const ticketRouter = createTRPCRouter({
         assigneeId: input.assigneeId,
       });
 
+      await notifyTicketAssigned(ctx.db, {
+        ticketId: ticket.id,
+        assigneeId: input.assigneeId,
+        previousAssigneeId: null,
+        actorUserId: ctx.session.user.id,
+      });
+
       // Outbound Notion full-mirror (ADR-0046): a ticket born in Exponential
       // gets a Notion row when its product has push enabled. Never throws — a
       // push must not break ticket creation. (The inbound engine creates
@@ -692,9 +753,9 @@ export const ticketRouter = createTRPCRouter({
         priority: z.number().int().min(0).max(4).nullable().optional(),
         points: z.number().nullable().optional(),
         branchName: boundedText("Branch name", TEXT_LIMITS.LABEL).nullable().optional(),
-        prUrl: z.string().url().max(500).nullable().optional(),
-        designUrl: z.string().url().max(500).nullable().optional(),
-        specUrl: z.string().url().max(500).nullable().optional(),
+        prUrl: httpUrlSchema.nullable().optional(),
+        designUrl: httpUrlSchema.nullable().optional(),
+        specUrl: httpUrlSchema.nullable().optional(),
         links: z.record(z.string(), z.string()).nullable().optional(),
         epicId: z.string().nullable().optional(),
         featureId: z.string().nullable().optional(),
@@ -768,6 +829,28 @@ export const ticketRouter = createTRPCRouter({
         bodyDoc === undefined &&
         rest.body !== undefined &&
         rest.body !== previousTicket.body;
+      // An unchanged re-send leaves the stored body alone rather than writing
+      // the same text back unguarded over a save that lands meanwhile.
+      if (rest.body !== undefined && bodyDoc === undefined && !syncDoc) {
+        delete data.body;
+      }
+      // A Markdown write that carries the `baseVersion` it read is a
+      // compare-and-set on `docVersion` (ADR-0071 change integrity): a stale
+      // base leaves the ticket unchanged and returns a structured CONFLICT.
+      // Optional for now; without it the write bumps `docVersion` as before.
+      // An unchanged re-send rewrites nothing, so it is never a conflict.
+      const markdownBaseVersion = syncDoc ? baseVersion : undefined;
+      if (markdownBaseVersion !== undefined) {
+        await withConflictAsTRPC(async () =>
+          assertBaseRevision({
+            entity: "ticket",
+            id,
+            field: "body",
+            storedRevision: previousTicket.docVersion,
+            baseRevision: markdownBaseVersion,
+          }),
+        );
+      }
       if (syncDoc) {
         const previousDoc = await ctx.db.ticket.findUnique({
           where: { id },
@@ -803,13 +886,20 @@ export const ticketRouter = createTRPCRouter({
           baseVersion,
         });
         if (!decision.accept) {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message:
+          throw toConflictTRPCError(
+            new RevisionConflictError(
+              {
+                entity: "ticket",
+                id,
+                field: "body",
+                expectedRevision: baseVersion,
+                currentRevision: previousTicket.docVersion,
+              },
               decision.reason === "stale"
                 ? "This ticket was updated in another tab or by another member. Reload to get the latest version."
                 : "Stale document version - reload and try again.",
-          });
+            ),
+          );
         }
         // Atomic compare-and-set: the WHERE on docVersion closes the
         // read→write race so two concurrent saves can't both bump from the
@@ -823,8 +913,12 @@ export const ticketRouter = createTRPCRouter({
           },
         });
         if (res.count === 0) {
-          throw new TRPCError({
-            code: "CONFLICT",
+          throw await conflictAfterMiss({
+            entity: "ticket",
+            id,
+            field: "body",
+            expectedRevision: baseVersion,
+            readCurrentRevision: () => readTicketDocVersion(ctx.db, id),
             message:
               "This ticket was updated concurrently. Reload to get the latest version.",
           });
@@ -838,11 +932,36 @@ export const ticketRouter = createTRPCRouter({
         // otherwise hand the editor a base that silently absorbs it.
         updatedTicket = { ...row, docVersion: decision.nextVersion };
       } else {
-        updatedTicket = await ctx.db.ticket.update({
-          where: { id },
-          data,
-        });
+        // With a Markdown base version the WHERE closes the race with a save
+        // landing after the check above: a miss writes nothing.
+        updatedTicket = await ctx.db.ticket
+          .update({
+            where:
+              markdownBaseVersion !== undefined
+                ? { id, docVersion: markdownBaseVersion }
+                : { id },
+            data,
+          })
+          .catch(async (error: unknown) => {
+            if (markdownBaseVersion === undefined || !isCompareAndSetMiss(error)) {
+              throw error;
+            }
+            throw await conflictAfterMiss({
+              entity: "ticket",
+              id,
+              field: "body",
+              expectedRevision: markdownBaseVersion,
+              readCurrentRevision: () => readTicketDocVersion(ctx.db, id),
+            });
+          });
       }
+
+      await notifyTicketAssigned(ctx.db, {
+        ticketId: id,
+        assigneeId: input.assigneeId,
+        previousAssigneeId: previousTicket.assigneeId,
+        actorUserId: ctx.session.user.id,
+      });
 
       // T7: workspace activity feed instrumentation.
       //  - status moved → fire `status_changed`
@@ -927,18 +1046,36 @@ export const ticketRouter = createTRPCRouter({
    * canonical `bodyDoc` (ADR-0024, as feature.initDescriptionDoc). The client
    * converts Markdown → ProseMirror JSON (the codec needs the editor schema)
    * and posts the result here on first open. Idempotent and write-once: if
-   * `bodyDoc` is already set, the existing document wins. `body` and
-   * `docVersion` stay untouched.
+   * `bodyDoc` is already set, the existing document wins. `body`,
+   * `docVersion` and `updatedAt` stay untouched.
    */
   initBodyDoc: protectedProcedure
     .input(z.object({ id: z.string(), doc: prosemirrorDoc }))
     .mutation(async ({ ctx, input }) => {
-      await loadTicketWithAccess(ctx.db, ctx.session.user.id, input.id, "edit");
+      const existing = await loadTicketWithAccess(
+        ctx.db,
+        ctx.session.user.id,
+        input.id,
+        "edit",
+      );
       // Conditional write, not read-then-write: an editor save or a Markdown
       // API write landing in between must win over this migration.
+      //
+      // This runs on first *open*, so it must not count as an edit: `@updatedAt`
+      // would otherwise bump the row and send it to the back of updatedAt-ordered
+      // queues (inbox "Waiting on me"). Write the loaded value back, and guard on
+      // it so a real edit racing in between is never rolled back — the migration
+      // just skips and retries on the next open.
       const res = await ctx.db.ticket.updateMany({
-        where: { id: input.id, bodyDoc: { equals: Prisma.DbNull } },
-        data: { bodyDoc: input.doc as Prisma.InputJsonValue },
+        where: {
+          id: input.id,
+          bodyDoc: { equals: Prisma.DbNull },
+          updatedAt: existing.updatedAt,
+        },
+        data: {
+          bodyDoc: input.doc as Prisma.InputJsonValue,
+          updatedAt: existing.updatedAt,
+        },
       });
       return { migrated: res.count > 0 };
     }),
@@ -977,6 +1114,7 @@ export const ticketRouter = createTRPCRouter({
           id: true,
           status: true,
           cycleId: true,
+          assigneeId: true,
           productId: true,
           product: { select: { workspaceId: true } },
         },
@@ -1054,6 +1192,21 @@ export const ticketRouter = createTRPCRouter({
           data,
         });
       }
+
+      // One notification per ticket that actually changed hands. Every
+      // selected ticket was written above (stamped or kept), so the selection
+      // is the updated set. In parallel: a serial send per ticket would make a
+      // large bulk assignment one long mutation.
+      await Promise.all(
+        tickets.map((t) =>
+          notifyTicketAssigned(ctx.db, {
+            ticketId: t.id,
+            assigneeId: input.assigneeId,
+            previousAssigneeId: t.assigneeId,
+            actorUserId: ctx.session.user.id,
+          }),
+        ),
+      );
 
       const patchedFields = fields.map(([k]) => k).filter((k) => k !== "status");
       await Promise.all(
@@ -1174,34 +1327,42 @@ export const ticketRouter = createTRPCRouter({
         query: z.string().max(200).optional(),
         excludeTicketId: z.string().optional(),
         limit: z.number().int().min(1).max(50).optional(),
+        // ADR-0002: "product" (default) searches `productId` only; "workspace"
+        // searches every Product in `productId`'s workspace, for picking a
+        // cross-Product blocker. Each result carries its `product` so the
+        // picker can label where a foreign ticket lives.
+        scope: z.enum(["product", "workspace"]).optional(),
       }),
     )
     .query(async ({ ctx, input }) => {
-      await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
+      const product = await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
       const q = (input.query ?? "").trim();
       const limit = input.limit ?? 20;
 
-      const numberFromQuery = /^\d+$/.test(q) ? parseInt(q, 10) : undefined;
+      const scope: Prisma.TicketWhereInput = {
+        ...(input.scope === "workspace"
+          ? { product: { workspaceId: product.workspaceId } }
+          : { productId: input.productId }),
+        ...(input.excludeTicketId ? { id: { not: input.excludeTicketId } } : {}),
+      };
+      const find = (match: Prisma.TicketWhereInput, take: number, skip = 0) =>
+        ctx.db.ticket.findMany({
+          where: { AND: [scope, match] },
+          orderBy: [{ updatedAt: "desc" }],
+          take,
+          ...(skip > 0 ? { skip } : {}),
+          select: DEP_TICKET_SELECT,
+        });
 
-      return ctx.db.ticket.findMany({
-        where: {
-          productId: input.productId,
-          ...(input.excludeTicketId ? { id: { not: input.excludeTicketId } } : {}),
-          ...(q
-            ? {
-                OR: [
-                  { title: { contains: q, mode: "insensitive" as const } },
-                  // Fun shortIds match word-order-insensitively
-                  // ("toucan.prime" finds prime.toucan).
-                  ...shortIdSearchWhere(q),
-                  ...(numberFromQuery !== undefined ? [{ number: numberFromQuery }] : []),
-                ],
-              }
-            : {}),
-        },
-        orderBy: [{ updatedAt: "desc" }],
-        take: limit,
-        select: DEP_TICKET_SELECT,
+      if (!q) return find({}, limit);
+      // Title, shortId (partial, any word order) or number; a query naming a
+      // ticket exactly (`snappy.thunder`, `42`, `#42`, `EXP-42`) puts it first.
+      // Workspace-wide, `EXP-42` must match against each ticket's own Product.
+      return searchTicketsIdFirst({
+        query: q,
+        limit,
+        find,
+        productName: (t) => t.product?.name ?? product.name,
       });
     }),
 
@@ -1220,33 +1381,60 @@ export const ticketRouter = createTRPCRouter({
         });
       }
 
+      const depTicketSelect = {
+        id: true,
+        productId: true,
+        product: { select: { workspaceId: true } },
+      } as const;
       const [ticket, dependsOn] = await Promise.all([
-        ctx.db.ticket.findUnique({
-          where: { id: input.ticketId },
-          select: { id: true, productId: true, product: { select: { workspaceId: true } } },
-        }),
-        ctx.db.ticket.findUnique({
-          where: { id: input.dependsOnId },
-          select: { id: true, productId: true },
-        }),
+        ctx.db.ticket.findUnique({ where: { id: input.ticketId }, select: depTicketSelect }),
+        ctx.db.ticket.findUnique({ where: { id: input.dependsOnId }, select: depTicketSelect }),
       ]);
       if (!ticket || !dependsOn) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
       }
-      if (ticket.productId !== dependsOn.productId) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Dependencies must be within the same product.",
-        });
-      }
+      // ADR-0002: Workspace, not Product, is the boundary — a ticket may wait
+      // on a ticket in a sibling Product. The caller must be able to edit in
+      // *both* tickets' workspaces. Today that is always one workspace (the
+      // check below refuses anything else), but asserting each one keeps a
+      // future relaxation of that rule from silently widening access.
       await assertWorkspaceAccess(
         ctx.db,
         ctx.session.user.id,
         ticket.product.workspaceId,
         "edit",
       );
+      await assertWorkspaceAccess(
+        ctx.db,
+        ctx.session.user.id,
+        dependsOn.product.workspaceId,
+        "edit",
+      );
+      if (ticket.product.workspaceId !== dependsOn.product.workspaceId) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Dependencies must be within the same workspace.",
+        });
+      }
 
       return ctx.db.$transaction(async (tx) => {
+        // Re-check the boundary under a share lock on both Products, so a
+        // concurrent product.moveToWorkspace can't strand this edge across
+        // workspaces: either the move commits first and its new workspace
+        // shows up here, or it waits for this insert and then deletes the
+        // edge itself.
+        const productIds = [...new Set([ticket.productId, dependsOn.productId])];
+        const lockedProducts = await tx.$queryRaw<{ workspaceId: string }[]>`
+          SELECT "workspaceId" FROM "Product"
+          WHERE id IN (${Prisma.join(productIds)})
+          FOR SHARE`;
+        if (new Set(lockedProducts.map((p) => p.workspaceId)).size !== 1) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Dependencies must be within the same workspace.",
+          });
+        }
+
         // Cycle check: would adding ticketId -> dependsOnId let dependsOnId reach ticketId?
         if (await wouldCreateCycle(tx, input.dependsOnId, input.ticketId)) {
           throw new TRPCError({
@@ -1342,12 +1530,15 @@ export const ticketRouter = createTRPCRouter({
 
       // Fire-and-forget: notify mentioned workspace members via the pipeline
       // (same path as feature comments).
-      void emitTicketCommentMention(ctx.db, {
-        ticketId: input.ticketId,
-        commentId: comment.id,
-        commentContent: input.content,
-        commentAuthorId: ctx.session.user.id,
-      });
+      emitAfterResponse("ticket.commentMention", () =>
+        emitTicketCommentMention(ctx.db, {
+          ticketId: input.ticketId,
+          commentId: comment.id,
+          commentContent: input.content,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { ticketId: input.ticketId, commentId: comment.id },
+      );
 
       const anchor = input.threadId
         ? await anchorThreadInStoredDoc({
@@ -1423,13 +1614,16 @@ export const ticketRouter = createTRPCRouter({
 
       // Fire-and-forget: notify mentions added by the edit. Passing the old
       // body means already-notified users aren't pinged again.
-      void emitTicketCommentMention(ctx.db, {
-        ticketId: updated.ticketId,
-        commentId: updated.id,
-        commentContent: input.content,
-        commentAuthorId: ctx.session.user.id,
-        previousContent: comment.content,
-      });
+      emitAfterResponse("ticket.commentMention", () =>
+        emitTicketCommentMention(ctx.db, {
+          ticketId: updated.ticketId,
+          commentId: updated.id,
+          commentContent: input.content,
+          commentAuthorId: ctx.session.user.id,
+          previousContent: comment.content,
+        }),
+        { ticketId: updated.ticketId, commentId: updated.id },
+      );
 
       return updated;
     }),
@@ -1498,12 +1692,15 @@ export const ticketRouter = createTRPCRouter({
       });
 
       // Fire-and-forget: notify mentioned workspace members.
-      void emitTicketCommentMention(ctx.db, {
-        ticketId: parent.ticketId,
-        commentId: comment.id,
-        commentContent: input.content,
-        commentAuthorId: ctx.session.user.id,
-      });
+      emitAfterResponse("ticket.commentMention", () =>
+        emitTicketCommentMention(ctx.db, {
+          ticketId: parent.ticketId,
+          commentId: comment.id,
+          commentContent: input.content,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { ticketId: parent.ticketId, commentId: comment.id },
+      );
 
       return comment;
     }),

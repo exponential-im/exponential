@@ -47,8 +47,8 @@ function TabCount({ count }: { count: number | undefined }) {
  * deliberately not here — it never clears — it's the "Mine" filter on
  * `/activity`.
  *
- * The `activity-layout` wrapper supplies the `--activity-*` chip tokens the
- * shared row styles use.
+ * The `activity-layout` wrapper supplies the milestone chip's text colour,
+ * the one colour the shared row styles do not take from the shared tokens.
  */
 export function InboxPageContent() {
   const router = useRouter();
@@ -64,6 +64,8 @@ export function InboxPageContent() {
   function setTab(next: string | null) {
     const params = new URLSearchParams(searchParams.toString());
     const value = parseTab(next);
+    // An open peek belongs to the tab it was opened from.
+    params.delete("peek");
     if (value === "notifications") params.delete("tab");
     else params.set("tab", value);
     const qs = params.toString();

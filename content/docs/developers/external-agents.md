@@ -4,7 +4,7 @@ description: Connect third-party AI agents to Exponential as first-class team me
 icon: IconRobotFace
 order: 2
 sidebarTitle: External agents
-updated: 2026-10-10
+updated: 2026-11-15
 ---
 
 External agents let you connect autonomous AI software — [Hermes Agent](https://hermes-agent.nousresearch.com/), MCP clients, custom scripts, anything that can send an HTTP request — to Exponential **as its own identity**, not as you. When your agent creates an action, the action says the *agent* created it, and the workspace's activity feed and members list show it with an **agent** badge. This is different from Zoe, who works *with* you in a conversation and acts as you with your confirmation.
@@ -13,14 +13,17 @@ External agents let you connect autonomous AI software — [Hermes Agent](https:
 
 ## Where to find it
 
-[Settings → Agents](/settings/agents) (user menu → **Settings** → **Agents**).
+[Settings → Agents](/settings/agents) (user menu → **Settings** → **Agents**). To go straight to the create form, open [/settings/agents/new](/settings/agents/new).
 
 ## How to create an agent
 
-1. Click **New agent**, give it a **Name** ("Hermes", "Standup Bot") and an optional **Description**, then click **Create**.
-2. Next to **Workspaces**, click **Add**, tick the workspaces it may work in and confirm. The agent joins each one as a **member**; you can only grant workspaces where you have at least member access yourself.
-3. Under **Keys**, click **New key**, give it a **Label** (for example "laptop") and click **Create key**.
-4. Copy the key now — it starts with `exp_agent_` and is never shown again. Click **Done**.
+1. Click **New agent** (or open [/settings/agents/new](/settings/agents/new)). A panel opens on the right.
+2. Give it a **Name** ("Hermes", "Claude Code") and an optional description of the work it should get.
+3. Pick its **Workspaces**. The agent joins each one as a **member**; only workspaces where you have at least member access yourself are offered.
+4. Keep or change the **Key label** (for example "laptop") and click **Create agent**. Clear the label to create the agent without a key.
+5. Copy the key now — it starts with `exp_agent_` and is never shown again. Click **Done**.
+
+To add more workspaces or keys later, use **Add** next to **Workspaces** and **New key** under **Keys** on the agent's card.
 
 ## How to point your software at Exponential
 
@@ -31,6 +34,34 @@ Authorization: Bearer exp_agent_...
 ```
 
 For agent software that runs shell commands (like Hermes), the simplest path is the Exponential CLI with the agent key as its token — see [API tokens](/docs/developers/api-tokens#how-to-use-a-token).
+
+For an MCP client (Claude Desktop, Claude Code, Cursor, or any agent that can launch an MCP server), use the **`exponential-mcp`** server. The client starts it on its own machine, and it signs in with the agent key:
+
+```json
+{
+  "mcpServers": {
+    "exponential": {
+      "command": "npx",
+      "args": ["-y", "exponential-mcp", "serve"],
+      "env": { "EXPONENTIAL_API_KEY": "exp_agent_..." }
+    }
+  }
+}
+```
+
+On a [self-hosted install](/docs/self-hosting), add `"EXPONENTIAL_API_URL": "https://your-install.example.com"` to `env`. Setup, the full tool list and `exponential-mcp doctor` are on [MCP server & SDK](/docs/developers/mcp-and-sdk).
+
+## How to give an agent access to a restricted project
+
+Joining a workspace makes the agent an ordinary **member**, so it sees what members see. A [restricted project](/docs/collaborate/members-and-access#how-to-open-or-close-a-project) is the exception: only the project's creator, its project members and workspace admins can see it and the pages, meetings and actions inside it. An agent is never a workspace admin, so a restricted project refuses it until a project admin adds it:
+
+1. Find out which account the agent is. Run `exponential auth whoami` with the agent's key — it prints the account's name and id and says it is an agent, and who owns it. The same account appears in the workspace **Members** list with an **agent** badge.
+2. Open the project, go to its **Members** tab and search for the agent by name. Agents in the project's workspace are listed with an **Agent** badge.
+3. Add it as **Editor** (to create and edit pages and actions in the project) or **Viewer** (read only). Agents can't be project admins.
+
+Three rules keep this safe. The agent's owner must already have access to the project — a project admin can't let someone's agent in around them — and an agent can be an editor only if its owner can edit the project. When the owner is removed from the project, their agents leave with them. And when the agent loses the workspace (its owner revokes it, or leaves or is demoted), it loses every project membership in that workspace too.
+
+If the agent is refused, the error says why. A refusal on a restricted project reads like `Access denied: Claude Desktop (cmsf…, an agent owned by James) can't read this page. "Manage Syntrofi" is a restricted project and Claude Desktop is not one of its members. A project admin can add Claude Desktop under the project's Members tab.`
 
 ## How to rotate or revoke a key
 
@@ -43,7 +74,7 @@ For agent software that runs shell commands (like Hermes), the simplest path is 
 
 External agents are deliberately more limited than human members:
 
-- **Member role only.** An agent is always a workspace *member* — never an owner or admin. It cannot manage members, change workspace settings or manage other agents.
+- **Member role only.** An agent is always a workspace *member* — never an owner or admin. It cannot manage members, change workspace settings or manage other agents. In a restricted project it is at most an *editor*, and only once a project admin adds it (see above).
 - **Your access is the ceiling.** If you leave a workspace or are changed to viewer, your agents lose that workspace immediately.
 - **No credential minting.** Agents cannot create API tokens, connect integrations or generate other credentials.
 - **Admins can remove it.** A workspace admin can remove an agent from the **Members** list at any time without touching your keys.
@@ -70,5 +101,11 @@ No. [API tokens](/docs/developers/api-tokens) act as you and are right for webho
 **I assigned an action to my external agent — does Exponential run it?**
 No. An external agent is software you run; it polls for the actions assigned to it (`exponential actions list` with its key) and works them itself, commenting and changing status as it goes. Exponential starts a hosted run only when you assign your built-in [assistant](/docs/zoe/assistant-runs), which has no software of its own. The two never overlap: the same assignment is either yours to pick up or the assistant's to run.
 
+**Is there a hosted MCP URL I can paste into a client?**
+No. Exponential's MCP server is the `exponential-mcp` package, which runs on the same machine as the MCP client (see [How to point your software at Exponential](#how-to-point-your-software-at-exponential)). A client that can only connect to a remote MCP server can't use it yet.
+
 **How do I see what an agent did?**
 Actions it created list the agent as creator, and the workspace activity feed shows its entries with an **agent** chip.
+
+**My agent created an action. Where does it show up?**
+An action the agent files in a project appears in that project, for everyone who can see the project. An action it files with no project and no assignee is assigned to you, so it lands on your Today and Inbox like anything else assigned to you, and you are notified. The agent stays the creator. If the agent names an assignee, that person gets it instead. Whoever it is assigned to, you can find and open anything your agent created in a workspace you belong to. If you leave that workspace or become a viewer in it, you are unassigned from those actions: a viewer can still read them, and someone who has left cannot.

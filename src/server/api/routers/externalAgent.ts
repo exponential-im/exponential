@@ -1,10 +1,17 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
+import { blankToNull } from "~/server/utils/blankToNull";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTRPCRouter, humanOnlyProcedure } from "~/server/api/trpc";
 import { generateExternalAgentKey } from "~/server/utils/external-agent-keys";
 import { deleteFromBlob, uploadToBlob } from "~/lib/blob";
 import { deleteExternalAgentPrincipal } from "~/server/services/assistant/principal";
+import { createExternalAgent } from "~/server/services/externalAgentCreate";
+import {
+  memberGrant,
+  requireDelegableWorkspaces,
+  revokeAgentWorkspace,
+} from "~/server/services/externalAgentAccess";
 
 /**
  * External-agent management (ADR-0049).
@@ -26,6 +33,10 @@ const AVATAR_EXTENSIONS = {
   "image/png": "png",
   "image/webp": "webp",
 } as const;
+
+/** Shared by `create` and `createKey`: why a key for an agent in no workspace is refused. */
+export const NO_WORKSPACE_KEY_MESSAGE =
+  "An agent in no workspace can sign in but see nothing, so it can't have a key yet. Add it to at least one workspace first.";
 
 async function requireOwnedAgent(
   db: PrismaClient | Prisma.TransactionClient,
@@ -99,30 +110,59 @@ export const externalAgentRouter = createTRPCRouter({
     }));
   }),
 
+  /**
+   * Create an agent and, optionally, grant its workspaces and mint its first
+   * key in the same transaction — so setup is one step and a rejected grant
+   * leaves no half-configured agent behind.
+   */
   create: humanOnlyProcedure
     .input(
       z.object({
         name: z.string().trim().min(1).max(100),
-        description: z.string().trim().max(500).optional(),
+        description: z.string().trim().max(5000).optional(),
+        workspaceIds: z.array(z.string()).max(100).optional(),
+        keyName: z.string().trim().max(100).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      return ctx.db.$transaction(async (tx) => {
-        const shadowUser = await tx.user.create({
-          data: {
-            name: input.name,
-            isAgent: true,
-          },
+      // Checked before the transaction opens: it only reads, and a rejection
+      // must write nothing.
+      const workspaceIds = await requireDelegableWorkspaces(
+        ctx.db,
+        ctx.session.user.id,
+        input.workspaceIds ?? [],
+      );
+      const keyName = blankToNull(input.keyName);
+      // A key for an agent in no workspace authenticates and then sees nothing
+      // (raw.ledge): refuse it rather than hand out a credential that looks
+      // broken. The agent itself can still be created and given a key later.
+      if (keyName && workspaceIds.length === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: NO_WORKSPACE_KEY_MESSAGE });
+      }
+      const generated = keyName ? generateExternalAgentKey() : null;
+
+      const agent = await ctx.db.$transaction(async (tx) => {
+        const created = await createExternalAgent(tx, {
+          ownerId: ctx.session.user.id,
+          name: input.name,
+          description: blankToNull(input.description),
+          workspaceIds,
         });
-        return tx.externalAgent.create({
-          data: {
-            name: input.name,
-            description: input.description,
-            ownerId: ctx.session.user.id,
-            shadowUserId: shadowUser.id,
-          },
-        });
+        if (keyName && generated) {
+          await tx.externalAgentKey.create({
+            data: {
+              agentId: created.id,
+              name: keyName,
+              keyHash: generated.hash,
+              keyPrefix: generated.displayPrefix,
+            },
+          });
+        }
+        return created;
       });
+
+      // The only moment the secret ever leaves the server.
+      return { agent, secret: generated?.secret ?? null, granted: workspaceIds.length };
     }),
 
   uploadAvatar: humanOnlyProcedure
@@ -166,6 +206,38 @@ export const externalAgentRouter = createTRPCRouter({
       return { avatarUrl: updatedUser.image };
     }),
 
+  update: humanOnlyProcedure
+    .input(
+      z.object({
+        agentId: z.string(),
+        name: z.string().trim().min(1).max(100),
+        description: z.string().trim().max(5000).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const agent = await requireOwnedAgent(ctx.db, input.agentId, ctx.session.user.id);
+
+      // An Assistant's principal is renamed from Settings → Assistant (ADR-0067).
+      if (agent.assistant) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "This agent is your Assistant — edit it from Settings → Assistant instead",
+        });
+      }
+
+      return ctx.db.$transaction(async (tx) => {
+        // The shadow user carries the agent's name into comments and assignments.
+        await tx.user.update({
+          where: { id: agent.shadowUserId },
+          data: { name: input.name },
+        });
+        return tx.externalAgent.update({
+          where: { id: agent.id },
+          data: { name: input.name, description: blankToNull(input.description) },
+        });
+      });
+    }),
+
   delete: humanOnlyProcedure
     .input(z.object({ agentId: z.string() }))
     .mutation(async ({ ctx, input }) => {
@@ -205,7 +277,14 @@ export const externalAgentRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const agent = await requireOwnedAgent(ctx.db, input.agentId, ctx.session.user.id);
 
-      const keyCount = await ctx.db.externalAgentKey.count({ where: { agentId: agent.id } });
+      const [keyCount, workspaceCount] = await Promise.all([
+        ctx.db.externalAgentKey.count({ where: { agentId: agent.id } }),
+        ctx.db.workspaceUser.count({ where: { userId: agent.shadowUserId } }),
+      ]);
+      // Same rule as `create`: never mint a key that signs in and sees nothing.
+      if (workspaceCount === 0) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: NO_WORKSPACE_KEY_MESSAGE });
+      }
       if (keyCount >= MAX_KEYS_PER_AGENT) {
         throw new TRPCError({
           code: "BAD_REQUEST",
@@ -247,47 +326,14 @@ export const externalAgentRouter = createTRPCRouter({
     .input(z.object({ agentId: z.string(), workspaceIds: z.array(z.string()).min(1).max(100) }))
     .mutation(async ({ ctx, input }) => {
       const agent = await requireOwnedAgent(ctx.db, input.agentId, ctx.session.user.id);
-      const workspaceIds = [...new Set(input.workspaceIds)];
-
-      // Delegation invariant, grant-time half: the owner must hold at least
-      // `member` in every target workspace themselves. A viewer cannot delegate
-      // member-level access (ADR-0049). All-or-nothing — a partial grant would
-      // read as a full one in the UI.
-      const ownerMemberships = await ctx.db.workspaceUser.findMany({
-        where: { userId: ctx.session.user.id, workspaceId: { in: workspaceIds } },
-      });
-      const delegable = new Set(
-        ownerMemberships.filter((m) => m.role !== "viewer").map((m) => m.workspaceId),
+      const workspaceIds = await requireDelegableWorkspaces(
+        ctx.db,
+        ctx.session.user.id,
+        input.workspaceIds,
       );
-      if (delegable.size !== workspaceIds.length) {
-        // Name the offenders — the picker is fed by `workspace.list`, which also
-        // surfaces team-based and project-guest workspaces where the owner holds
-        // no `WorkspaceUser` row at all. Without names, recovering from a
-        // rejected batch means bisecting the selection by hand.
-        const rejected = await ctx.db.workspace.findMany({
-          where: { id: { in: workspaceIds.filter((id) => !delegable.has(id)) } },
-          select: { name: true },
-        });
-        const names = rejected.map((w) => w.name).join(", ");
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: names
-            ? `You need at least member access to add your agent to ${names} — nothing was granted`
-            : "You need at least member access in every workspace you add your agent to — nothing was granted",
-        });
-      }
 
       await ctx.db.$transaction(
-        workspaceIds.map((workspaceId) =>
-          ctx.db.workspaceUser.upsert({
-            where: {
-              userId_workspaceId: { userId: agent.shadowUserId, workspaceId },
-            },
-            // Agents only ever hold `member` (ADR-0049).
-            create: { userId: agent.shadowUserId, workspaceId, role: "member" },
-            update: { role: "member" },
-          }),
-        ),
+        workspaceIds.map((workspaceId) => memberGrant(ctx.db, agent.shadowUserId, workspaceId)),
       );
 
       return { granted: workspaceIds.length };
@@ -297,9 +343,9 @@ export const externalAgentRouter = createTRPCRouter({
     .input(z.object({ agentId: z.string(), workspaceId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const agent = await requireOwnedAgent(ctx.db, input.agentId, ctx.session.user.id);
-      await ctx.db.workspaceUser.deleteMany({
-        where: { userId: agent.shadowUserId, workspaceId: input.workspaceId },
-      });
+      // Direct project grants in that workspace go with it — they were made
+      // under the workspace delegation that is being withdrawn.
+      await revokeAgentWorkspace(ctx.db, agent.shadowUserId, input.workspaceId);
       return { success: true };
     }),
 });

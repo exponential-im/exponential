@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { Divider, Group, MultiSelect, Title, SegmentedControl, Modal, Text } from "@mantine/core";
 import { useDisclosure, useMediaQuery } from "@mantine/hooks";
 import { IconHash } from "@tabler/icons-react";
@@ -14,6 +14,7 @@ import { ToolbarActions } from "./toolbar";
 import { MobileTodayHeader } from "./today-mobile/MobileTodayHeader";
 import { api } from "~/trpc/react";
 import { useDayRollover } from "~/hooks/useDayRollover";
+import { withoutPausedProjects } from "~/lib/actions/pausedProjects";
 
 export type DoFilter = "today" | "tomorrow" | "upcoming";
 
@@ -24,6 +25,7 @@ interface DoPageContentProps {
 export function DoPageContent({ initialFilter = "today" }: DoPageContentProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
   const { data: preferences } = api.navigationPreference.getPreferences.useQuery();
   const [breakdownOpened, { open: openBreakdown, close: closeBreakdown }] = useDisclosure(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -70,10 +72,10 @@ export function DoPageContent({ initialFilter = "today" }: DoPageContentProps) {
         params.set("filter", newFilter);
       }
 
-      const newUrl = params.toString() ? `?${params.toString()}` : window.location.pathname;
-      router.push(newUrl, { scroll: false });
+      const query = params.toString();
+      router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
     },
-    [router, searchParams]
+    [router, searchParams, pathname]
   );
 
   // Map filter to viewName for Actions component
@@ -126,7 +128,7 @@ export function DoPageContent({ initialFilter = "today" }: DoPageContentProps) {
   const mobileTaskCount = useMemo(() => {
     if (!allActionsForMobile) return 0;
     const todayStr = today.toDateString();
-    return allActionsForMobile.filter((a) => {
+    return withoutPausedProjects(allActionsForMobile).filter((a) => {
       if (a.status !== "ACTIVE") return false;
       const due = a.dueDate ? new Date(a.dueDate) : null;
       const sched = a.scheduledStart ? new Date(a.scheduledStart) : null;
