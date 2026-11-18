@@ -125,6 +125,7 @@ export function ActionModalForm({
   // in the same transaction as the Action resolved against the project's
   // workspace — a project from another workspace would refuse the whole
   // create with a containment error the user cannot act on.
+  const utils = api.useUtils();
   const projects = api.project.getAll.useQuery(workspaceId ? { workspaceId } : {});
   const taskSchedules = api.taskSchedule.list.useQuery(
     { workspaceId: workspaceId ?? '' },
@@ -599,7 +600,14 @@ export function ActionModalForm({
               }}
             />
             )}
-            <CreateProjectModal onSuccess={(project) => setProjectId(project.id)}>
+            <CreateProjectModal
+              onSuccess={(project) => {
+                // The capture row lists projects from getUserProjects: refresh it so
+                // the new project is there to see and re-pick.
+                void utils.project.getUserProjects.invalidate();
+                setProjectId(project.id);
+              }}
+            >
               <ActionIcon
                 variant="subtle"
                 size="sm"

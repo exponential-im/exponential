@@ -2232,10 +2232,9 @@ describe("action router (mocked)", () => {
       dbMock.tag.count.mockResolvedValue(0);
       // A write role in the Pillars' workspace.
       dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "member", workspaceId: "ws-1" } as never);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const row = { id: "a1", name: "Rotate keys", project: null, assignees: [], tags: [] } as any;
-      dbMock.action.create.mockResolvedValue(row);
-      dbMock.action.findUniqueOrThrow.mockResolvedValue(row);
+      const row = { id: "a1", name: "Rotate keys", project: null, assignees: [], tags: [] };
+      dbMock.action.create.mockResolvedValue(row as never);
+      dbMock.action.findUniqueOrThrow.mockResolvedValue(row as never);
 
       const caller = createMockCaller({ userId: callerId, db: dbMock });
       await caller.action.quickCreate({ name: "Rotate keys", tagIds: ["devops"], parseNaturalLanguage: false });
