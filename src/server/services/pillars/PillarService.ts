@@ -391,8 +391,9 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
   // Work that carries the Pillar itself inside a Project or Epic the page does
   // not list (untagged, or finished while "Show completed" is off): listed on
   // its own so it is not lost.
+  // Spelled as NOT(OR(...)): in neither listed container, whichever it has.
   const outsideShownContainers = {
-    NOT: [{ project: shownProject }, { epic: shownEpic }],
+    NOT: { OR: [{ project: shownProject }, { epic: shownEpic }] },
   } satisfies Prisma.ActionWhereInput;
 
   const [

@@ -394,10 +394,12 @@ describe("getPillarPage", () => {
         { tags: carries },
         { OR: [{ projectId: { not: null } }, { epicId: { not: null } }] },
         {
-          NOT: [
-            { project: { pillarTags: carries, status: "ACTIVE" } },
-            { epic: { tags: carries, status: { notIn: ["DONE", "CANCELLED"] } } },
-          ],
+          NOT: {
+            OR: [
+              { project: { pillarTags: carries, status: "ACTIVE" } },
+              { epic: { tags: carries, status: { notIn: ["DONE", "CANCELLED"] } } },
+            ],
+          },
         },
       ]),
     );
