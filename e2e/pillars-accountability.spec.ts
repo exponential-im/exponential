@@ -178,4 +178,31 @@ test.describe("Pillar accountability", () => {
     await input.fill("Nightly postgres backups failing in production, monitoring too");
     await expect(chip).not.toBeChecked();
   });
+
+  test("a suggested Pillar removed through the Tags picker is not ticked again", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    await page.getByRole("button", { name: /Create Action/i }).first().click();
+    const dialog = page.getByRole("dialog");
+    const nameBox = dialog.locator('form [contenteditable="true"]').first();
+    await expect(nameBox).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await nameBox.click();
+    await page.keyboard.type("Postgres backups failing in production");
+    const chip = dialog.getByLabel("Where this goes").getByRole("checkbox", { name: names.pillar });
+    await expect(chip).toBeChecked();
+
+    // Remove it through the form's own Tags picker, not the capture chips.
+    await dialog.getByRole("button", { name: new RegExp(names.pillar, "i") }).click();
+    const popover = page.locator(".mantine-Popover-dropdown").filter({ hasText: "Select tags" });
+    await popover.locator("label", { hasText: names.pillar }).click();
+    await popover.getByRole("button", { name: "Done" }).click();
+    await expect(chip).not.toBeChecked();
+
+    // More matching text does not bring it back.
+    await nameBox.click();
+    await page.keyboard.type(", monitoring too");
+    await expect(chip).not.toBeChecked();
+  });
 });

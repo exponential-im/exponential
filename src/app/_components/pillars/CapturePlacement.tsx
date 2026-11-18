@@ -65,13 +65,16 @@ export function CapturePlacement({
     ...(chosen && !offeredProjects.includes(chosen) ? [chosen] : []),
   ].map((p) => ({ value: p.id, label: p.name }));
 
-  // Suggested Pillars are ticked once; ones the person unticks stay unticked.
-  const declined = useRef(new Set<string>());
+  // A suggested Pillar is ticked at most once. Once it has been ticked, or the
+  // person has unticked it, it is never ticked again by a suggestion, however
+  // it was removed (these chips, or another tag picker on the same form).
+  const settled = useRef(new Set<string>());
   const suggested = suggestFrom ? suggestPillars(pillars, suggestFrom) : [];
-  const toTick = suggested.filter((id) => !value.tagIds.includes(id) && !declined.current.has(id));
+  const toTick = suggested.filter((id) => !value.tagIds.includes(id) && !settled.current.has(id));
   const suggestedKey = toTick.join(",");
   useEffect(() => {
     if (toTick.length === 0) return;
+    for (const id of toTick) settled.current.add(id);
     onChange({ ...value, tagIds: [...value.tagIds, ...toTick] });
     // Re-run only when the set of Pillars to tick changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,7 +96,7 @@ export function CapturePlacement({
             multiple
             value={tickedPillars}
             onChange={(ticked) => {
-              for (const id of tickedPillars) if (!ticked.includes(id)) declined.current.add(id);
+              for (const id of tickedPillars) if (!ticked.includes(id)) settled.current.add(id);
               onChange({
                 ...value,
                 tagIds: [...value.tagIds.filter((id) => !pillarIds.has(id)), ...ticked],
