@@ -100,6 +100,10 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
       // A failure here is retried by the next tap, which resends everything.
       sendLow({ rating: value, reasons }).catch(() => undefined);
     } else {
+      // A low rating already went out and was a mis-tap: send the correction,
+      // or the record keeps the low one. It updates the same row, and the
+      // ops post is not repeated or withdrawn.
+      if (lowSent) sendLow({ rating: value, reasons }).catch(() => undefined);
       setLowSent(false);
     }
   };
