@@ -58,26 +58,19 @@ export class InternalActionProcessor extends ActionProcessor {
     // Clean up the action text - remove common prefixes
     const name = this.cleanActionText(actionItem.text);
     
+    const processorWsId = await this.resolveWorkspaceId();
+
     // Try to find a matching user for the assignee
     let assigneeUserId: string | null = null;
 
     if (actionItem.assignee && actionItem.assignee !== 'Unassigned') {
-      const matchedUser = await this.findUserByName(actionItem.assignee);
+      const matchedUser = await this.findUserByName(actionItem.assignee, processorWsId);
       if (matchedUser) {
         assigneeUserId = matchedUser.id;
       }
     }
 
     const actionStatus = this.config.actionStatus ?? "ACTIVE";
-    // Inherit workspaceId from the target project
-    let processorWsId: string | null = null;
-    if (this.config.projectId) {
-      const proj = await db.project.findUnique({
-        where: { id: this.config.projectId },
-        select: { workspaceId: true },
-      });
-      processorWsId = proj?.workspaceId ?? null;
-    }
 
     const actionData = {
       name,
@@ -124,11 +117,52 @@ export class InternalActionProcessor extends ActionProcessor {
     return createdAction;
   }
 
-  private async findUserByName(assigneeName: string): Promise<{ id: string; name: string } | null> {
+  /**
+   * The workspace every action from this run belongs to: the target project's,
+   * else the meeting's own. Without the meeting fallback, actions from a
+   * meeting with no project were saved with no workspace, so they missed the
+   * workspace's views and the Assign picker had no roster to offer.
+   * Resolved once per run.
+   */
+  private workspaceIdPromise: Promise<string | null> | null = null;
+  private resolveWorkspaceId(): Promise<string | null> {
+    this.workspaceIdPromise ??= (async () => {
+      if (this.config.projectId) {
+        const proj = await db.project.findUnique({
+          where: { id: this.config.projectId },
+          select: { workspaceId: true },
+        });
+        if (proj?.workspaceId) return proj.workspaceId;
+      }
+      if (this.config.transcriptionId) {
+        const session = await db.transcriptionSession.findUnique({
+          where: { id: this.config.transcriptionId },
+          select: { workspaceId: true },
+        });
+        if (session?.workspaceId) return session.workspaceId;
+      }
+      return null;
+    })();
+    return this.workspaceIdPromise;
+  }
+
+  /**
+   * Match a spoken assignee name to a user. Inside a workspace only its members
+   * are candidates: matching across every user let a meeting assign its actions
+   * to a stranger who happened to share a first name.
+   */
+  private async findUserByName(
+    assigneeName: string,
+    workspaceId: string | null,
+  ): Promise<{ id: string; name: string } | null> {
+    const memberScope = workspaceId
+      ? { workspaceMemberships: { some: { workspaceId } } }
+      : {};
     try {
       // Try exact name match first (case insensitive)
       const exactMatch = await db.user.findFirst({
         where: {
+          ...memberScope,
           name: {
             equals: assigneeName,
             mode: 'insensitive',
@@ -146,6 +180,7 @@ export class InternalActionProcessor extends ActionProcessor {
       const nameParts = assigneeName.toLowerCase().split(' ');
       const partialMatch = await db.user.findFirst({
         where: {
+          ...memberScope,
           AND: [
             { name: { not: null } },
             {
