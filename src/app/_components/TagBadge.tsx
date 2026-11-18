@@ -1,5 +1,7 @@
 import { Badge, Tooltip } from '@mantine/core';
 import { getTagMantineColor } from '~/utils/tagColors';
+import { PillarIcon } from '~/app/_components/pillars/PillarIcon';
+import { PILLAR_CATEGORY } from '~/types/tag';
 
 interface TagBadgeProps {
   tag: {
@@ -7,6 +9,8 @@ interface TagBadgeProps {
     name: string;
     slug?: string;
     color: string;
+    /** "pillar" marks a Pillar (ADR-0085), drawn with the Pillar glyph. */
+    category?: string | null;
   };
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   withTooltip?: boolean;
@@ -19,6 +23,7 @@ export function TagBadge({ tag, size = 'sm', withTooltip = false, onClick }: Tag
       size={size}
       variant="light"
       color={getTagMantineColor(tag.color)}
+      leftSection={tag.category === PILLAR_CATEGORY ? <PillarIcon size={10} aria-label="Pillar" /> : undefined}
       style={onClick ? { cursor: 'pointer' } : undefined}
       onClick={onClick ? (e) => { e.stopPropagation(); onClick(tag.id); } : undefined}
     >
@@ -38,12 +43,7 @@ export function TagBadge({ tag, size = 'sm', withTooltip = false, onClick }: Tag
 }
 
 interface TagBadgeListProps {
-  tags: Array<{
-    id: string;
-    name: string;
-    slug?: string;
-    color: string;
-  }>;
+  tags: Array<TagBadgeProps['tag']>;
   maxDisplay?: number;
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';
   onTagClick?: (tagId: string) => void;

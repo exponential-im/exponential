@@ -274,4 +274,20 @@ test.describe("Pillars", () => {
     await expect(loose.getByRole("link", { name: names.doneAction })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pillar-page-complete.png"), fullPage: true });
   });
+
+  test("the ticket label picker lists Pillars as their own group, marked", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/products/${fixture.productSlug}/tickets/${seeded.ticketId}`);
+    // The ticket already carries the Pillar: its badge carries the Pillar glyph.
+    const badge = page.getByText(names.pillar, { exact: true }).first();
+    await expect(badge).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(page.getByLabel("Pillar").first()).toBeVisible();
+
+    // The Labels property row (the first badge is the header strip).
+    await page.getByText(names.pillar, { exact: true }).filter({ visible: true }).last().click();
+    const listbox = page.getByRole("listbox");
+    await expect(listbox.getByText("Pillars", { exact: true })).toBeVisible();
+    await expect(listbox.getByText("Labels", { exact: true })).toBeVisible();
+    await expect(listbox.getByRole("option", { name: names.pillar })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("ticket-label-picker.png"), fullPage: true });
+  });
 });
