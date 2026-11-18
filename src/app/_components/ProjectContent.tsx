@@ -472,6 +472,7 @@ export function ProjectContent({
                 entityId={project.id}
                 workspaceId={workspace.id}
                 workspaceSlug={workspace.slug}
+                readOnly={!myAccess?.canEdit}
                 wrapper={(content) => (
                   <div className={overviewStyles.stat}>
                     <div className={overviewStyles.statLabel}>Pillars</div>

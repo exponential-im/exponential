@@ -467,7 +467,8 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                   entityId={String(goal.id)}
                   workspaceId={workspace.id}
                   workspaceSlug={workspace.slug}
-                  readOnly={userRole === "viewer"}
+                  // A workspace objective is written with a write role (assertCanEditGoal).
+                  readOnly={!(userRole === "owner" || userRole === "admin" || userRole === "member")}
                   wrapper={(content) => (
                     <Group gap="md" align="center">
                       <Text size="sm" className="text-text-muted">
