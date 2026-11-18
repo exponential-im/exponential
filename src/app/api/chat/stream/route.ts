@@ -35,7 +35,7 @@ import {
 } from "~/server/services/ai/providerError";
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
-import { classifyToolError, isReportableToolError, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
+import { classifyToolError, isReportableToolError, mastraResultFault, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
 import { resolveTimeZone, shouldSaveDetectedZone, timeZonePromptBlock } from "~/lib/chat/timeZoneContext";
 import {
   PER_REQUEST_COST_ALERT_USD,
@@ -935,8 +935,11 @@ export async function POST(req: Request) {
                   }
                   hadToolError = true;
                   // An output that fails the tool's own schema is a contract
-                  // fault by definition: the tool and the app disagree.
-                  if (isMastraToolFailure) {
+                  // fault by definition: the tool and the app disagree. The
+                  // same result shape also carries the model's own bad
+                  // arguments ("input validation failed"), which is a slip it
+                  // retries, not a fault to file.
+                  if (isMastraToolFailure && mastraResultFault(readString(result, 'message')) === 'output') {
                     const fault = reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
                     if (logged && fault.faultSummary) logged.faultSummary = fault.faultSummary;
                   }
