@@ -1,16 +1,25 @@
-import { notFound } from "next/navigation";
+import type { ComponentType } from "react";
+import Image from "next/image";
 import Link from "next/link";
-import { Container } from "@mantine/core";
+import { notFound } from "next/navigation";
 import { IconCheck } from "@tabler/icons-react";
-import { getFeatureBySlug, getAllFeatureSlugs } from "../_data/features";
+import {
+  getFeatureBySlug,
+  getAllFeatureSlugs,
+  type FeatureScene,
+} from "../_data/features";
 import { CTAButton } from "~/app/_components/home/shared/CTAButton";
-import { LogoDisplay } from "~/app/_components/layout/LogoDisplay";
-import { ThemeToggle } from "~/app/_components/ThemeToggle";
-import { themes } from "~/config/themes";
-import { getThemeDomain } from "~/config/site";
-import { FooterSection } from "~/app/_components/home";
+import {
+  FinalCTASection,
+  FooterSection,
+  MarketingHeader,
+} from "~/app/_components/home";
+import { GoalsScene } from "~/app/_components/home/scenes/GoalsScene";
+import { MeetingsScene } from "~/app/_components/home/scenes/MeetingsScene";
+import { Panel } from "~/app/_components/ui";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
+import { serializeJsonLd } from "~/lib/jsonLd";
 
 interface FeaturePageProps {
   params: Promise<{ slug: string }>;
@@ -30,183 +39,254 @@ export async function generateMetadata({ params }: FeaturePageProps) {
   }
 
   const url = `${getPublicBaseUrlFromEnv()}/features/${slug}`;
+  const title = `${feature.seoTitle} | ${PRODUCT_NAME}`;
+  // Share the feature's own screenshot where it has one.
+  const image = feature.screenshot
+    ? { url: `/doc-assets/${feature.screenshot.name}.png`, width: 1280, height: 800 }
+    : { url: '/og-image.png', width: 1200, height: 630 };
 
   return {
-    title: `${feature.title} | ${PRODUCT_NAME}`,
-    description: feature.description,
+    title,
+    description: feature.seoDescription,
     alternates: {
       canonical: url,
     },
     openGraph: {
       type: 'website',
-      title: `${feature.title} | ${PRODUCT_NAME}`,
-      description: feature.description,
+      title,
+      description: feature.seoDescription,
       url,
       siteName: PRODUCT_NAME,
-      images: [{ url: '/og-image.png', width: 1200, height: 630 }],
+      images: [image],
     },
     twitter: {
       card: 'summary_large_image',
-      title: `${feature.title} | ${PRODUCT_NAME}`,
-      description: feature.description,
-      images: ['/og-image.png'],
+      title,
+      description: feature.seoDescription,
+      images: [image.url],
     },
   };
 }
 
+const SCENES: Record<FeatureScene, ComponentType> = {
+  goals: GoalsScene,
+  meetings: MeetingsScene,
+};
+
 export default async function FeaturePage({ params }: FeaturePageProps) {
   const { slug } = await params;
   const feature = getFeatureBySlug(slug);
-  const domain = getThemeDomain();
-  const theme = themes[domain];
 
   if (!feature) {
     notFound();
   }
 
+  const Scene = feature.scene ? SCENES[feature.scene] : null;
+  const baseUrl = getPublicBaseUrlFromEnv();
+  const structuredData = [
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      mainEntity: feature.faqs.map((faq) => ({
+        "@type": "Question",
+        name: faq.question,
+        acceptedAnswer: { "@type": "Answer", text: faq.answer },
+      })),
+    },
+    {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      itemListElement: [
+        { "@type": "ListItem", position: 1, name: PRODUCT_NAME, item: baseUrl },
+        {
+          "@type": "ListItem",
+          position: 2,
+          name: feature.title,
+          item: `${baseUrl}/features/${feature.slug}`,
+        },
+      ],
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-background-primary text-text-primary">
-      {/* Navigation */}
-      <header className="fixed top-0 left-0 right-0 z-50 bg-background-primary/80 backdrop-blur-md border-b border-border-primary">
-        <div className="container mx-auto px-4 md:px-8">
-          <div className="flex justify-between items-center py-4">
-            <div className="flex items-center">
-              <LogoDisplay theme={theme} href="/" className="text-xl" />
-            </div>
+    <div className="mkt min-h-screen bg-background-primary text-text-primary">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(structuredData) }}
+      />
 
-            <nav className="hidden md:flex items-center space-x-8">
-              <Link
-                href="/#features"
-                className="text-text-secondary hover:text-text-primary transition-colors text-sm font-medium"
-              >
-                Features
-              </Link>
-              <Link
-                href="/#how-it-works"
-                className="text-text-secondary hover:text-text-primary transition-colors text-sm font-medium"
-              >
-                How It Works
-              </Link>
-              <Link
-                href="/#pricing"
-                className="text-text-secondary hover:text-text-primary transition-colors text-sm font-medium"
-              >
-                Pricing
-              </Link>
-            </nav>
-
-            <div className="flex items-center gap-3">
-              <CTAButton href="/signin" size="default">
-                Try For Free
-              </CTAButton>
-              <ThemeToggle />
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Spacer for fixed header */}
-      <div className="h-16" />
+      <MarketingHeader />
 
       <main>
-        {/* Hero Section */}
-        <section className="py-20 md:py-28">
-          <Container size="xl">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 lg:gap-20 items-center">
-              {/* Left: Content */}
-              <div>
-                <p className="text-accent-indigo font-medium mb-4">
-                  {feature.category}
-                </p>
-                <h1 className="text-4xl md:text-5xl lg:text-6xl font-bold text-text-primary mb-6 leading-tight">
-                  {feature.headline}
-                </h1>
-                <p className="text-lg md:text-xl text-text-secondary mb-8 leading-relaxed">
-                  {feature.description}
-                </p>
+        {/* Hero: the home page's, with this feature's copy. */}
+        <section className="relative overflow-hidden pb-16 md:pb-24">
+          <div className="mkt-container relative pt-16 md:pt-24">
+            <div className="mx-auto max-w-4xl text-center">
+              <p className="mkt-eyebrow mkt-rise mb-6">{feature.category}</p>
 
-                <CTAButton href="/signin" variant="primary" size="large">
-                  Try Now For Free
+              <h1 className="mkt-h1 mkt-rise mb-6">{feature.headline}</h1>
+
+              <p className="mkt-lead mkt-rise mx-auto mb-10 max-w-2xl">
+                {feature.description}
+              </p>
+
+              <div className="mkt-rise flex flex-col items-center justify-center gap-x-8 gap-y-5 sm:flex-row">
+                <CTAButton href="/signin" variant="pill" size="large">
+                  Get started free
                 </CTAButton>
-                <p className="text-sm text-text-muted mt-4">
-                  No credit card required
-                </p>
+                <CTAButton href="/#features" variant="text">
+                  See how it fits together
+                </CTAButton>
               </div>
+            </div>
 
-              {/* Right: Visual */}
-              <div className="relative">
-                <div
-                  className="rounded-2xl p-8 md:p-12 aspect-square flex items-center justify-center"
-                  style={{
-                    background:
-                      "linear-gradient(135deg, color-mix(in srgb, var(--color-accent-periwinkle) 10%, transparent) 0%, color-mix(in srgb, var(--color-accent-indigo) 15%, transparent) 100%)",
-                  }}
+            {/* The product itself, where a scene shows this feature. No
+                scene, no picture: a placeholder says nothing. */}
+            {Scene && (
+              <div className="mkt-rise relative mx-auto mt-16 max-w-5xl md:mt-20">
+                <Scene />
+              </div>
+            )}
+
+            {/* No scene: the real screen, from the docs screenshots. */}
+            {!Scene && feature.screenshot && (
+              <figure className="mkt-rise relative mx-auto mt-16 max-w-5xl md:mt-20">
+                <Panel radius="xl" padding="none" className="overflow-hidden">
+                  <Image
+                    src={`/doc-assets/${feature.screenshot.name}.png`}
+                    alt={feature.screenshot.alt}
+                    width={1280}
+                    height={800}
+                    sizes="(min-width: 1024px) 1024px, 100vw"
+                    className="hidden h-auto w-full dark:block"
+                  />
+                  <Image
+                    src={`/doc-assets/${feature.screenshot.name}-light.png`}
+                    alt={feature.screenshot.alt}
+                    width={1280}
+                    height={800}
+                    sizes="(min-width: 1024px) 1024px, 100vw"
+                    className="block h-auto w-full dark:hidden"
+                  />
+                </Panel>
+              </figure>
+            )}
+          </div>
+        </section>
+
+        {/* Benefits */}
+        <section className="mkt-section border-t border-border-primary">
+          <div className="mkt-container mkt-reveal">
+            <div className="mb-14 max-w-2xl">
+              <p className="mkt-eyebrow mb-4">{feature.title}</p>
+              <h2 className="mkt-h2">What you get with {feature.title}</h2>
+            </div>
+
+            <ul className="grid grid-cols-1 gap-5 md:grid-cols-2">
+              {feature.benefits.map((benefit) => (
+                <Panel
+                  as="li"
+                  key={benefit}
+                  radius="xl"
+                  padding="none"
+                  className="flex items-start gap-3 p-6"
                 >
-                  {/* Feature Icon */}
-                  <div className="text-center">
-                    <span className="text-8xl md:text-9xl">{feature.icon}</span>
-                    <p className="text-text-muted mt-6 text-lg">
-                      {feature.title}
+                  <IconCheck
+                    size={18}
+                    stroke={2}
+                    aria-hidden="true"
+                    className="mt-0.5 shrink-0 text-text-muted"
+                  />
+                  <span className="text-[0.9375rem] leading-relaxed text-text-primary">
+                    {benefit}
+                  </span>
+                </Panel>
+              ))}
+            </ul>
+          </div>
+        </section>
+
+        {/* Scene pages: the real screen too, after the benefits. */}
+        {Scene && feature.screenshot && (
+          <section className="mkt-section border-t border-border-primary">
+            <div className="mkt-container mkt-reveal">
+              <Panel
+                as="figure"
+                radius="xl"
+                padding="none"
+                className="mx-auto max-w-5xl overflow-hidden"
+              >
+                <Image
+                  src={`/doc-assets/${feature.screenshot.name}.png`}
+                  alt={feature.screenshot.alt}
+                  width={1280}
+                  height={800}
+                  sizes="(min-width: 1024px) 1024px, 100vw"
+                  className="hidden h-auto w-full dark:block"
+                />
+                <Image
+                  src={`/doc-assets/${feature.screenshot.name}-light.png`}
+                  alt={feature.screenshot.alt}
+                  width={1280}
+                  height={800}
+                  sizes="(min-width: 1024px) 1024px, 100vw"
+                  className="block h-auto w-full dark:hidden"
+                />
+              </Panel>
+            </div>
+          </section>
+        )}
+
+        {/* Depth: how it works, who it is for, how agents use it */}
+        {feature.sections.map((section) => (
+          <section
+            key={section.heading}
+            className="mkt-section border-t border-border-primary"
+          >
+            <div className="mkt-container mkt-reveal">
+              <div className="max-w-3xl">
+                <h2 className="mkt-h2 mb-6">{section.heading}</h2>
+                <div className="space-y-5">
+                  {section.body.map((paragraph) => (
+                    <p key={paragraph} className="mkt-body">
+                      {paragraph}
                     </p>
-                  </div>
+                  ))}
                 </div>
               </div>
             </div>
-          </Container>
-        </section>
+          </section>
+        ))}
 
-        {/* Benefits Section */}
-        <section className="py-16 md:py-20 bg-surface-secondary">
-          <Container size="lg">
-            <div className="text-center mb-12">
-              <h2 className="text-2xl md:text-3xl font-bold text-text-primary">
-                Why you&apos;ll love {feature.title}
-              </h2>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl mx-auto">
-              {feature.benefits.map((benefit, index) => (
-                <div
-                  key={index}
-                  className="flex items-start gap-4 bg-background-primary rounded-xl p-6 border border-border-primary"
-                >
-                  <div className="w-6 h-6 rounded-full bg-brand-success/20 flex items-center justify-center flex-shrink-0 mt-0.5">
-                    <IconCheck
-                      size={14}
-                      className="text-brand-success"
-                      stroke={2.5}
-                    />
-                  </div>
-                  <p className="text-text-primary font-medium">{benefit}</p>
+        {/* FAQ */}
+        <section className="mkt-section border-t border-border-primary">
+          <div className="mkt-container mkt-reveal">
+            <h2 className="mkt-h2 mb-10 max-w-3xl">{feature.title} FAQ</h2>
+            <div className="max-w-3xl space-y-8">
+              {feature.faqs.map((faq) => (
+                <div key={faq.question}>
+                  <h3 className="mkt-h3 mb-2">{faq.question}</h3>
+                  <p className="mkt-body">{faq.answer}</p>
                 </div>
               ))}
             </div>
-          </Container>
+
+            <h2 className="mkt-h3 mb-4 mt-16">Related</h2>
+            <ul className="flex flex-wrap gap-3">
+              {feature.related.map((link) => (
+                <li key={link.href}>
+                  <Link href={link.href} className="mkt-btn mkt-btn-ghost">
+                    {link.label}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          </div>
         </section>
 
-        {/* CTA Section */}
-        <section className="py-20 md:py-28 bg-cta-gradient">
-          <Container size="md">
-            <div className="text-center">
-              <h2 className="text-3xl md:text-4xl font-bold text-white mb-6">
-                Ready to try {feature.title}?
-              </h2>
-              <p className="text-xl text-white/80 mb-10 max-w-xl mx-auto">
-                Join teams where humans and AI coordinate as one.
-              </p>
-              <CTAButton
-                href="/signin"
-                variant="primary"
-                size="large"
-              >
-                Try Now For Free
-              </CTAButton>
-            </div>
-          </Container>
-        </section>
+        <FinalCTASection />
       </main>
 
-      {/* Footer */}
       <FooterSection />
     </div>
   );

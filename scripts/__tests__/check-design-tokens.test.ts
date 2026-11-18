@@ -1,12 +1,19 @@
-import { describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   buildReport,
   collectDefinitions,
   findRawValues,
   findScopedShapeTokens,
+  findThemeShadowLiterals,
   findUndefinedVars,
+  isHandRolledSurface,
   isTokenRadius,
   isTokenShadow,
+  loadSources,
+  stripCodeComments,
 } from "../check-design-tokens";
 
 describe("collectDefinitions", () => {
@@ -28,6 +35,55 @@ describe("collectDefinitions", () => {
       ]),
     );
     expect([...defs]).toEqual(["--color-d"]);
+  });
+
+  it("counts the variable a next/font loader declares", () => {
+    const defs = collectDefinitions(
+      new Map([["fonts.ts", "const inter = Inter({\n  subsets: ['latin'],\n  variable: '--font-inter',\n});"]]),
+    );
+    expect([...defs]).toEqual(["--font-inter"]);
+  });
+});
+
+describe("loadSources", () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it("reads tailwind.config.ts alongside src/, so a utility mapped to an undeclared variable fails", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokens-check-"));
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "src", "globals.css"), ":root { --color-error-bg: red; --accent-rgb: 1 2 3; }");
+    fs.writeFileSync(
+      path.join(dir, "tailwind.config.ts"),
+      [
+        "export default { theme: { extend: { colors: {",
+        "  error: { bg: 'var(--color-error-bg)', border: 'var(--color-error-border)' },",
+        "  accent: 'rgb(var(--accent-rgb) / <alpha-value>)',",
+        "  ghost: 'rgb(var(--ghost-rgb) / <alpha-value>)',",
+        "  fontFamily: { sans: ['var(--font-geist-sans)'] },",
+        "} } } };",
+      ].join("\n"),
+    );
+
+    const sources = loadSources(dir);
+    expect([...sources.keys()].sort()).toEqual(["src/globals.css", "tailwind.config.ts"]);
+
+    const defs = collectDefinitions(sources);
+    const out = findUndefinedVars("tailwind.config.ts", sources.get("tailwind.config.ts")!, defs);
+    expect(out.map((f) => [f.line, /var\((--[a-z-]+)\)/.exec(f.detail)?.[1]])).toEqual([
+      [2, "--color-error-border"],
+      [4, "--ghost-rgb"],
+    ]);
+  });
+
+  it("is not thrown by a checkout with no tailwind config", () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "tokens-check-"));
+    fs.mkdirSync(path.join(dir, "src"));
+    fs.writeFileSync(path.join(dir, "src", "a.css"), ".a { color: red; }");
+    expect([...loadSources(dir).keys()]).toEqual(["src/a.css"]);
   });
 });
 
@@ -104,6 +160,17 @@ describe("isTokenShadow", () => {
   });
 });
 
+describe("isHandRolledSurface", () => {
+  it("needs border, a radius step and a surface background together", () => {
+    expect(isHandRolledSurface("rounded-lg border border-border-primary bg-surface-secondary p-4")).toBe(true);
+    expect(isHandRolledSurface("mb-4 rounded-xl border border-border-secondary bg-background-primary")).toBe(true);
+    expect(isHandRolledSurface("rounded-lg border-b border-border-primary")).toBe(false);
+    expect(isHandRolledSurface("border border-border-primary bg-surface-secondary")).toBe(false);
+    expect(isHandRolledSurface("rounded-full bg-surface-muted")).toBe(false);
+    expect(isHandRolledSurface("rounded-t-lg border-2 border-border-primary bg-surface-secondary")).toBe(true);
+  });
+});
+
 describe("findRawValues", () => {
   it("reports raw CSS radius and shadow, not token-based ones", () => {
     const css = [
@@ -123,6 +190,39 @@ describe("findRawValues", () => {
     expect(findRawValues("src/styles/globals.css", "--shadow-sm: 0 1px 2px rgba(0,0,0,.1); .x { box-shadow: 0 0 0 1px rgba(0,0,0,.1) }")).toEqual([]);
   });
 
+  it("reports a hand-rolled surface in TSX, except inside the primitives folder", () => {
+    const tsx = '<div className="rounded-lg border border-border-primary bg-surface-secondary p-4" />';
+    expect(findRawValues("src/app/x.tsx", tsx).map((f) => f.kind)).toEqual(["raw-surface"]);
+    expect(findRawValues("src/app/_components/ui/Panel.tsx", tsx)).toEqual([]);
+  });
+
+  it("reports a surface built in a className expression (cx, ternary, template literal)", () => {
+    const tsx = [
+      '<div className={active ? "rounded-lg border bg-surface-secondary" : "opacity-50"} />',
+      '<div className={cx("rounded-md border", isOn && "bg-background-secondary")} />',
+      '<div className={`rounded-lg border ${x} bg-surface-primary`} />',
+      '<div className={cx("rounded-lg", "px-2")} />',
+    ].join("\n");
+    expect(findRawValues("src/app/x.tsx", tsx).map((f) => `${f.kind}@${f.line}`)).toEqual([
+      "raw-surface@1",
+      "raw-surface@2",
+      "raw-surface@3",
+    ]);
+  });
+
+  it("flags p-* in a Panel className unless padding is none", () => {
+    const tsx = [
+      '<Panel className="p-12 text-center">',
+      '<Panel padding="lg" className="px-5 py-4">',
+      '<Panel padding="none" className="p-12 text-center">',
+      '<Panel className="mb-4 text-center">',
+    ].join("\n");
+    expect(findRawValues("src/app/x.tsx", tsx).map((f) => `${f.kind}@${f.line}`)).toEqual([
+      "panel-padding-conflict@1",
+      "panel-padding-conflict@2",
+    ]);
+  });
+
   it("reports TSX style objects, arbitrary Tailwind values and numeric Mantine radius", () => {
     const tsx = [
       "const s = { borderRadius: 8, boxShadow: '0 1px 2px rgba(0,0,0,.1)' };",
@@ -140,6 +240,140 @@ describe("findRawValues", () => {
       "arbitrary-tailwind@4",
       "numeric-mantine-radius@5",
     ]);
+  });
+});
+
+describe("stripCodeComments", () => {
+  it("blanks line, trailing and block comments and keeps every line in place", () => {
+    const src = ["a: 1, // one", "// whole line", "b: 2, /* two", "   lines */ c: 3,"].join("\n");
+    const out = stripCodeComments(src);
+    expect(out.split("\n").map((l) => l.trimEnd())).toEqual(["a: 1,", "", "b: 2,", "            c: 3,"]);
+    expect(out).toHaveLength(src.length);
+  });
+
+  it("leaves comment markers inside strings alone", () => {
+    const src = "a: 'https://x.test/*y*/', b: \"it's // fine\", c: `t // ${1}`, // gone";
+    expect(stripCodeComments(src).trimEnd()).toBe(
+      "a: 'https://x.test/*y*/', b: \"it's // fine\", c: `t // ${1}`,",
+    );
+  });
+});
+
+describe("findThemeShadowLiterals", () => {
+  const config = (body: string[]) =>
+    ["export default { theme: { extend: {", ...body, "} } };"].join("\n");
+
+  it("passes a theme whose shadows are all tokens", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    none: 'none',",
+      "    sm: 'var(--shadow-sm)',",
+      "    '2xl': 'var(--shadow-xl)',",
+      "    ring: '0 0 0 3px var(--color-brand-glow)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text)).toEqual([]);
+  });
+
+  it("reports a boxShadow or dropShadow entry painted with a colour literal", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    sm: 'var(--shadow-sm)',",
+      "    card: '0 4px 6px rgba(0, 0, 0, 0.1)',",
+      "    'white': \"0 1px 2px #0003\",",
+      "  },",
+      "  dropShadow: {",
+      "    glow: ['0 0 8px var(--color-brand-glow)', '0 0 2px hsl(0 0% 0% / 0.4)'],",
+      "  },",
+    ]);
+    const out = findThemeShadowLiterals("tailwind.config.ts", text);
+    expect(out.map((f) => [f.kind, f.line, f.detail.split(" ")[0]])).toEqual([
+      ["raw-shadow", 4, "boxShadow"],
+      ["raw-shadow", 5, "boxShadow"],
+      ["raw-shadow", 8, "dropShadow"],
+    ]);
+  });
+
+  it("still pairs quotes correctly after a quoted key", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    '2xl': 'var(--shadow-xl)',",
+      "    overlay: 'var(--shadow-overlay)',",
+      "    card: '0 4px 6px rgba(0, 0, 0, 0.1)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text).map((f) => f.line)).toEqual([5]);
+  });
+
+  it("does not read a trailing comment as a value", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    sm: 'var(--shadow-sm)', // Previously '0 1px 2px rgba(0,0,0,.1)'",
+      "    md: 'var(--shadow-md)', /* was \"0 2px 4px #0003\" */",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text)).toEqual([]);
+  });
+
+  it("is not thrown by an apostrophe in a trailing comment", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    sm: 'var(--shadow-sm)', // Don't change this one",
+      "    card: '0 4px 6px rgba(0, 0, 0, 0.1)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text).map((f) => f.line)).toEqual([4]);
+  });
+
+  it("reads a shadow map whose key is quoted", () => {
+    const text = config([
+      "  'boxShadow': { card: '0 1px 2px rgba(0,0,0,.1)' },",
+      '  "dropShadow": { glow: "0 0 2px hsl(0 0% 0% / 0.4)" },',
+    ]);
+    const out = findThemeShadowLiterals("tailwind.config.ts", text);
+    expect(out.map((f) => [f.line, f.detail.split(" ")[0]])).toEqual([
+      [2, "boxShadow"],
+      [3, "dropShadow"],
+    ]);
+  });
+
+  it("checks both branches of a ternary, though the first is followed by a colon", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    card: dark ? '0 4px 6px rgba(0,0,0,.1)' : 'var(--shadow-md)',",
+      "    'lift': dark ? 'var(--shadow-lg)' : '0 8px 24px rgba(0,0,0,.35)',",
+      "    ok: dark ? 'var(--shadow-lg)' : 'var(--shadow-md)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text).map((f) => f.line)).toEqual([3, 4]);
+  });
+
+  it("does not end the map at a brace inside a string", () => {
+    const text = config([
+      "  boxShadow: {",
+      "    odd: 'var(--shadow-sm) /* } */',",
+      "    card: '0 4px 6px rgba(0, 0, 0, 0.1)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text).map((f) => f.line)).toEqual([4]);
+  });
+
+  it("ignores colour literals outside the shadow maps, in keys and in comments", () => {
+    const text = config([
+      "  // boxShadow: { old: '0 1px 2px rgba(0,0,0,.1)' },",
+      "  colors: { ink: 'rgb(var(--ink-rgb) / <alpha-value>)' },",
+      "  boxShadow: {",
+      "    /* card: '0 4px 6px rgba(0,0,0,.1)', */",
+      "    'black': 'var(--shadow-lg)',",
+      "  },",
+    ]);
+    expect(findThemeShadowLiterals("tailwind.config.ts", text)).toEqual([]);
+  });
+
+  it("fails the ratchet, because the config is not in the baseline", () => {
+    const text = config(["  boxShadow: { card: '0 4px 6px rgba(0,0,0,.1)' },"]);
+    const report = buildReport(findThemeShadowLiterals("tailwind.config.ts", text), {});
+    expect(report.regressions).toEqual([{ file: "tailwind.config.ts", count: 1, allowed: 0 }]);
   });
 });
 

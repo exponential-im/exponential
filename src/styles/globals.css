@@ -113,6 +113,22 @@
     --brand-200: #A8C5FF;
     --brand-700: #153FA8;
 
+    /* Status washes: the fill and hairline behind danger / warning chips
+       (Pill tones, the removed line in a page diff). Low-alpha layers of
+       --color-brand-error / --color-brand-warning, like --color-brand-subtle
+       above, so they sit on any surface. */
+    --color-error-bg: rgba(250, 82, 82, 0.08);
+    --color-error-border: rgba(250, 82, 82, 0.3);
+    --color-warning-bg: rgba(250, 176, 5, 0.12);
+    --color-warning-border: rgba(250, 176, 5, 0.4);
+    /* Status TEXT. The brand hues are fills: as text on a light surface
+       --color-brand-warning is 1.9:1 and --color-brand-error 3.3:1 (3.0:1 on
+       its own wash). These are the same hues darkened to about 5:1 on the
+       wash. The dark block points them back at the brand values, which
+       already read on dark surfaces. */
+    --color-error-text: color-mix(in srgb, var(--color-brand-error) 75%, black);
+    --color-warning-text: color-mix(in srgb, var(--color-brand-warning) 55%, black);
+
     /* Accents (project detail, timeline, eyebrows, cues) */
     --accent-ritual: #6B8CFF;
     --accent-meetings: #A78BFA;
@@ -120,6 +136,14 @@
     --accent-okr: #F5B94A;
     --accent-due: #F87171;
     --color-text-faint: #adb5bd;
+
+    /* An accent used as TEXT. The accents above are fills: on a white page
+       they read at 1.6:1 to 2.7:1, so labels and pills take these, darkened
+       to 4.5:1 or better (same pattern as --color-warning-text). */
+    --accent-meetings-text: color-mix(in srgb, var(--accent-meetings) 65%, black);
+    --accent-crm-text: color-mix(in srgb, var(--accent-crm) 45%, black);
+    --accent-okr-text: color-mix(in srgb, var(--accent-okr) 55%, black);
+    --accent-due-text: color-mix(in srgb, var(--accent-due) 65%, black);
 
     /* Kanban column + priority badge accents */
     --accent-neutral: #6F7F98;
@@ -347,6 +371,15 @@
     --brand-200: #A8C5FF;
     --brand-700: #153FA8;
 
+    /* Status washes - DARK themes (navy + slate). Same recipe as the light
+       block, on the dark values of the two hues. */
+    --color-error-bg: rgba(255, 107, 107, 0.12);
+    --color-error-border: rgba(255, 107, 107, 0.32);
+    --color-warning-bg: rgba(255, 212, 59, 0.1);
+    --color-warning-border: rgba(255, 212, 59, 0.3);
+    --color-error-text: var(--color-brand-error);
+    --color-warning-text: var(--color-brand-warning);
+
     /* Accents (project detail, timeline, eyebrows, cues) */
     --accent-ritual: #6B8CFF;
     --accent-meetings: #A78BFA;
@@ -354,6 +387,12 @@
     --accent-okr: #F5B94A;
     --accent-due: #F87171;
     --color-text-faint: #3F4A5C;
+
+    /* An accent used as text: on dark surfaces the accent itself reads fine. */
+    --accent-meetings-text: var(--accent-meetings);
+    --accent-crm-text: var(--accent-crm);
+    --accent-okr-text: var(--accent-okr);
+    --accent-due-text: var(--accent-due);
 
     /* Kanban column + priority badge accents */
     --accent-neutral: #6F7F98;
@@ -484,9 +523,327 @@
     --color-border-secondary: #2c2e33;
     --color-border-tertiary: #25262b;
     --color-border-overlay: #4d5157;
+    /* The dark block sets these four equal to surface-hover,
+       surface-secondary, border-secondary and border-primary. Slate has to
+       restate them, or they stay navy on a grey theme. */
+    --color-bg-hover: #373a40;
+    --color-surface-muted: #2c2e33;
+    --color-border-subtle: #2c2e33;
+    --color-border-strong: #373a40;
     --color-onboarding-illustration-bg: #2c2e33;
     --color-gradient-hero-end: #1a1b1e;
     --color-bg-nav: rgba(26, 27, 30, 0.95);
+  }
+}
+
+/* =================================================================
+   Marketing surface (`.mkt`) - the public home page
+
+   One place for the marketing look. A page opts in by putting `mkt` on
+   its root element; inside it the ordinary semantic tokens
+   (`bg-background-primary`, `text-text-muted`, `border-border-primary`)
+   resolve to the near-black, almost monochrome marketing palette, so
+   sections keep using the same Tailwind classes as the app.
+
+   Rules of the surface:
+   - Colour comes from the product, not the chrome. The brand blue is for
+     the logo, focus rings and link hover only. The primary button is a
+     light pill (`.mkt-btn-primary`), never a brand fill.
+   - One H1 style, one H2 style, one eyebrow style. Use the classes below
+     rather than Tailwind text sizes on a marketing heading.
+   - The palette below is dark-mode only. In light mode the surface keeps
+     the app's light tokens and the pill inverts by itself.
+   ================================================================= */
+:root {
+  /* Raw palette. Referenced only by the `.mkt` mapping below. */
+  --mkt-bg: #0A0B0D;
+  --mkt-bg-elevated: #111214;
+  --mkt-bg-raised: #18191C;
+  --mkt-border: rgba(255, 255, 255, 0.08);
+  --mkt-border-strong: rgba(255, 255, 255, 0.16);
+  --mkt-text: #F7F8F8;
+  --mkt-text-muted: #8A8F98;
+
+  /* The primary button: text colour as the fill, page colour as the label.
+     Declared here too so the pill works outside a `.mkt` scope. */
+  --mkt-cta-bg: var(--color-text-primary);
+  --mkt-cta-text: var(--color-bg-primary);
+}
+
+/* `body:has(.mkt)` as well as `.mkt`: Mantine portals menus and modals to
+   the body, outside the page's root element, and the feedback button sits
+   beside it. A browser without `:has()` drops this whole rule and shows the
+   page in the app's own dark palette, which is still coherent. */
+[data-mantine-color-scheme="dark"] body:has(.mkt),
+[data-mantine-color-scheme="dark"] .mkt {
+  --color-bg-primary: var(--mkt-bg);
+  --color-bg-secondary: var(--mkt-bg-elevated);
+  --color-bg-tertiary: var(--mkt-bg-raised);
+  --color-bg-elevated: var(--mkt-bg-elevated);
+  --color-surface-primary: var(--mkt-bg-elevated);
+  --color-surface-secondary: var(--mkt-bg-elevated);
+  --color-surface-tertiary: var(--mkt-bg-raised);
+  --color-surface-hover: var(--mkt-bg-raised);
+  --color-surface-muted: var(--mkt-bg-elevated);
+  --color-text-primary: var(--mkt-text);
+  --color-text-secondary: var(--mkt-text-muted);
+  --color-text-muted: var(--mkt-text-muted);
+  --color-border-primary: var(--mkt-border);
+  --color-border-secondary: var(--mkt-border);
+  --color-border-subtle: var(--mkt-border);
+  --color-border-strong: var(--mkt-border-strong);
+}
+
+/* Mantine paints the body its own grey; without this it shows on overscroll
+   and around the page on very wide screens. */
+[data-mantine-color-scheme="dark"] body:has(.mkt) {
+  background-color: var(--mkt-bg);
+}
+
+body:has(.mkt),
+.mkt {
+  /* Custom properties that hold a var() are resolved where they are
+     declared, so the ones derived from the tokens remapped above have to be
+     declared again here. */
+  --mkt-cta-bg: var(--color-text-primary);
+  --mkt-cta-text: var(--color-bg-primary);
+  --mantine-color-text: var(--color-text-primary);
+  --color-bg-nav: color-mix(in srgb, var(--color-bg-primary) 80%, transparent);
+
+  /* Inter for everything, body text included. Mantine components read the
+     variable; plain elements inherit the property. */
+  --mantine-font-family: var(--font-inter, "Inter"), ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--mantine-font-family);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.mkt-container {
+  width: 100%;
+  max-width: 75rem; /* 1200px */
+  margin-inline: auto;
+  padding-inline: 1.5rem;
+}
+
+/* 80px on a phone, 144px on a desktop. */
+.mkt-section {
+  padding-block: clamp(5rem, 3.6rem + 6vw, 9rem);
+  scroll-margin-top: 4rem;
+}
+
+/* 36px on a phone, 60px from ~1024px up. */
+.mkt-h1 {
+  font-size: clamp(2.25rem, 1.2rem + 4vw, 3.75rem);
+  font-weight: 520;
+  letter-spacing: -0.022em;
+  line-height: 1.1;
+  text-wrap: balance;
+  color: var(--color-text-primary);
+}
+
+/* 28px on a phone, 40px from ~1200px up. The same on every section. */
+.mkt-h2 {
+  font-size: clamp(1.75rem, 1.3rem + 1.6vw, 2.5rem);
+  font-weight: 520;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  text-wrap: balance;
+  color: var(--color-text-primary);
+}
+
+.mkt-h3 {
+  font-size: 1.125rem;
+  font-weight: 550;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  color: var(--color-text-primary);
+}
+
+.mkt-lead {
+  font-size: clamp(1.0625rem, 1rem + 0.35vw, 1.25rem);
+  line-height: 1.55;
+  text-wrap: pretty;
+  color: var(--color-text-muted);
+}
+
+.mkt-body {
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  text-wrap: pretty;
+  color: var(--color-text-muted);
+}
+
+.mkt-eyebrow {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.mkt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: var(--radius-full);
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 550;
+  line-height: 1.25rem;
+  white-space: nowrap;
+  transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+.mkt-btn-lg {
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  line-height: 1.5rem;
+}
+
+.mkt-btn-primary {
+  background-color: var(--mkt-cta-bg);
+  color: var(--mkt-cta-text);
+}
+
+.mkt-btn-primary:hover {
+  background-color: color-mix(in srgb, var(--mkt-cta-bg) 86%, var(--mkt-cta-text));
+}
+
+.mkt-btn-ghost {
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-text-primary);
+}
+
+.mkt-btn-ghost:hover {
+  background-color: var(--color-surface-hover);
+}
+
+/* A text link with an arrow: the secondary action next to a pill. */
+.mkt-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-weight: 500;
+  color: var(--color-text-primary);
+  transition: color 150ms ease;
+}
+
+.mkt-link:hover {
+  color: var(--color-link);
+}
+
+.mkt-btn:focus-visible,
+.mkt-link:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 3px;
+}
+
+/* A short fact in a row of facts. Not a control. */
+.mkt-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-full);
+  padding: 0.375rem 0.875rem;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  color: var(--color-text-muted);
+}
+
+/* The feature section's tab switcher: a segmented pill. */
+.mkt-tablist {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  margin-inline: auto;
+  gap: 0.25rem;
+  overflow-x: auto;
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-full);
+  padding: 0.25rem;
+}
+
+.mkt-tab {
+  border-radius: var(--radius-full);
+  padding: 0.5rem 1.125rem;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.5rem;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+.mkt-tab:hover {
+  color: var(--color-text-primary);
+}
+
+.mkt-tab[aria-selected="true"] {
+  background-color: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.mkt-tab:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+}
+
+/* Motion. All of it is opt-out: nothing below runs for a visitor who asked
+   for reduced motion, and nothing is hidden until an animation reveals it
+   unless that animation is certain to run. */
+@keyframes mkt-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes mkt-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* On load: the hero's lines arrive one after another. */
+  .mkt-rise {
+    animation: mkt-rise 600ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  }
+  .mkt-rise:nth-child(2) {
+    animation-delay: 70ms;
+  }
+  .mkt-rise:nth-child(3) {
+    animation-delay: 140ms;
+  }
+  .mkt-rise:nth-child(4) {
+    animation-delay: 210ms;
+  }
+  .mkt-rise:last-child:not(:first-child):not(:nth-child(4)) {
+    animation-delay: 280ms;
+  }
+
+  .mkt-tabpanel:not([hidden]) {
+    animation: mkt-fade 250ms ease both;
+  }
+
+  /* On scroll: a section's content rises as it enters the viewport. Driven
+     by the scroll position itself, so there is no script and nothing to
+     observe; a browser without scroll timelines shows the content as is. */
+  @supports (animation-timeline: view()) {
+    .mkt-reveal {
+      animation: mkt-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 40%;
+    }
   }
 }
 
@@ -1027,50 +1384,16 @@ body {
 .blog-content table { font-size: 1rem; line-height: 1.7; }
 
 /* ==========================================================================
-   Auth surface (/signin, /invite/[token]) - scoped design tokens
-   Consumed by src/styles/auth-surface.css. All hex lives here so the feature
-   CSS can be hex-free (pre-commit hook only allows hex in this file,
-   colors.ts, mantineTheme.ts, EmailService.ts).
+   Auth surface (/signin, /invite/[token], /setup, /auth/verify-request) -
+   the few values only these pages need. Consumed by src/styles/auth-surface.css.
+
+   The pages carry no palette of their own: each root is `auth-surface mkt`,
+   so backgrounds, borders and text are the home page palette (see "Marketing
+   surface" above) and brand and accent colours are the shared tokens. All hex
+   lives here so the feature CSS can be hex-free (pre-commit hook only allows
+   hex in this file, colors.ts, mantineTheme.ts, EmailService.ts).
    ========================================================================== */
 .auth-surface {
-  /* Backgrounds */
-  --color-bg-primary: #0B0F17;
-  --color-bg-secondary: #10151F;
-  --color-bg-elevated: #141B27;
-  --color-bg-hover: #1A2230;
-  --color-bg-overlay: rgba(5, 8, 13, 0.72);
-
-  /* Surfaces */
-  --color-surface-muted: #161D2A;
-  --color-surface-raised: #1C2433;
-
-  /* Borders */
-  --color-border-primary: #1F2A3C;
-  --color-border-subtle: #172030;
-  --color-border-strong: #2A3850;
-
-  /* Text */
-  --color-text-primary: #E6ECF5;
-  --color-text-secondary: #96A2B5;
-  --color-text-muted: #5E6A7E;
-  --color-text-faint: #3F4A5C;
-
-  /* Brand scale */
-  --brand-50: #EEF3FF;
-  --brand-200: #A8C5FF;
-  --brand-400: #4E89FF;
-  --brand-500: #1F5DE0;
-  --brand-600: #1A4EC4;
-  --brand-700: #153FA8;
-
-  /* Accents */
-  --accent-ritual: #6B8CFF;
-  --accent-knowledge: #5AC8E0;
-  --accent-meetings: #A78BFA;
-  --accent-crm: #4ADE8C;
-  --accent-okr: #F5B94A;
-  --accent-due: #F87171;
-
   /* Avatar gradient presets */
   --invite-avatar-a1: linear-gradient(135deg, #F59E7E, #C73E9A);
   --invite-avatar-a2: linear-gradient(135deg, #8B7EE8, #5AC8E0);
@@ -1136,18 +1459,19 @@ body {
 /* ==========================================================================
    Today desktop surface (/today, redesigned shell) - scoped design tokens.
    Consumed by src/app/_components/today-redesign/today-desktop.css.
-   Mirrors auth-surface / portfolio-review-surface: all hex lives here, the
+   Mirrors the auth-surface pattern: all hex lives here, the
    feature CSS uses only var(). Pre-commit hook only allows hex in this file,
    colors.ts, mantineTheme.ts, EmailService.ts.
    ========================================================================== */
 .today-surface {
   /* Core */
-  --td-accent: #F4B96A;
-  --td-accent-04: rgba(244, 185, 106, 0.04);
-  --td-accent-10: rgba(244, 185, 106, 0.10);
-  --td-accent-12: rgba(244, 185, 106, 0.12);
-  --td-accent-30: rgba(244, 185, 106, 0.30);
-  --td-accent-40: rgba(244, 185, 106, 0.40);
+  /* The page's interactive accent (focus, selection, the now line, links) is
+     the shared brand blue, read straight from --brand-400 / --color-link in
+     today-desktop.css. Amber is one decorative tone: pipeline tags and the
+     agenda's non-calendar blocks. It also means "high priority" (--td-prio-p2),
+     which is why it is not the accent. */
+  --td-amber: #F4B96A;
+  --td-amber-10: rgba(244, 185, 106, 0.10);
 
   /* Page background tracks the global theme so /today matches the rest of
      the workspace shell (workspace pages use --color-bg-primary). */
@@ -1183,9 +1507,9 @@ body {
   --td-tag-unas-bg: rgba(140, 140, 170, 0.10);
   --td-tag-unas-dot: #9292B0;
 
-  --td-tag-pipe-fg: var(--td-accent);
-  --td-tag-pipe-bg: var(--td-accent-10);
-  --td-tag-pipe-dot: var(--td-accent);
+  --td-tag-pipe-fg: var(--td-amber);
+  --td-tag-pipe-bg: var(--td-amber-10);
+  --td-tag-pipe-dot: var(--td-amber);
 
   /* Priority - encodes the checkbox ring color.
      Solid = priority hue. Dim = resting ring (~55-65% alpha).
@@ -1222,7 +1546,7 @@ body {
   --td-prio-low:        #7A8294;
   --td-prio-low-dim:    rgba(122, 130, 148, 0.55);
 
-  /* Agenda blue tone (non-amber events) */
+  /* Agenda blue tone (calendar events; other blocks use --td-amber) */
   --td-event-blue-bg: rgba(140, 170, 210, 0.12);
   --td-event-blue-border: #7C9BD0;
   --td-event-blue-title: #9DB5D8;
@@ -1243,12 +1567,8 @@ body {
    contrast on a white page. */
 [data-mantine-color-scheme="light"] .today-surface {
   /* Core */
-  --td-accent: #B9791E;
-  --td-accent-04: rgba(185, 121, 30, 0.05);
-  --td-accent-10: rgba(185, 121, 30, 0.10);
-  --td-accent-12: rgba(185, 121, 30, 0.12);
-  --td-accent-30: rgba(185, 121, 30, 0.30);
-  --td-accent-40: rgba(185, 121, 30, 0.40);
+  --td-amber: #B9791E;
+  --td-amber-10: rgba(185, 121, 30, 0.10);
 
   --td-sidebar: #f8f9fa;
   --td-surface: #f8f9fa;
@@ -1320,58 +1640,9 @@ body {
 }
 
 /* ==========================================================================
-   Portfolio review surface (/weekly-plan) - scoped design tokens.
-   Consumed by src/app/(sidemenu)/weekly-plan/_styles/portfolio-review.css.
-   Mirrors the auth-surface pattern: all hex lives here, feature CSS uses var().
-   ========================================================================== */
-.portfolio-review-surface,
-.pr-modal-surface {
-  /* Background scale (matches the dark slate the designer used) */
-  --pr-bg-primary: #0B0F17;
-  --pr-bg-secondary: #10151F;
-  --pr-bg-elevated: #141B27;
-  --pr-bg-hover: #1A2230;
-
-  /* Surfaces */
-  --pr-surface-muted: #161D2A;
-  --pr-surface-raised: #1C2433;
-
-  /* Borders */
-  --pr-border-primary: #1F2A3C;
-  --pr-border-subtle: #172030;
-  --pr-border-strong: #2A3850;
-
-  /* Text */
-  --pr-text-primary: #E6ECF5;
-  --pr-text-secondary: #96A2B5;
-  --pr-text-muted: #5E6A7E;
-  --pr-text-faint: #3F4A5C;
-
-  /* Brand scale */
-  --pr-brand-200: #A8C5FF;
-  --pr-brand-400: #4E89FF;
-  --pr-brand-500: #1F5DE0;
-  --pr-brand-600: #1A4EC4;
-
-  /* Semantic accents (KR confidence buckets, health) */
-  --pr-on-track: #4ADE8C;
-  --pr-at-risk: #F5B94A;
-  --pr-off-track: #F87171;
-  --pr-no-update: #5E6A7E;
-
-  /* Workspace glyph palette (deterministic by index) */
-  --pr-ws-1: #4E89FF;
-  --pr-ws-2: #A78BFA;
-  --pr-ws-3: #5AC8E0;
-  --pr-ws-4: #F5B94A;
-  --pr-ws-5: #4ADE8C;
-  --pr-ws-6: #9CA3B5;
-}
-
-/* ==========================================================================
    App sidebar (left nav) - scoped design tokens.
    Consumed by src/app/_components/layout/sidebar.css.
-   Mirrors the today-surface / portfolio-review-surface pattern: all hex lives
+   Mirrors the today-surface pattern: all hex lives
    here, the feature CSS uses only var(). Dark-only design.
    ========================================================================== */
 .app-sidebar {
@@ -1452,71 +1723,23 @@ body {
 }
 
 /* ==========================================================================
-   Coaching home surface (workspace home, homeLayout === 'coaching') -
-   scoped design tokens. Consumed by
-   src/app/_components/home/coaching-home.css. Mirrors auth-surface pattern:
-   all hex lives here, feature CSS uses var() exclusively. Pre-commit hook
-   only allows hex in this file, colors.ts, mantineTheme.ts, EmailService.ts.
+   Coaching home surface (workspace home, homeLayout === 'coaching') - the few
+   values only this page needs. Consumed by
+   src/app/_components/home/coaching-home.css.
+
+   The page carries no palette of its own: backgrounds, borders, text, brand
+   and accents are the shared tokens, so it follows the light and dark themes,
+   and washes are built from the -rgb triplets. All hex lives here (pre-commit
+   hook only allows hex in this file, colors.ts, mantineTheme.ts,
+   EmailService.ts).
    ========================================================================== */
 .coaching-home {
-  /* Backgrounds */
-  --ch-bg-primary: #0B0F17;
-  --ch-bg-secondary: #10151F;
-  --ch-bg-elevated: #141B27;
-  --ch-bg-hover: #1A2230;
-  --ch-surface-muted: #161D2A;
-
-  /* Borders */
-  --ch-border-primary: #1F2A3C;
-  --ch-border-subtle: #172030;
-  --ch-border-strong: #2A3850;
-
-  /* Text */
-  --ch-text-primary: #E6ECF5;
-  --ch-text-secondary: #96A2B5;
-  --ch-text-muted: #5E6A7E;
-  --ch-text-faint: #3F4A5C;
-
-  /* Brand + accents (same palette as auth-surface and the design handoff) */
-  --ch-brand-400: #4E89FF;
-  --ch-brand-500: #1F5DE0;
-  --ch-brand-700: #153FA8;
-  --ch-accent: #A78BFA;          /* primary page accent (violet) */
-  --ch-accent-knowledge: #5AC8E0;
-  --ch-accent-meetings: #A78BFA;
-  --ch-accent-crm: #4ADE8C;      /* on-track / success */
-  --ch-accent-okr: #F5B94A;      /* at-risk / amber */
-  --ch-accent-due: #F87171;      /* off-track / error */
-  --ch-accent-ritual: #6B8CFF;
-  --ch-accent-neutral: #9CA3B5;
-  --ch-accent-spirit: #C7B6FF;
-
-  /* Translucent washes used by the hero gradient + status pills */
-  --ch-accent-violet-04: rgba(167, 139, 250, 0.04);
-  --ch-accent-violet-08: rgba(167, 139, 250, 0.08);
-  --ch-accent-violet-10: rgba(167, 139, 250, 0.10);
-  --ch-accent-violet-12: rgba(167, 139, 250, 0.12);
-  --ch-accent-violet-14: rgba(167, 139, 250, 0.14);
-  --ch-accent-violet-18: rgba(167, 139, 250, 0.18);
-  --ch-accent-violet-22: rgba(167, 139, 250, 0.22);
-  --ch-accent-violet-45: rgba(167, 139, 250, 0.45);
-  --ch-accent-violet-70: rgba(167, 139, 250, 0.70);
-  --ch-accent-amber-07: rgba(245, 185, 74, 0.07);
-  --ch-accent-amber-08: rgba(245, 185, 74, 0.08);
-  --ch-accent-amber-10: rgba(245, 185, 74, 0.10);
-  --ch-accent-amber-22: rgba(245, 185, 74, 0.22);
-  --ch-accent-amber-45: rgba(245, 185, 74, 0.45);
-  --ch-accent-green-10: rgba(74, 222, 140, 0.10);
-  --ch-accent-green-14: rgba(74, 222, 140, 0.14);
-  --ch-accent-green-16: rgba(74, 222, 140, 0.16);
-  --ch-accent-green-22: rgba(74, 222, 140, 0.22);
-  --ch-accent-red-10: rgba(248, 113, 113, 0.10);
-  --ch-accent-red-22: rgba(248, 113, 113, 0.22);
-  --ch-accent-blue-18: rgba(78, 137, 255, 0.18);
-  --ch-brand-shadow: rgba(167, 139, 250, 0.65);
+  /* Near-black label on the violet primary button, in both themes. */
+  --ch-cta-text: #0B0F17;
 
   /* Shadows */
-  --ch-cta-glow: 0 10px 22px -10px var(--ch-brand-shadow);
+  --ch-cta-glow: 0 10px 22px -10px rgb(var(--accent-meetings-rgb) / 0.65);
+  --ch-pulse: rgb(var(--accent-meetings-rgb) / 0.45);
 
   /* Type */
   --ch-font-sans: var(--font-inter, "Inter"), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -1526,39 +1749,14 @@ body {
 }
 
 /*
-   Activity-dashboard scoped tokens.
-   All --activity-* CSS variables live here so the no-hardcoded-color rule can
-   be satisfied in components by referencing var(--activity-*). Mirrors the
-   coaching-home pattern above.
+   Activity dashboard: the one colour it does not share.
+   Its accents, washes and heatmap stops are the shared --accent-* and
+   --brand-400 tokens (activity-home.css builds the washes from the -rgb
+   triplets). Only the near-black that sits on the gold milestone chip has no
+   shared equivalent, so it is declared here.
 */
 .activity-layout {
-  /* Heatmap alpha stops - brand blue, used by the contribution-graph cells. */
-  --activity-heatmap-l1: rgba(78, 137, 255, 0.18);
-  --activity-heatmap-l2: rgba(78, 137, 255, 0.34);
-  --activity-heatmap-l3: rgba(78, 137, 255, 0.58);
-  --activity-heatmap-l4: rgba(78, 137, 255, 0.85);
-
-  /* Section accents - reuse the coaching palette to keep both home layouts
-     visually coherent (same accent meanings, e.g. crm-green = success). */
-  --activity-accent-ritual: #6B8CFF;
-  --activity-accent-knowledge: #5AC8E0;
-  --activity-accent-meetings: #A78BFA;
-  --activity-accent-crm: #4ADE8C;
-  --activity-accent-okr: #F5B94A;
-  --activity-accent-due: #F87171;
-
-  /* Translucent washes for delta pills and tinted icon backgrounds. */
-  --activity-accent-crm-soft: rgba(74, 222, 140, 0.10);
-  --activity-accent-crm-border: rgba(74, 222, 140, 0.22);
-  --activity-accent-due-soft: rgba(248, 113, 113, 0.10);
-  --activity-accent-due-border: rgba(248, 113, 113, 0.22);
-
-  /* Milestone (project-completed) accent - celebratory gold. Filled chip plus a
-     soft wash so completed-project rows stand out from routine task churn. */
-  --activity-accent-milestone: #F5B94A;
   --activity-accent-milestone-contrast: #1A1300;
-  --activity-accent-milestone-soft: rgba(245, 185, 74, 0.12);
-  --activity-accent-milestone-border: rgba(245, 185, 74, 0.34);
 }
 
 /* Pulsing dot used by active-timer indicators (sidebar widget, action surfaces,
@@ -1599,6 +1797,65 @@ body {
 }
 .prd-document img.prd-image {
   margin: 0.5rem 0;
+}
+
+/* Underline, strike and highlight (the bubble menu's marks) and the divider,
+   in the editor and on the public render alike. Preflight leaves `u`/`s`
+   decorations alone, but `mark`'s UA yellow ignores the theme and is
+   unreadable in dark mode, so it gets a token-derived wash instead.
+
+   Same amber token as the comment highlight above, at highlighter strength
+   rather than that wash's 22%, and without its underline: one is a
+   formatting choice, the other means "there is a thread here", and the two
+   must not read alike. */
+.prd-document u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prd-document s {
+  text-decoration: line-through;
+}
+.prd-document mark {
+  background-color: color-mix(in srgb, var(--color-brand-warning) 45%, transparent);
+  color: inherit;
+  border-radius: var(--radius-xs);
+  padding: 0 0.1em;
+}
+.prd-document hr {
+  margin: 1.25rem 0;
+  border: 0;
+  border-top: 1px solid var(--color-border-primary);
+}
+/* The divider is a leaf node: show that it is selected (for delete/drag). */
+.prd-document .ProseMirror hr.ProseMirror-selectednode {
+  border-top-color: var(--color-brand-primary);
+  box-shadow: 0 0 0 1px var(--color-brand-primary);
+}
+
+/* YouTube embeds (youtube-node.ts): a 16:9 player. In the editor the wrapper
+   gets a thin frame so there is something outside the iframe to click, which
+   selects the block for dragging or deleting. */
+.prd-document .prd-youtube {
+  margin: 0.75rem 0;
+  max-width: 100%;
+}
+.prd-document .prd-youtube iframe {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--color-bg-secondary);
+}
+.prd-document .ProseMirror .prd-youtube {
+  padding: 0.25rem;
+  border: 1px solid var(--color-border-primary);
+  border-radius: var(--radius-lg);
+  cursor: grab;
+}
+.prd-document .ProseMirror .prd-youtube.ProseMirror-selectednode {
+  border-color: var(--color-brand-primary);
+  box-shadow: 0 0 0 1px var(--color-brand-primary);
 }
 
 /* PRD body lists - visible markers + Linear-style spacing.
@@ -1836,4 +2093,80 @@ body {
 .knowledge-page .prd-document > :first-child,
 .knowledge-page .prd-document .ProseMirror > :first-child {
   margin-top: 0;
+}
+
+/* ==========================================================================
+   Print: "Export ▸ Print / Save as PDF" on a Page
+   ==========================================================================
+   The browser's print dialog is the whole PDF export: no server render, no
+   second layout to keep in sync. What it needs is the reading column alone,
+   so this strips the app chrome and lets the column use the sheet.
+
+   Two ways in, deliberately: `[data-print="hide"]` is the explicit opt-out a
+   component sets on itself (the workspace topbar, the page bar, the outline,
+   Activity, Zoe), and the short selector list below covers the sidebar and
+   the floating layers that live in portals outside any of those subtrees.
+   Anything unmarked prints. */
+@media print {
+  [data-print="hide"],
+  .app-sidebar,
+  .sb-toggle,
+  .mantine-Menu-dropdown,
+  .mantine-Popover-dropdown,
+  .mantine-Modal-root,
+  .mantine-Notifications-root,
+  .mantine-Tooltip-tooltip {
+    display: none !important;
+  }
+
+  /* Paper is light whatever the app's scheme is, so pull the tokens the
+     reading column reads back to ink on paper. Keywords and color-mix rather
+     than the light palette's literals: one place to be wrong, not two. */
+  [data-mantine-color-scheme="dark"] {
+    --color-bg-primary: white;
+    --color-bg-secondary: white;
+    --color-bg-tertiary: white;
+    --color-bg-elevated: white;
+    --color-surface-primary: white;
+    --color-surface-secondary: white;
+    --color-surface-tertiary: white;
+    --color-text-primary: black;
+    --color-text-secondary: color-mix(in srgb, black 65%, white);
+    --color-text-muted: color-mix(in srgb, black 55%, white);
+    --color-border-primary: color-mix(in srgb, black 25%, white);
+    --color-border-secondary: color-mix(in srgb, black 15%, white);
+  }
+
+  html,
+  body {
+    background: white;
+    height: auto;
+  }
+
+  /* The shell reserves a gutter for the (now hidden) sidebar. Only that goes:
+     <main>'s own padding is cancelled by the workspace wrapper's negative
+     bleed margin, so zeroing it too would drag the column off the sheet.
+     No transition: on screen the gutter animates (transition-all), which
+     would leave it mid-slide in the print snapshot. */
+  .sidebar-offset {
+    transition: none !important;
+    margin-left: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+  }
+
+  /* On screen the reading column is centred and capped (max-w-3xl) under a
+     band of air; the sheet has its own margins, so use the full text block
+     and start at the top. */
+  [data-print="column"] {
+    max-width: none !important;
+    width: 100% !important;
+    padding-top: 0 !important;
+  }
+
+  /* Links keep their text but lose the on-screen colour, which prints grey. */
+  a {
+    color: inherit !important;
+    text-decoration: none !important;
+  }
 }

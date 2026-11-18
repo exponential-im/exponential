@@ -67,14 +67,17 @@ export {
 // Resolvers (for direct use when needed)
 export {
   getWorkspaceMembership,
+  getWorkspaceRoles,
   filterWorkspaceMembers,
   assertWorkspaceRole,
   assertWorkspaceMembership,
   assertWorkspaceWriteRole,
+  resolveWritableWorkspace,
   canEditWorkspaceContent,
   isWorkspaceOwner,
   isWorkspaceGuest,
   buildWorkspaceAccessWhere,
+  buildWorkspaceWriteWhere,
   buildWorkspaceVisibilityWhere,
 } from "./resolvers/workspaceResolver";
 export { getTeamMembership, getUserTeams } from "./resolvers/teamResolver";
@@ -85,8 +88,21 @@ export {
   canEditProject,
   canManageProjectMembers,
   buildProjectAccessWhere,
+  buildProjectInsiderWhere,
   buildProjectEditWhere,
+  buildWorkspaceProjectAccessWhere,
 } from "./resolvers/projectResolver";
+export {
+  buildCycleAccessWhere,
+  buildFeatureAccessWhere,
+  buildTicketAccessWhere,
+  buildTicketWriteWhere,
+} from "./resolvers/ticketResolver";
+export {
+  buildSharedResourceWhere,
+  listSharedResourceProjectIds,
+  resourceOwnerInWorkspaceWhere,
+} from "./resolvers/resourceResolver";
 export { projectAccessDeniedError, type ProjectDeniedAction } from "./projectDenial";
 export {
   getActionAccess,
@@ -123,6 +139,9 @@ export {
   buildKnowledgePageAccessWhere,
   listKnowledgePageViewers,
   canManageKnowledgePageAccess,
+  canShareKnowledgePage,
+  canGrantKnowledgePageRole,
+  canChangeKnowledgePageGrant,
   isKnowledgePageInviteRole,
 } from "./resolvers/knowledgePageResolver";
 export type {
@@ -130,6 +149,15 @@ export type {
   KnowledgePageViewer,
   KnowledgePageInviteRole,
 } from "./resolvers/knowledgePageResolver";
+
+export {
+  assertCanEditGoal,
+  assertCanEditKeyResult,
+} from "./resolvers/goalResolver";
+export type {
+  GoalWriteSubject,
+  KeyResultWriteSubject,
+} from "./resolvers/goalResolver";
 
 // Cross-workspace link guards (epic/feature/cycle/scope foreign keys)
 export { assertWorkspaceScopedRefs } from "./workspaceRefs";

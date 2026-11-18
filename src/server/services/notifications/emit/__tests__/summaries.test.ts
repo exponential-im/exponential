@@ -4,8 +4,10 @@ import type { PrismaClient } from "@prisma/client";
 
 import { generateScheduledSummaries } from "~/server/services/notifications/emit/summaries";
 import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
+import { buildContent } from "~/server/services/notifications/emit/content";
 import type { CalendarReader } from "~/server/services/notifications/emit/dailySummary";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
+import { myPlateActionsWhere } from "~/server/services/actions/myActionsWhere";
 
 vi.mock("~/server/services/notifications/emit/emitNotification", () => ({
   emitNotification: vi.fn().mockResolvedValue(undefined),
@@ -240,21 +242,14 @@ describe("generateScheduledSummaries — daily summary digest", () => {
     expect(subject.message).not.toMatch(/\*\*|\]\(/);
   });
 
-  it("queries the same ownership set as action.getTodaysActions, cross-workspace", async () => {
+  it("queries the same set as action.getTodaysActions, cross-workspace", async () => {
     db.action.findMany.mockResolvedValue([] as never);
 
     await emittedDailySubject();
 
+    // Ownership, ACTIVE, not in a paused project; no workspace scope.
     expect(db.action.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: {
-          OR: [
-            { createdById: "u1", assignees: { none: {} } },
-            { assignees: { some: { userId: "u1" } } },
-          ],
-          status: "ACTIVE",
-        },
-      }),
+      expect.objectContaining({ where: myPlateActionsWhere("u1") }),
     );
   });
 
@@ -657,7 +652,7 @@ describe("generateScheduledSummaries — shutdown recap", () => {
   beforeEach(() => {
     recapMocks.buildShutdownRecap.mockResolvedValue(recap);
     recapMocks.narrateRecapOpening.mockResolvedValue("A good day, Ada.");
-    db.notification.findFirst.mockResolvedValue(null);
+    db.notification.findMany.mockResolvedValue([]);
   });
 
   it("emits the recap at the chosen local time on a weekday, with the reply context for Matrix", async () => {
@@ -695,12 +690,16 @@ describe("generateScheduledSummaries — shutdown recap", () => {
 
   it("does not rebuild (or re-narrate) a recap already sent today", async () => {
     db.notificationPreference.findMany.mockResolvedValue([recapPref()] as never);
-    db.notification.findFirst.mockResolvedValue({ id: "n1" } as never);
+    db.notification.findMany.mockResolvedValue([
+      { userId: "u1", dedupeKey: "summary:shutdown:2026-10-08" },
+    ] as never);
 
     await generateScheduledSummaries(db, new Date("2026-10-08T16:20:00.000Z"));
 
-    expect(db.notification.findFirst).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { userId: "u1", dedupeKey: "summary:shutdown:2026-10-08" } }),
+    expect(db.notification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: { in: ["u1"] }, dedupeKey: { in: ["summary:shutdown:2026-10-08"] } },
+      }),
     );
     expect(recapMocks.buildShutdownRecap).not.toHaveBeenCalled();
     expect(recapMocks.narrateRecapOpening).not.toHaveBeenCalled();
@@ -716,6 +715,49 @@ describe("generateScheduledSummaries — shutdown recap", () => {
     expect(subject.kind).toBe("shutdown");
     expect(subject).not.toHaveProperty("replyHint");
     expect(subject).not.toHaveProperty("agentContext");
+  });
+
+  it("checks every recap-due user's sent state in one query, not one per user", async () => {
+    db.notificationPreference.findMany.mockResolvedValue(
+      ["u1", "u2", "u3", "u4", "u5"].map((userId) => recapPref({ userId })) as never,
+    );
+    db.notification.findMany.mockResolvedValue([
+      { userId: "u2", dedupeKey: "summary:shutdown:2026-10-08" },
+      // Same user, another day's recap: not this period's, so u3 still gets one.
+      { userId: "u3", dedupeKey: "summary:shutdown:2026-10-07" },
+    ] as never);
+
+    await generateScheduledSummaries(db, new Date("2026-10-08T16:04:00.000Z"));
+
+    expect(db.notification.findMany).toHaveBeenCalledTimes(1);
+    expect(db.notification.findFirst).not.toHaveBeenCalled();
+    const built = recapMocks.buildShutdownRecap.mock.calls.map((call) => call[1]);
+    expect(built).toEqual(["u1", "u3", "u4", "u5"]);
+  });
+
+  it("looks up exactly the dedupe key the emitted recap is stored under", async () => {
+    db.notificationPreference.findMany.mockResolvedValue([recapPref()] as never);
+
+    await generateScheduledSummaries(db, new Date("2026-10-08T16:04:00.000Z"));
+
+    const where = db.notification.findMany.mock.calls[0]![0]!.where as { dedupeKey: { in: string[] } };
+    const emitted = vi.mocked(emitNotification).mock.calls[0]![0];
+    const content = await buildContent(emitted, "u1");
+    expect(where.dedupeKey.in).toEqual([content!.dedupeKey]);
+  });
+
+  it("skips recaps for the tick, and reports it, when the sent-state lookup fails", async () => {
+    db.notificationPreference.findMany.mockResolvedValue([recapPref()] as never);
+    db.notification.findMany.mockRejectedValue(new Error("db down"));
+
+    const result = await generateScheduledSummaries(db, new Date("2026-10-08T16:04:00.000Z"));
+
+    expect(result.emitted).toBe(0);
+    expect(recapMocks.buildShutdownRecap).not.toHaveBeenCalled();
+    expect(reportHandledErrorServer).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({ area: "scheduled-summaries" }),
+    );
   });
 
   it("leaves recaps for the next tick once the tick's budget is spent", async () => {

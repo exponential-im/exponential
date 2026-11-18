@@ -44,9 +44,11 @@ model Resource {
   id          String    @id @default(cuid())
   title       String
   description String?
-  url         String?                          // Source URL
+  url         String?                          // Address it was last saved from (what its link opens)
+  identity    String?                          // What a save is matched by; see src/lib/resources/identity.ts
   rawContent  String?                          // Original HTML/content
   content     String?                          // Cleaned text
+  pageText    String?                          // Visible text of a page with no article body: indexed, never rendered
   contentType String    @default("web_page")   // web_page | document | pdf | bookmark | note
   mimeType    String?
   author      String?
@@ -102,7 +104,9 @@ For Railway/Supabase/Neon, pgvector is pre-installed. Just run the migration.
 | `resource.create` | mutation | Create a new resource with optional auto-embedding |
 | `resource.get` | query | Get a single resource by ID |
 | `resource.list` | query | List resources with filters (project, workspace, tags, search) |
+| `resource.identities` | query | Identity, title, project and owner of every Resource the caller can see, paged by cursor. Takes no URL: clients match "already saved?" locally |
 | `resource.update` | mutation | Update a resource |
+| `resource.unfile` | mutation | Take a resource out of its project, back to its owner unshared. The owner, or anyone who can edit the project |
 | `resource.archive` | mutation | Soft delete a resource |
 | `resource.unarchive` | mutation | Restore an archived resource |
 | `resource.delete` | mutation | Permanently delete a resource and its embeddings |
@@ -113,7 +117,7 @@ For Railway/Supabase/Neon, pgvector is pre-installed. Just run the migration.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `mastra.queryMeetingContext` | mutation | Semantic search across all knowledge (transcriptions + resources) |
+| `mastra.queryMeetingContext` | query | Semantic search across knowledge, `workspaceId` required. The caller's own pages, resources and documents, plus every Meeting they can view (a Meeting imported by an agent or a teammate carries the importer's `userId` on its chunks, so Meetings are scoped by the viewer rule, not by chunk owner). `transcriptionId` searches inside one Meeting. Behind the agent's `query-meeting-context` tool and the Knowledge Base search box |
 | `mastra.backfillTranscriptionEmbeddings` | mutation | Generate embeddings for existing transcriptions |
 | `mastra.getEmbeddingStats` | query | Get statistics on embedding coverage |
 
@@ -239,6 +243,25 @@ const { resource } = await api.resource.create.mutate({
   generateEmbeddings: true, // auto-embed
 });
 ```
+
+A save with a `url` is matched against the caller's Resources by the page's **identity**
+(`pageIdentity` in `src/lib/resources/identity.ts`), not the raw URL: the same page saved from
+another address (other dates, a tracking parameter) updates the one Resource, and `url` becomes
+the address of the latest save. A client that can see the page may pass `declaredUrl` (its
+`og:url` or canonical link); it is used for matching only, and ignored unless it names the same
+host and path as `url`.
+
+A Project lists a page once. Saving a page under a Project where someone else's Resource with
+the same identity is already filed files nothing there: a save for reference is refused with
+`CONFLICT` and `error.data.alreadyInProject` (`{ resourceId, title, projectId, owner }`), and a
+save that asks for the Reading list succeeds with the caller's own Resource, no Project, and the
+same object as `alreadyInProject` in the response. `resource.update` refuses such a move the
+same way.
+
+A page that is not an article (a listing, a search, a dashboard) can be saved with `pageText`
+in place of `rawContent`. It is stored apart from the body, cut at 100,000 characters, indexed
+when `generateEmbeddings` is on, and never returned by `resource.get`, so no reader renders it.
+A save that carries a body as well keeps the body and stores no Page text.
 
 ### Semantic Search
 
@@ -381,7 +404,8 @@ Prisma's shadow database doesn't have pgvector. Solutions:
 
 The `queryMeetingContext` endpoint has graceful fallback:
 1. Attempts vector search using KnowledgeService
-2. If vector search fails (e.g., no embeddings), falls back to keyword search
-3. Returns results in consistent format either way
+2. Falls back to keyword search over transcript text when vector search fails (e.g., no embeddings provider), or when a search inside one Meeting (`transcriptionId`) finds no chunks: that Meeting may not be embedded yet, or may have no workspace, and the workspace-scoped vector search cannot return it
+3. The fallback is scoped like the vector path: Meetings the caller can view (`buildTranscriptionAccessWhere`), in this workspace or with none
+4. Returns results in consistent format either way
 
 This ensures the system works before embeddings are generated while providing better results once they're available.

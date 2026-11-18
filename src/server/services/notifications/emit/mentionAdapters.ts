@@ -1,13 +1,17 @@
 import type { PrismaClient } from "@prisma/client";
+import { buildPageEditorPath } from "~/lib/pages/page-path";
 import { emitNotification } from "./emitNotification";
+import { reportEmitFailure } from "./emitAfterResponse";
 import { NOTIFICATION_CATEGORIES } from "./constants";
 import type { MentionSubject } from "./types";
 
 /**
- * Fire-and-forget adapters that resolve a comment's target to a mention subject
+ * Adapters that resolve a comment's target to a mention subject
  * and emit through the unified pipeline (ADR-0045). Kept separate from
  * `mention.ts` (the resolver/content, imported by the emit core) so the emit
- * core stays a leaf with no cycle back through `emitNotification`.
+ * core stays a leaf with no cycle back through `emitNotification`. They never
+ * throw and report their own failures; request paths run them through
+ * `emitAfterResponse` rather than `void`ing them.
  */
 
 /** Resolve an action's workspace (directly or via its project) plus its name. */
@@ -57,14 +61,18 @@ export async function emitActionCommentMention(
       targetPath: `/w/${target.workspaceSlug}/actions/${params.actionId}`,
     };
 
-    await emitNotification({
+    const notified = await emitNotification({
       category: NOTIFICATION_CATEGORIES.MENTION,
       actorUserId: params.commentAuthorId,
       subject,
       db,
     });
+    if (notified === null) {
+      await reportEmitFailure(new Error("action comment mention emit failed"), "notifications.mention.actionComment", { commentId: params.commentId });
+    }
   } catch (error) {
     console.error("[emit/mentionAdapters] action comment mention failed:", error);
+    await reportEmitFailure(error, "notifications.mention.actionComment", { commentId: params.commentId });
   }
 }
 
@@ -176,14 +184,18 @@ export async function emitTicketCommentMention(
       targetPath: `/w/${target.workspaceSlug}/products/${target.productSlug}/tickets/${target.ticketSegment}`,
     };
 
-    await emitNotification({
+    const notified = await emitNotification({
       category: NOTIFICATION_CATEGORIES.MENTION,
       actorUserId: params.commentAuthorId,
       subject,
       db,
     });
+    if (notified === null) {
+      await reportEmitFailure(new Error("ticket comment mention emit failed"), "notifications.mention.ticketComment", { commentId: params.commentId });
+    }
   } catch (error) {
     console.error("[emit/mentionAdapters] ticket comment mention failed:", error);
+    await reportEmitFailure(error, "notifications.mention.ticketComment", { commentId: params.commentId });
   }
 }
 
@@ -250,14 +262,18 @@ export async function emitInsightCommentMention(
       targetPath: `/w/${target.workspaceSlug}/products/${target.productSlug}/insights/${params.insightId}`,
     };
 
-    await emitNotification({
+    const notified = await emitNotification({
       category: NOTIFICATION_CATEGORIES.MENTION,
       actorUserId: params.commentAuthorId,
       subject,
       db,
     });
+    if (notified === null) {
+      await reportEmitFailure(new Error("insight comment mention emit failed"), "notifications.mention.insightComment", { commentId: params.commentId });
+    }
   } catch (error) {
     console.error("[emit/mentionAdapters] insight comment mention failed:", error);
+    await reportEmitFailure(error, "notifications.mention.insightComment", { commentId: params.commentId });
   }
 }
 
@@ -293,13 +309,71 @@ export async function emitFeatureCommentMention(
       targetPath: params.scopeId ? `${basePath}/scopes/${params.scopeId}` : basePath,
     };
 
-    await emitNotification({
+    const notified = await emitNotification({
       category: NOTIFICATION_CATEGORIES.MENTION,
       actorUserId: params.commentAuthorId,
       subject,
       db,
     });
+    if (notified === null) {
+      await reportEmitFailure(new Error("feature comment mention emit failed"), "notifications.mention.featureComment", { commentId: params.commentId });
+    }
   } catch (error) {
     console.error("[emit/mentionAdapters] feature comment mention failed:", error);
+    await reportEmitFailure(error, "notifications.mention.featureComment", { commentId: params.commentId });
+  }
+}
+
+/**
+ * Emit a Mention notification for a KnowledgePageComment (doc-level, anchored
+ * thread or reply). Replaces the legacy `sendPageMentionNotifications`, which
+ * sent push/Zulip/email directly and wrote no Notification row, so page
+ * mentions never reached the inbox. `pageId` on the subject gates recipients
+ * by page view access (invite-only pages, ADR-0069) in `filterRecipientsByAccess`.
+ */
+export async function emitPageCommentMention(
+  db: PrismaClient,
+  params: {
+    pageId: string;
+    commentId: string;
+    commentContent: string;
+    commentAuthorId: string;
+    previousContent?: string;
+  },
+): Promise<void> {
+  try {
+    const page = await db.knowledgePage.findUnique({
+      where: { id: params.pageId },
+      select: {
+        title: true,
+        workspace: { select: { id: true, slug: true, name: true } },
+      },
+    });
+    if (!page) return;
+
+    const subject: MentionSubject = {
+      commentId: params.commentId,
+      commentContent: params.commentContent,
+      previousContent: params.previousContent,
+      workspaceId: page.workspace.id,
+      workspaceSlug: page.workspace.slug,
+      workspaceName: page.workspace.name,
+      targetName: page.title,
+      targetPath: buildPageEditorPath(page.workspace.slug, params.pageId),
+      pageId: params.pageId,
+    };
+
+    const notified = await emitNotification({
+      category: NOTIFICATION_CATEGORIES.MENTION,
+      actorUserId: params.commentAuthorId,
+      subject,
+      db,
+    });
+    if (notified === null) {
+      await reportEmitFailure(new Error("page comment mention emit failed"), "notifications.mention.pageComment", { commentId: params.commentId });
+    }
+  } catch (error) {
+    console.error("[emit/mentionAdapters] page comment mention failed:", error);
+    await reportEmitFailure(error, "notifications.mention.pageComment", { commentId: params.commentId });
   }
 }

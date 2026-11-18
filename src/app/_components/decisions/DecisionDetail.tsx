@@ -22,6 +22,7 @@ import { DecisionScopePanel } from "~/app/_components/decisions/DecisionScopePan
 import { DecisionStatusMenu } from "~/app/_components/decisions/DecisionStatusMenu";
 import { DraftAdrButton } from "~/app/_components/decisions/DraftAdrModal";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { relativeTime } from "~/app/_components/home/activity/activityRow";
 import { DetailPreview, decisionStatusBadge, type PeekPreview } from "./DetailPreview";
 import {
   evidenceHref,
@@ -29,6 +30,7 @@ import {
   parseEvidence,
 } from "~/lib/decision-evidence";
 import { api } from "~/trpc/react";
+import { agentDecisionAuthor } from "~/lib/decision-log";
 
 /**
  * A Decision's content (ADR-0060): statement, status, provenance (the
@@ -54,12 +56,18 @@ export function DecisionDetail({
   workspaceSlug,
   decisionId,
   preview,
+  onReviewed,
 }: {
   workspaceId: string;
   workspaceSlug: string;
   decisionId: string;
   /** The Decision Log row's header, painted while the detail loads. */
   preview?: PeekPreview;
+  /**
+   * Called once a draft is confirmed or rejected. The inbox peek moves on to
+   * the next draft; without it, a reject returns to the Decision Log.
+   */
+  onReviewed?: () => void;
 }) {
   const {
     data: decision,
@@ -69,6 +77,19 @@ export function DecisionDetail({
     { workspaceId, decisionId },
     { enabled: !!workspaceId && !!decisionId },
   );
+  // Where this decision has been posted (ADR-0075). Read only once the decision itself
+  // has loaded, since the read is gated on viewing it.
+  const { data: outboundPosts } = api.decision.outboundPosts.useQuery(
+    { workspaceId, decisionId },
+    {
+      enabled: !!workspaceId && !!decisionId && !!decision,
+      // Delivery happens after the producing request returns, so a row is briefly
+      // pending; poll until it settles, then stop.
+      refetchInterval: (query) =>
+        query.state.data?.some((post) => post.status === "pending") ? 3000 : false,
+    },
+  );
+  const sentPosts = (outboundPosts ?? []).filter((post) => post.status === "sent");
   const router = useRouter();
   const utils = api.useUtils();
   const onReviewError = (error: { message: string }) =>
@@ -77,16 +98,19 @@ export function DecisionDetail({
     onSuccess: async () => {
       await Promise.all([
         utils.decision.get.invalidate({ workspaceId, decisionId }),
+        utils.decision.outboundPosts.invalidate({ workspaceId, decisionId }),
         utils.decision.list.invalidate(),
         utils.inbox.invalidate(),
       ]);
+      onReviewed?.();
     },
     onError: onReviewError,
   });
   const rejectDraft = api.decision.rejectDraft.useMutation({
     onSuccess: async () => {
       await utils.inbox.invalidate();
-      router.push(`/w/${workspaceSlug}/decisions`);
+      if (onReviewed) onReviewed();
+      else router.push(`/w/${workspaceSlug}/decisions`);
     },
     onError: onReviewError,
   });
@@ -134,7 +158,7 @@ export function DecisionDetail({
               {decision.source === "MEETING"
                 ? "meeting"
                 : decision.source === "AGENT"
-                  ? "logged by Zoe"
+                  ? `logged by ${agentDecisionAuthor(decision) ?? "an agent"}`
                   : "manual"}
             </Badge>
           </Group>
@@ -252,6 +276,12 @@ export function DecisionDetail({
             Owner: {decision.owner.name ?? decision.owner.email}
           </Text>
         ) : null}
+        {sentPosts.map((post) => (
+          <Text key={post.id} size="xs" className="text-text-muted">
+            Posted to {post.roomName}
+            {post.sentAt ? ` · ${relativeTime(new Date(post.sentAt))}` : ""}
+          </Text>
+        ))}
         {decision.supersededBy ? (
           <Text size="sm" className="text-text-secondary">
             Superseded by{" "}

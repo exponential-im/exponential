@@ -87,6 +87,8 @@ model User {
   email                          String?                         @unique
   emailVerified                  DateTime?
   image                          String?
+  /// Opt-in vanity name for the Person page URL (`/people/<handle>`). Humans only, lowercase, unique across the install; freed at once when changed or cleared. Rules: `src/lib/personHandle.ts`.
+  handle                         String?                         @unique
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
   onboardingCompletedAt          DateTime?
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
@@ -162,6 +164,8 @@ model User {
   weeklyReviewSharing            WeeklyReviewSharing[]
   weeklyReviewCompletions        WeeklyReviewCompletion[]
   weeklyWorkDigests              WeeklyWorkDigest[]
+  personWeekSummariesViewed      PersonWeekSummary[]             @relation("PersonWeekSummaryViewer")
+  personWeekSummariesAbout       PersonWeekSummary[]             @relation("PersonWeekSummarySubject")
   portfolioReviewCompletions     PortfolioReviewCompletion[]
   workspaceWeeklyFocuses         WorkspaceWeeklyFocus[]
   wheelOfLifeAssessments         WheelOfLifeAssessment[]
@@ -274,13 +278,6 @@ model User {
   dealsAssigned          Deal[]                  @relation("DealAssignedTo")
   dealActivities         DealActivity[]          @relation("DealActivityUser")
 
-  // Contributor & Wallet fields (bounty board)
-  displayName                    String?
-  bio                            String?
-  contributorSkills              String[]                        @default([])
-  isContributor                  Boolean                         @default(false)
-  wallets                        Wallet[]
-  bountyClaims                   BountyClaim[]
   // Notification override relations
   workspaceNotificationOverrides WorkspaceNotificationOverride[]
 
@@ -320,6 +317,8 @@ model User {
   isAgent                     Boolean                           @default(false)
   ownedExternalAgents         ExternalAgent[]                   @relation("ExternalAgentOwner")
   externalAgentShadow         ExternalAgent?                    @relation("ExternalAgentShadowUser")
+  /// OAuth connections this person approved for MCP clients (hosted MCP, D7).
+  oauthConnections            OAuthConnection[]
   agentRunsRequested          AgentRun[]                        @relation("AgentRunRequestedBy")
   agentRunsReviewed           AgentRun[]                        @relation("AgentRunReviewedBy")
   // Ceremonies (ADR-0059)
@@ -379,6 +378,8 @@ model ExternalAgent {
   assistant   Assistant?
   /// Agent runs this principal performed (ADR-0067).
   agentRuns   AgentRun[]
+  /// OAuth connections that act as this agent (hosted MCP, D7).
+  oauthConnections OAuthConnection[]
 
   @@index([ownerId])
 }
@@ -487,6 +488,90 @@ model ExternalAgentKey {
 }
 
 // ============================================
+// OAuth for MCP clients (hosted MCP Agent PRD, D7)
+// ============================================
+// The app is its own OAuth authorization server for /api/mcp. A connection is
+// one person's grant to one client and acts as one External agent, so every
+// access path and the delegation invariant (ADR-0049) apply to it unchanged.
+// Every secret (code, access token, refresh token) is stored only as a hash.
+
+/// An MCP client known to this install.
+model OAuthClient {
+  /// The client_id for registered clients.
+  id           String    @id @default(cuid())
+  /// "registered" (RFC 7591) or "metadata" (client ID metadata document).
+  kind         String
+  /// For "metadata" clients: the document URL, which is the client_id.
+  metadataUrl  String?   @unique
+  name         String
+  redirectUris String[]
+  /// When the metadata document was last fetched; refetched after 24 hours.
+  fetchedAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  connections OAuthConnection[]
+}
+
+/// One person's grant to one client. Owns the tokens; points at the agent.
+model OAuthConnection {
+  id             String    @id @default(cuid())
+  ownerId        String
+  clientId       String
+  /// Stable identity of the client for this owner (D10). Reconnects match on it.
+  clientKey      String
+  clientName     String
+  agentId        String
+  /// The resource (audience) this connection's tokens are bound to.
+  resource       String
+  lastUsedAt     DateTime?
+  disconnectedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  owner  User                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  client OAuthClient              @relation(fields: [clientId], references: [id])
+  agent  ExternalAgent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  codes  OAuthAuthorizationCode[]
+  tokens OAuthToken[]
+
+  @@unique([ownerId, clientKey])
+  @@index([clientId])
+  @@index([agentId])
+}
+
+/// A one-time authorization code, valid for five minutes.
+model OAuthAuthorizationCode {
+  id            String    @id @default(cuid())
+  connectionId  String
+  codeHash      String    @unique
+  /// The PKCE challenge; S256 only.
+  codeChallenge String
+  redirectUri   String
+  expiresAt     DateTime
+  usedAt        DateTime?
+
+  connection OAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+}
+
+/// One access/refresh pair. A redeemed row is kept until its refresh expiry
+/// so a replayed refresh token can be recognised.
+model OAuthToken {
+  id               String    @id @default(cuid())
+  connectionId     String
+  accessTokenHash  String    @unique
+  refreshTokenHash String    @unique
+  accessExpiresAt  DateTime
+  refreshExpiresAt DateTime
+  rotatedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  connection OAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+}
+
+// ============================================
 // Workspace Models
 // ============================================
 
@@ -512,7 +597,6 @@ model Workspace {
   effortUnit               EffortUnit @default(STORY_POINTS)
   enableAdvancedActions    Boolean    @default(false)
   enableDetailedActions    Boolean    @default(false)
-  enableBounties           Boolean    @default(false)
   enableDailyPlanBanner    Boolean    @default(true)
   enableWeeklyReviewBanner Boolean    @default(true)
   enableEmailNotifications Boolean    @default(true)
@@ -579,8 +663,6 @@ model Workspace {
   dailyScores             DailyScore[]
   streaks                 ProductivityStreak[]
   leaderboardEntries      LeaderboardEntry[]
-  // AI Assistant customization
-  assistants              Assistant[]
   // Positions: who does what (ADR-0068)
   positions               Position[]
   // Workflow Pipeline relations
@@ -735,7 +817,10 @@ model OutboundPost {
   subjectId   String
   /// What happened to the subject: "published" | "accepted" | "superseded" | …
   event       String
-  channelLinkId String
+  /// The binding this post was enqueued for. Nulled when the binding is removed: a
+  /// sent row is history and survives; a pending row without a link is cancelled by
+  /// the deliverer, never sent.
+  channelLinkId String?
   /// Denormalised from the link at enqueue, so an unbind cannot orphan the history.
   provider            String
   externalId          String
@@ -752,9 +837,10 @@ model OutboundPost {
   requestedById   String?
   createdAt       DateTime  @default(now())
 
-  channelLink ChannelLink @relation(fields: [channelLinkId], references: [id], onDelete: Cascade)
+  channelLink ChannelLink? @relation(fields: [channelLinkId], references: [id], onDelete: SetNull)
 
   /// A double enqueue is a no-op: at most one post per (subject, event, destination).
+  /// Postgres treats nulls as distinct, so rows whose binding was removed never collide.
   @@unique([kind, subjectId, event, channelLinkId])
   /// The sweep's scan.
   @@index([status, attemptAt])
@@ -840,6 +926,40 @@ model WeeklyWorkDigest {
 
   @@unique([userId, isoYear, isoWeek])
   @@index([userId, generatedAt])
+}
+
+// Cached Person week summary (Person page, V2): an AI summary of one person's
+// (`subjectId`) ISO week, written only from the activity events ONE viewer
+// (`viewerId`) can see on that person's page. One row per (viewer, subject, ISO
+// week). It is a different artifact from WeeklyWorkDigest: that one is a
+// person's own, private digest drawing on meetings and assigned items
+// (ADR-0018); this one never reads either.
+//
+// `eventIds` is what makes the cache safe to serve: the ids of the events the
+// text was written from. A read re-checks them against what the viewer can see
+// now, and a row naming an event that is no longer visible (a page went
+// invite-only, a grant was removed) is regenerated instead of shown.
+// See src/server/services/person/weekSummary/.
+model PersonWeekSummary {
+  id          String   @id @default(cuid())
+  viewerId    String
+  subjectId   String
+  isoYear     Int
+  isoWeek     Int // 1–53
+  narrative   String   @db.Text
+  highlights  Json // string[] - at most 3
+  eventIds    Json // string[] - WorkspaceActivityEvent ids the summary was written from
+  truncated   Boolean  @default(false) // the week held more visible events than one summary reads
+  model       String // e.g. "gpt-4o-mini" or "canned" for a week with nothing visible
+  tokensIn    Int?
+  tokensOut   Int?
+  generatedAt DateTime @default(now())
+
+  viewer  User @relation("PersonWeekSummaryViewer", fields: [viewerId], references: [id], onDelete: Cascade)
+  subject User @relation("PersonWeekSummarySubject", fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([viewerId, subjectId, isoYear, isoWeek])
+  @@index([subjectId])
 }
 
 // Per-workspace settings for the resident copywriter that drafts a Workspace
@@ -1205,17 +1325,6 @@ model Action {
   comments             ActionComment[]
   timeEntries          TimeEntry[]
 
-  // Bounty fields
-  isBounty           Boolean       @default(false)
-  bountyAmount       Decimal?
-  bountyToken        String? // e.g. "USDC", "ETH"
-  bountyStatus       BountyStatus?
-  bountyDifficulty   String? // "beginner", "intermediate", "advanced"
-  bountySkills       String[]      @default([])
-  bountyDeadline     DateTime?
-  bountyMaxClaimants Int           @default(1)
-  bountyExternalUrl  String?
-  bountyClaims       BountyClaim[]
 
   decisionLinks DecisionLink[]
 
@@ -1233,8 +1342,6 @@ model Action {
   @@index([etaStatus])
   @@index([epicId])
   @@index([ticketId])
-  @@index([isBounty])
-  @@index([bountyStatus])
   @@index([sourceType, sourceId])
   @@index([occurrenceId])
 }
@@ -1324,45 +1431,6 @@ model TimeResolutionRule {
   @@index([userId])
 }
 
-model BountyClaim {
-  id              String      @id @default(cuid())
-  actionId        String
-  claimantId      String
-  status          ClaimStatus @default(ACTIVE)
-  submissionUrl   String?
-  submissionNotes String?
-  reviewNotes     String?
-  claimedAt       DateTime    @default(now())
-  submittedAt     DateTime?
-  reviewedAt      DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-
-  action   Action @relation(fields: [actionId], references: [id], onDelete: Cascade)
-  claimant User   @relation(fields: [claimantId], references: [id])
-
-  @@unique([actionId, claimantId])
-  @@index([actionId])
-  @@index([claimantId])
-  @@index([status])
-}
-
-model Wallet {
-  id        String   @id @default(cuid())
-  userId    String
-  address   String   @unique
-  chain     String? // e.g. "ethereum", "solana", "polygon"
-  label     String? // user-defined label, e.g. "Hardware wallet"
-  isPrimary Boolean  @default(false)
-  verified  Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
 model ActionAssignee {
   id       String @id @default(cuid())
   actionId String
@@ -1426,7 +1494,6 @@ model Project {
   isPublic              Boolean                    @default(false)
   isRestricted          Boolean                    @default(false)
   enableDetailedActions Boolean? // null = inherit from workspace
-  enableBounties        Boolean? // null = inherit from workspace
   type                  String                     @default("standard") // "standard" | "pipeline"
   actions               Action[]
   aiInteractionHistory  AiInteractionHistory[]
@@ -1837,6 +1904,7 @@ model TranscriptionSession {
   matrixPosts       MatrixPostLog[]
   occurrence        CeremonyOccurrence?               @relation(fields: [occurrenceId], references: [id], onDelete: SetNull)
   decisions         Decision[]
+  discardedActionDrafts DiscardedActionDraft[]
 
   @@index([sessionId])
   @@index([workspaceId])
@@ -3260,22 +3328,6 @@ enum EffortUnit {
   HOURS
 }
 
-enum BountyStatus {
-  OPEN
-  IN_PROGRESS
-  IN_REVIEW
-  COMPLETED
-  CANCELLED
-}
-
-enum ClaimStatus {
-  ACTIVE
-  SUBMITTED
-  APPROVED
-  REJECTED
-  WITHDRAWN
-}
-
 // Team Weekly Planning Models
 model WeeklyOutcome {
   id            String    @id @default(cuid())
@@ -3498,9 +3550,22 @@ model Resource {
   // Core content
   title       String
   description String?
-  url         String? // Source URL for web pages/bookmarks
+  /// The address the Resource was last saved from, tracking parameters
+  /// removed: what its link opens. The latest save wins.
+  url         String?
+  /// What the page is matched by, never shown or linked: the URL it declares
+  /// for itself when that can be trusted, else `url`, normalised
+  /// (`pageIdentity` in src/lib/resources/identity.ts). Null only when there
+  /// is no `url`. One owner may hold two rows with one identity: rows that
+  /// pre-date the column were never merged.
+  identity    String?
   rawContent  String? // Original HTML/content
   content     String? // Cleaned/processed text
+  /// Page text: the visible text of a page that has no Article body (a
+  /// listing, a search, a dashboard), as it read on the day it was saved.
+  /// Indexed for search and never rendered by a reader, which is why it is
+  /// not in `content`. Null whenever the Resource has a body.
+  pageText    String?
   contentType String  @default("web_page") // "web_page" | "document" | "pdf" | "bookmark" | "note"
   mimeType    String? // e.g., "text/html", "application/pdf"
 
@@ -3548,6 +3613,7 @@ model Resource {
   @@index([workspaceId])
   @@index([contentType])
   @@index([url])
+  @@index([userId, identity])
 }
 
 model KnowledgeChunk {
@@ -4729,29 +4795,34 @@ model RecurringTask {
 // AI Assistant Customization
 // ============================================
 
+/// A person's own agent: one per person, the same in every workspace it works
+/// in (ADR-0072). It belongs to no workspace; where it works is its principal's
+/// `WorkspaceUser` memberships.
 model Assistant {
   id           String   @id @default(cuid())
-  workspaceId  String
   createdById  String
   name         String // User-chosen assistant name ("Aria", "Max", etc.)
   emoji        String? // Visual symbol
   personality  String   @db.Text // Free-text soul/persona (like Clawd's SOUL.md)
   instructions String?  @db.Text // Operating instructions
   userContext  String?  @db.Text // About the user/team
-  isDefault    Boolean  @default(false)
   /// The Assistant's principal — an owned ExternalAgent with a shadow user and a
   /// workspace membership, which is what makes it an assignee (ADR-0067).
   /// Required: the migration backfills every existing row before setting NOT NULL.
   externalAgentId String   @unique
+  /// Set when the Assistant is retired (one Assistant per person, ADR-0072). A
+  /// retired Assistant keeps its row and its principal, so the history it wrote
+  /// stays attributed, but holds no membership, no keys and is never resolved.
+  /// At most one row per `createdById` has this null: the partial unique index
+  /// "Assistant_active_per_user_key" (SQL only — Prisma cannot express it).
+  retiredAt    DateTime?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy     User           @relation("AssistantCreatedBy", fields: [createdById], references: [id])
   externalAgent ExternalAgent  @relation(fields: [externalAgentId], references: [id], onDelete: Cascade)
   contentDrafts ContentDraft[]
 
-  @@index([workspaceId])
   @@index([createdById])
 }
 
@@ -5966,6 +6037,26 @@ model TranscriptionSessionParticipant {
   @@index([email])
 }
 
+/// A draft action the extractor proposed and a reviewer discarded. The Action
+/// row itself is deleted (a draft was never a real action); this is what is
+/// kept, so the same task is not drafted again from the meeting and the
+/// extraction eval has the reviewer's "no" to learn from.
+model DiscardedActionDraft {
+  id                     String   @id @default(cuid())
+  transcriptionSessionId String
+  name                   String
+  description            String?  @db.Text
+  /// A code from `~/lib/draft-reject-reasons`, or null when none was given.
+  reason                 String?
+  /// The reviewer. Not a relation: this is a log, and outlives the account.
+  discardedById          String
+  createdAt              DateTime @default(now())
+
+  transcriptionSession TranscriptionSession @relation(fields: [transcriptionSessionId], references: [id], onDelete: Cascade)
+
+  @@index([transcriptionSessionId])
+}
+
 model PreMeetingBrief {
   id              String    @id @default(cuid())
   workspaceId     String
@@ -6389,6 +6480,9 @@ model Decision {
   status                 DecisionStatus      @default(PROPOSED)
   /// Drafts are invisible everywhere except the source meeting's draft views.
   reviewState            DecisionReviewState @default(CONFIRMED)
+  /// Why a reviewer rejected the draft, as a code from `~/lib/draft-reject-reasons`.
+  /// Null when no reason was given, and on every row that is not REJECTED.
+  rejectionReason        String?
   source                 DecisionSource      @default(MANUAL)
   decidedAt              DateTime?
   ownerId                String?
@@ -6505,4 +6599,54 @@ model AdrSyncRun {
 
   @@index([configId, startedAt])
   @@index([triggeredById])
+}
+
+/// Instance-wide settings for one install (ADR-0081). A single row, id "instance";
+/// an absent row means every default below, which is how exponential.im runs.
+model InstanceSettings {
+  id                  String    @id @default("instance")
+  /// "open" | "invite-only". Null (or no row) means open. Claiming a
+  /// self-host install sets invite-only; an instance admin can change it in /admin.
+  signUpMode          String?
+  /// SHA-256 of the one-time setup token `start:selfhost` prints while the
+  /// install has no instance admin. Cleared when /setup claims it.
+  setupTokenHash      String?
+  setupTokenExpiresAt DateTime?
+  updatedAt           DateTime  @updatedAt
+}
+
+/// Usage ledger: one row for every Assistant chat turn, agent run, voice turn
+/// or direct Assistant call on an install that meters (`BILLING_MODE` is not
+/// `off`). Append-only; never updated or deleted by the app. No relation to
+/// Workspace on purpose: a ledger outlives the thing it measured.
+model UsageEvent {
+  id          String   @id @default(cuid())
+  workspaceId String
+  /// "CHAT" | "AGENT_RUN" | "VOICE" | "DIRECT"
+  source      String
+  modelId     String?
+  /// Model cost in USD × 1e6, priced by `services/ai/cost.ts`.
+  costMicros  Int
+  /// The turn ran on the workspace's own Anthropic key: recorded, never counted.
+  onOwnKey    Boolean  @default(false)
+  /// AiInteractionHistory.id or AgentRun.id, when there is one.
+  refId       String?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+/// A workspace's hosted-key spend for one calendar month (UTC): the O(1)
+/// counter the allowance gate and the usage bar read. Incremented in the same
+/// transaction that inserts the UsageEvent; turns on the workspace's own key
+/// are left out.
+model WorkspaceUsagePeriod {
+  workspaceId String
+  /// First instant of the calendar month, UTC.
+  periodStart DateTime
+  /// USD × 1e6. BigInt: a 32-bit Int tops out near USD 2,147, and while usage
+  /// is only metered nothing stops a workspace passing that in a month.
+  costMicros  BigInt   @default(0)
+
+  @@id([workspaceId, periodStart])
 }

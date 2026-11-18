@@ -4,26 +4,56 @@
  * the hosted executor finishes it flips to "Worked for … · called N tools".
  *
  * Mastra is a stub started by this spec on the port the dev server was told
- * to use (playwright.config.ts webServer.env). The dispatcher is kicked
- * directly with the fixed cron secret rather than relying on the assign
- * mutation's after() hook, which under Playwright posts to whatever base URL
- * the env names, so the spec stays deterministic.
+ * to use (playwright.config.ts webServer.env). The spec also kicks the
+ * dispatcher itself with the fixed cron secret, so it doesn't depend on the
+ * assign mutation's after() hook, which posts to whatever base URL the env
+ * names. When that hook does reach this server, it races the spec's kick.
+ * The spec accepts either winner and asserts on the run's outcome.
+ *
+ * The dev server meters Assistant use (BILLING_MODE=meter in
+ * playwright.config.ts), so the finished run also leaves one priced event in
+ * the usage ledger.
  *
  * Fixture: `Aria` (the fixture user's Assistant) and an unassigned action.
  * See dev-docs/AGENT_VISUAL_TESTING.md.
  */
 import { test, expect } from "@playwright/test";
 import http from "node:http";
+import type { PrismaClient } from "@prisma/client";
+import { loadDevEnvOrThrow } from "../scripts/dev-fixture/env";
 import { loadFixture, E2E_MASTRA_STUB_PORT, E2E_CRON_SECRET } from "./fixture-data";
+
+// Specs run in their own worker process, so env loading (and its
+// production/managed-DB guards) has to happen here as well as in global-setup.
+loadDevEnvOrThrow();
 
 const fixture = loadFixture();
 const FIRST_PAINT_TIMEOUT = 60_000;
 
+/** One model step's usage as Mastra reports it: `inputTokens` is the whole prompt. */
+const STUB_STEP_USAGE = {
+  inputTokens: 30_000,
+  outputTokens: 1_000,
+  cachedInputTokens: 20_000,
+  raw: {
+    inputTokens: { total: 30_000, noCache: 2_000, cacheRead: 20_000, cacheWrite: 8_000 },
+    outputTokens: { total: 1_000 },
+  },
+};
+/**
+ * Sonnet 4.5 is $3 in / $15 out per million tokens, cache reads at 0.1x and
+ * cache writes at 1.25x:
+ *   2,000 × $3 + 20,000 × $0.30 + 8,000 × $3.75 + 1,000 × $15, per million
+ *   = $0.006 + $0.006 + $0.03 + $0.015 = $0.057
+ */
+const STUB_RUN_COST_MICROS = 57_000;
+
 /** A canned FullOutput: one tool step and a public summary. */
 const STUB_OUTPUT = {
   text: "Shortlisted two venues; details in the comments.",
-  steps: [{ toolCalls: [{ toolName: "get-run-context" }] }],
-  usage: { totalTokens: 42 },
+  steps: [{ toolCalls: [{ toolName: "get-run-context" }], usage: STUB_STEP_USAGE }],
+  usage: STUB_STEP_USAGE,
+  response: { modelId: "claude-sonnet-4-5-20250929" },
 };
 
 /** The dev server Playwright started (playwright.config.ts PORT). */
@@ -45,9 +75,12 @@ interface StubCall {
 }
 
 let stub: http.Server;
+let db: PrismaClient;
 const stubCalls: StubCall[] = [];
 
 test.beforeAll(async () => {
+  const { PrismaClient: Client } = await import("@prisma/client");
+  db = new Client();
   stub = http.createServer((req, res) => {
     let raw = "";
     req.on("data", (chunk: Buffer) => (raw += chunk.toString()));
@@ -76,6 +109,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await new Promise<void>((resolve) => stub.close(() => resolve()));
+  await db.$disconnect();
 });
 
 test("assigning your Assistant starts a run: spinner, then the pill flips from Queued to Worked for", async ({ page, request }) => {
@@ -101,6 +135,14 @@ test("assigning your Assistant starts a run: spinner, then the pill flips from Q
   // Kick the hosted executor exactly as the after() hook does, scoped to this
   // run: an unscoped dispatch claims only the oldest QUEUED run, which may be
   // one another spec (assign-to-assistant) left behind.
+  //
+  // The assign mutation's own after() kick races this one. With no
+  // NEXT_PUBLIC_APP_URL / NEXTAUTH_URL it posts to localhost:$PORT, which is
+  // this very server, and it usually claims the run first. The claim is
+  // atomic, so exactly one of the two runs it: either ours succeeded with this
+  // run, or ours claimed nothing and after() has it. Nothing else is
+  // acceptable. Which one won doesn't matter; the run reaching the stub
+  // exactly once and finishing SUCCEEDED, asserted below, is what this proves.
   const runId = await pill.getAttribute("data-run-id");
   expect(runId).toBeTruthy();
   const dispatch = await request.post(`/api/internal/agent-runs/dispatch?runId=${runId}`, {
@@ -109,9 +151,17 @@ test("assigning your Assistant starts a run: spinner, then the pill flips from Q
   expect(dispatch.ok()).toBe(true);
   const result = (await dispatch.json()) as { claimed: number; succeeded: string[]; failed: unknown[] };
   expect(result.failed).toEqual([]);
-  expect(result.succeeded).toEqual([runId]);
+  expect([
+    { claimed: 1, succeeded: [runId] }, // ours ran it
+    { claimed: 0, succeeded: [] }, // after() had already claimed it
+  ]).toContainEqual({ claimed: result.claimed, succeeded: result.succeeded });
 
-  // The stub was called as the Assistant's shadow user, with the persona and the brief.
+  // The pill polls every 2 s while live and flips once the run finished. When
+  // after() won, the run may still be in flight here, so wait for the flip
+  // before reading the stub's calls.
+  await expect(pill).toHaveAttribute("data-status", "SUCCEEDED", { timeout: 30_000 });
+
+  // The stub was called once, as the Assistant's shadow user, with the persona and the brief.
   type GenerateBody = { messages: Array<{ role: string; content: string }>; memory: { thread: { id: string } } };
   const ourCalls = stubCalls.filter(
     (c) =>
@@ -126,9 +176,25 @@ test("assigning your Assistant starts a run: spinner, then the pill flips from Q
   expect(body.messages[0]!.content).toContain(`Name: ${fixture.assistantName}`);
   expect(body.messages[1]!.content).toContain(fixture.agentRunActionName);
 
-  // The pill polls every 2 s while live and flips once the run finished.
-  await expect(pill).toHaveAttribute("data-status", "SUCCEEDED", { timeout: 10_000 });
   await expect(pill).toContainText(/Worked for .* · called 1 tool$/);
+
+  // The run was metered once, to the action's workspace, at its real cost.
+  const usageEvents = await db.usageEvent.findMany({
+    where: { refId: runId },
+    select: { source: true, modelId: true, costMicros: true, workspaceId: true },
+  });
+  const workspace = await db.workspace.findUniqueOrThrow({
+    where: { slug: fixture.workspaceSlug },
+    select: { id: true },
+  });
+  expect(usageEvents).toEqual([
+    {
+      source: "AGENT_RUN",
+      modelId: STUB_OUTPUT.response.modelId,
+      costMicros: STUB_RUN_COST_MICROS,
+      workspaceId: workspace.id,
+    },
+  ]);
   await expect(page.getByTestId("action-running-ring")).toHaveCount(0);
   await expect(pill.getByRole("button", { name: "Cancel" })).toHaveCount(0);
 

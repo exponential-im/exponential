@@ -1,4 +1,6 @@
+import { ACTION_DISCARD_REASON_CODES } from "~/lib/draft-reject-reasons";
 import { z } from "zod";
+import { AiNotConfiguredError, requireAi } from "~/server/services/ai/requireAi";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import {
   createTRPCRouter,
@@ -46,8 +48,10 @@ import {
   SummarizationNotConfiguredError,
 } from "~/server/services/TranscriptSummarizerService";
 import {
+  assertWorkspaceWriteRole,
   buildTranscriptionAccessWhere,
   buildTranscriptionEditWhere,
+  canEditProject,
   canEditTranscription,
   canViewTranscription,
   getProjectAccess,
@@ -61,6 +65,7 @@ import { emitNotification } from "~/server/services/notifications/emit/emitNotif
 import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
 import { randomUUID } from "crypto";
 import { personSchema, resolvePerson, type Person } from "~/server/services/meetings/resolvePerson";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 
 // Keep in-memory store for development/debugging
 const transcriptionStore: Record<string, string[]> = {};
@@ -398,12 +403,15 @@ export const transcriptionRouter = createTRPCRouter({
       const userId = ctx.userId;
       const { projectId, workspaceId, title } = input;
 
+      // Same placement rule as createManualTranscription: recording into a
+      // project needs edit access to it (view admitted a workspace `viewer`,
+      // and anyone on a public project).
       if (projectId) {
         const access = await getProjectAccess(ctx.db, userId, projectId);
-        if (!hasProjectAccess(access)) {
+        if (!canEditProject(access)) {
           throw new TRPCError({
             code: "FORBIDDEN",
-            message: "You do not have access to this project",
+            message: "You do not have edit access to this project",
           });
         }
       }
@@ -415,6 +423,11 @@ export const transcriptionRouter = createTRPCRouter({
         projectId,
         workspaceId,
       });
+
+      // Straight into a workspace: a write role there. This was unchecked.
+      if (resolvedWorkspaceId && !projectId) {
+        await assertWorkspaceWriteRole(ctx.db, userId, resolvedWorkspaceId);
+      }
 
       const session = await ctx.db.transcriptionSession.create({
         data: {
@@ -649,6 +662,12 @@ export const transcriptionRouter = createTRPCRouter({
         featureLinks: isWorkspaceMember ? session.featureLinks : [],
         canLinkFeatures,
         canEdit,
+        /**
+         * Whether the viewer belongs to the Meeting's workspace. A Participant
+         * from outside can open the Meeting but not chat in that workspace's
+         * scope, so the page only hands the chat a workspace it will accept.
+         */
+        isWorkspaceMember,
         /** Only the owner may move a workspace meeting to Personal. */
         isOwner: session.userId === ctx.session.user.id,
         hasTranscript: Boolean(transcription),
@@ -935,18 +954,21 @@ export const transcriptionRouter = createTRPCRouter({
       // (TranscriptionSessionParticipant.workspaceId is non-null). The rule
       // lives in `resolveMeetingWorkspace` so every create path shares it.
       if (input.projectId) {
-        // You can only file a meeting into a project you can see. Deliberately
-        // view, not edit: the project page offers Add Meeting to every member,
-        // and agents create meetings the same way.
+        // Filing a meeting into a project is a write to it, so the caller
+        // must be able to edit the project: the rule that then lets them edit
+        // the meeting (ACCESS_CONTROL.md, "Meetings"). View used to be the
+        // gate, which admitted a workspace `viewer`, and anyone at all on a
+        // public project. Members and agents hold `member`, so the project
+        // page's Add Meeting still works for them.
         const projectAccess = await getProjectAccess(
           ctx.db,
           ctx.session.user.id,
           input.projectId,
         );
-        if (!hasProjectAccess(projectAccess)) {
+        if (!canEditProject(projectAccess)) {
           throw new TRPCError({
             code: "FORBIDDEN",
-            message: "You do not have access to this project",
+            message: "You do not have edit access to this project",
           });
         }
       }
@@ -954,6 +976,14 @@ export const transcriptionRouter = createTRPCRouter({
         projectId: input.projectId,
         workspaceId: input.workspaceId,
       });
+
+      // A meeting filed straight into a workspace is workspace content: the
+      // caller needs a write role there. Nothing checked this, so a `viewer`,
+      // or someone outside the workspace who knew its id, could add one. A
+      // meeting with no workspace stays the caller's own.
+      if (workspaceId && !input.projectId) {
+        await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, workspaceId);
+      }
 
       // Participants are workspace-scoped (members + CRM), so a meeting with no
       // workspace can't carry them. Reject rather than silently dropping them.
@@ -1115,12 +1145,15 @@ export const transcriptionRouter = createTRPCRouter({
         .map((p) => p.userId)
         .filter((id): id is string => !!id);
       if (session.workspaceId && memberUserIds.length > 0) {
-        void emitNotification({
-          db: ctx.db,
-          category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
-          actorUserId: ctx.session.user.id,
-          subject: { sessionId: session.id, participantUserIds: memberUserIds },
-        });
+        emitAfterResponse("transcription.participantAdded.notification", () =>
+          emitNotification({
+            db: ctx.db,
+            category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
+            actorUserId: ctx.session.user.id,
+            subject: { sessionId: session.id, participantUserIds: memberUserIds },
+          }),
+          { sessionId: session.id },
+        );
       }
 
       return session;
@@ -1186,18 +1219,22 @@ export const transcriptionRouter = createTRPCRouter({
 
       // Notify the tagged workspace member (ADR-0045 pipeline). Only the member
       // (userId) path is notifiable; CRM-contact / free-text adds resolve to a
-      // contact with no User account. Fire-and-forget; the actor is dropped
+      // contact with no User account. Runs after the response; the actor is dropped
       // downstream (self-adds don't self-notify).
-      if (input.userId) {
-        void emitNotification({
-          db: ctx.db,
-          category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
-          actorUserId: ctx.session.user.id,
-          subject: {
-            sessionId: session.id,
-            participantUserIds: [input.userId],
-          },
-        });
+      const taggedUserId = input.userId;
+      if (taggedUserId) {
+        emitAfterResponse("transcription.participantAdded.notification", () =>
+          emitNotification({
+            db: ctx.db,
+            category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
+            actorUserId: ctx.session.user.id,
+            subject: {
+              sessionId: session.id,
+              participantUserIds: [taggedUserId],
+            },
+          }),
+          { sessionId: session.id },
+        );
       }
 
       return participant;
@@ -2003,11 +2040,7 @@ export const transcriptionRouter = createTRPCRouter({
             message: "This meeting has no transcript to summarize",
           });
         case "not-configured":
-          throw new TRPCError({
-            code: "PRECONDITION_FAILED",
-            message:
-              "Server summarization is not configured (missing OPENAI_API_KEY).",
-          });
+          throw new AiNotConfiguredError("summaries", "Meeting summaries");
         case "failed":
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
@@ -2062,11 +2095,29 @@ export const transcriptionRouter = createTRPCRouter({
    * this throws only when neither produced anything usable.
    */
   extractOutputs: protectedProcedure
-    .input(z.object({ transcriptionId: z.string() }))
+    .input(
+      z.object({
+        transcriptionId: z.string(),
+        /** Re-extract: replace the meeting's unreviewed drafts with a new reading. */
+        replaceDrafts: z.boolean().optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
+      if (input.replaceDrafts) {
+        // A re-extract deletes drafts, including ones another editor's run
+        // made, so it takes the same bar as discarding them by hand.
+        const transcription = await ctx.db.transcriptionSession.findUnique({
+          where: { id: input.transcriptionId },
+        });
+        if (!transcription) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Transcription not found" });
+        }
+        await ensureTranscriptionAccess(ctx.db, ctx.session.user.id, transcription, "edit");
+      }
       const result = await TranscriptionProcessingService.extractMeetingOutputs(
         input.transcriptionId,
         ctx.session.user.id,
+        { replaceDrafts: input.replaceDrafts },
       );
       if (!result.actions.success && !result.decisions.success) {
         const errors = [...result.actions.errors, ...result.decisions.errors];
@@ -2214,6 +2265,8 @@ export const transcriptionRouter = createTRPCRouter({
       z.object({
         transcriptionId: z.string(),
         actionIds: z.array(z.string()).min(1).optional(),
+        /** Why, when the reviewer says (optional). Applies to every draft in the call. */
+        reason: z.enum(ACTION_DISCARD_REASON_CODES).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -2235,13 +2288,31 @@ export const transcriptionRouter = createTRPCRouter({
         "edit",
       );
 
-      const result = await ctx.db.action.deleteMany({
-        where: {
-          ...(input.actionIds ? { id: { in: input.actionIds } } : {}),
-          transcriptionSessionId: input.transcriptionId,
-          status: "DRAFT",
-          createdById: ctx.session.user.id,
-        },
+      const draftsWhere = {
+        ...(input.actionIds ? { id: { in: input.actionIds } } : {}),
+        transcriptionSessionId: input.transcriptionId,
+        status: "DRAFT",
+        createdById: ctx.session.user.id,
+      };
+      // The draft rows go, but what was discarded is kept: it is not drafted
+      // again from this meeting, and it is the extractor's feedback. Logged
+      // and deleted together, so the log never names a draft that survived.
+      const result = await ctx.db.$transaction(async (tx) => {
+        const drafts = await tx.action.findMany({
+          where: draftsWhere,
+          select: { id: true, name: true, description: true },
+        });
+        if (drafts.length === 0) return { count: 0 };
+        await tx.discardedActionDraft.createMany({
+          data: drafts.map((draft) => ({
+            transcriptionSessionId: input.transcriptionId,
+            name: draft.name,
+            description: draft.description,
+            reason: input.reason ?? null,
+            discardedById: ctx.session.user.id,
+          })),
+        });
+        return tx.action.deleteMany({ where: { ...draftsWhere, id: { in: drafts.map((draft) => draft.id) } } });
       });
 
       // Same bookkeeping as publishSelectedDraftActions: once the review is
@@ -2305,6 +2376,7 @@ export const transcriptionRouter = createTRPCRouter({
         "edit",
       );
 
+      requireAi("openai", "Feature ideation");
       const result = await FeatureIdeationService.generateDraftFeatures(
         input.transcriptionId,
         ctx.session.user.id,

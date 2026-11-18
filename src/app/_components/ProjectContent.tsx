@@ -40,13 +40,13 @@ import {
   IconHome,
   IconEdit,
   IconLayoutList,
-  IconCoin,
   IconPlug,
   IconShieldLock,
   IconLock,
   IconWorld,
   IconStopwatch,
   IconFileText,
+  IconBookmark,
 } from "@tabler/icons-react";
 import { addDays, format, isBefore, startOfDay } from "date-fns";
 import overviewStyles from "./ProjectOverview.module.css";
@@ -66,6 +66,7 @@ import { GoalIcon } from "./GoalIcon";
 import { IconPicker } from "./IconPicker";
 import { ProjectTimeTab } from "./ProjectTimeTab";
 import { PagesListContent } from "~/app/_components/pages/PagesListContent";
+import { ProjectResourcesTab } from "~/app/_components/knowledge-base/ProjectResourcesTab";
 import { daysLeftLabel, daysUntil, resolveProjectTargetDate } from "~/lib/projectTargetDate";
 import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
@@ -80,6 +81,7 @@ type TabValue =
   | "timeline"
   | "time"
   | "pages"
+  | "resources"
   | "transcriptions"
   | "integrations"
   | "workflows"
@@ -94,6 +96,7 @@ const VALID_TABS: TabValue[] = [
   "timeline",
   "time",
   "pages",
+  "resources",
   "transcriptions",
   "integrations",
   "workflows",
@@ -173,7 +176,6 @@ export function ProjectContent({
     { enabled: !!workspace?.slug },
   );
   const workspaceDetailedEnabled = workspaceData?.enableDetailedActions ?? false;
-  const workspaceBountiesEnabled = workspaceData?.enableBounties ?? false;
 
   const updateDetailedActionsMutation = api.project.update.useMutation({
     onSuccess: () => {
@@ -181,18 +183,6 @@ export function ProjectContent({
       notifications.show({
         title: "Settings Updated",
         message: "Detailed action pages setting has been updated",
-        color: "green",
-        autoClose: 3000,
-      });
-    },
-  });
-
-  const updateBountiesMutation = api.project.update.useMutation({
-    onSuccess: () => {
-      void utils.project.getById.invalidate({ id: projectId });
-      notifications.show({
-        title: "Settings Updated",
-        message: "Bounties setting has been updated",
         color: "green",
         autoClose: 3000,
       });
@@ -279,10 +269,13 @@ export function ProjectContent({
       } else {
         params.set("tab", value);
       }
-      const newUrl = params.toString() ? `?${params.toString()}` : window.location.pathname;
-      router.push(newUrl, { scroll: false });
+      // Build from the router's pathname, never a bare `?tab=…`: Next resolves
+      // a relative href against window.location, which can still name the
+      // previous route (the projects list) and would send the click there.
+      const query = params.toString();
+      router.push(query ? `${pathname}?${query}` : pathname, { scroll: false });
     }
-  }, [router, searchParams]);
+  }, [router, searchParams, pathname]);
 
   // Check if project has active Fireflies workflow
   const hasFirefliesWorkflow = projectWorkflows?.some(
@@ -568,6 +561,9 @@ export function ProjectContent({
                   Pages
                 </Tabs.Tab>
               )}
+              <Tabs.Tab value="resources" leftSection={<IconBookmark size={14} />}>
+                Resources
+              </Tabs.Tab>
               {/* Team Weekly Planning Tabs - Only show for team projects */}
               {project.teamId && (
                 <>
@@ -671,6 +667,17 @@ export function ProjectContent({
                   workspaceSlug={workspace.slug}
                   projectId={resolvedProjectId}
                   readOnly={!myAccess?.canEdit}
+                />
+              )}
+            </Tabs.Panel>
+
+            <Tabs.Panel value="resources">
+              {/* Mounted only while active, like Pages: its list is its own query. */}
+              {activeTab === "resources" && (
+                <ProjectResourcesTab
+                  projectId={resolvedProjectId}
+                  workspaceSlug={workspace?.slug}
+                  canEdit={!!myAccess?.canEdit}
                 />
               )}
             </Tabs.Panel>
@@ -859,53 +866,6 @@ export function ProjectContent({
             </Card>
           </Stack>
 
-          {/* Bounties Override */}
-          <Stack gap="xs">
-            <Group gap="xs" align="center">
-              <IconCoin size={16} className="text-brand-primary" />
-              <Text size="sm" fw={600} className="text-brand-primary">
-                BOUNTIES
-              </Text>
-            </Group>
-            <Card withBorder p="md" radius="lg" className="bg-surface-secondary border-border-primary">
-              <Stack gap="sm">
-                <Text size="sm" className="text-text-secondary">
-                  Override the workspace default for bounties in this project.
-                </Text>
-                <SegmentedControl
-                  value={
-                    project?.enableBounties == null
-                      ? "inherit"
-                      : project.enableBounties
-                        ? "on"
-                        : "off"
-                  }
-                  onChange={(value) => {
-                    if (!project) return;
-                    const newValue = value === "inherit" ? null : value === "on";
-                    updateBountiesMutation.mutate({
-                      id: project.id,
-                      name: project.name,
-                      status: project.status as "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED",
-                      priority: project.priority as "HIGH" | "MEDIUM" | "LOW" | "NONE",
-                      enableBounties: newValue,
-                    });
-                  }}
-                  data={[
-                    {
-                      label: `Inherit (${workspaceBountiesEnabled ? "ON" : "OFF"})`,
-                      value: "inherit",
-                    },
-                    { label: "On", value: "on" },
-                    { label: "Off", value: "off" },
-                  ]}
-                  fullWidth
-                  disabled={updateBountiesMutation.isPending}
-                />
-              </Stack>
-            </Card>
-          </Stack>
-
           {/* Matrix room binding */}
           <Stack gap="xs">
             <Group gap="xs" align="center">
@@ -924,6 +884,19 @@ export function ProjectContent({
                   <MatrixRoomBinding
                     workspaceId={workspaceId}
                     projectId={resolvedProjectId}
+                  />
+                )}
+                <Text size="sm" className="text-text-secondary" mt="xs">
+                  Decisions → Matrix. Posted when a person confirms, accepts or
+                  supersedes one of this project&apos;s decisions; agent drafts never
+                  post. Off keeps them out of Matrix even when the workspace has a
+                  decisions room.
+                </Text>
+                {workspaceId && resolvedProjectId && (
+                  <MatrixRoomBinding
+                    workspaceId={workspaceId}
+                    projectId={resolvedProjectId}
+                    kind="decision"
                   />
                 )}
               </Stack>

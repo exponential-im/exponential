@@ -20,10 +20,26 @@ const PORT = Number(process.env.E2E_PORT ?? 3100);
 const E2E_MASTRA_STUB_URL = "http://127.0.0.1:4199";
 const E2E_CRON_SECRET = "e2e-cron-secret";
 
+const NOT_E2E = ["perf/**", "docs-screenshots/**"];
+
+/** Specs that write the fixture user's saved product view prefs directly. */
+const SHARED_VIEW_PREFS_SPECS = [
+  "product-view-prefs.spec.ts",
+  "ticket-dependency-nesting.spec.ts",
+  "ticket-short-id-search.spec.ts",
+];
+
+/**
+ * Specs that start their own Mastra stub on E2E_MASTRA_STUB_URL. One port, so
+ * they run one file at a time.
+ */
+const MASTRA_STUB_SPECS = ["agent-run.spec.ts", "billing-usage.spec.ts"];
+
 export default defineConfig({
   testDir: "./e2e",
-  // e2e/perf/ has its own config (production build, one worker).
-  testIgnore: ["perf/**", "docs-screenshots/**"],
+  // e2e/perf/ has its own config (production build, one worker). A project's
+  // own testIgnore replaces this one, so projects spread it in.
+  testIgnore: NOT_E2E,
   globalSetup: "./e2e/global-setup",
   outputDir: "./e2e/.results",
   // First hit on a `next dev` route pays compile + data-fetch cost; give each
@@ -39,7 +55,29 @@ export default defineConfig({
     screenshot: "only-on-failure",
     trace: "on-first-retry",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: [...NOT_E2E, ...SHARED_VIEW_PREFS_SPECS, ...MASTRA_STUB_SPECS],
+    },
+    {
+      // These specs rewrite the fixture user's saved Backlog view prefs (one
+      // row every spec shares). Each file is serial on its own, but two files
+      // in parallel overwrite each other's filters mid-test, so they run one
+      // file at a time.
+      name: "chromium-shared-prefs",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: SHARED_VIEW_PREFS_SPECS,
+      workers: 1,
+    },
+    {
+      name: "chromium-mastra-stub",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: MASTRA_STUB_SPECS,
+      workers: 1,
+    },
+  ],
   webServer: {
     command: `npx next dev --turbo -p ${PORT}`,
     url: `http://localhost:${PORT}`,
@@ -58,6 +96,14 @@ export default defineConfig({
       // secret is fixed so a spec can kick the dispatcher deterministically.
       MASTRA_API_URL: E2E_MASTRA_STUB_URL,
       CRON_SECRET: E2E_CRON_SECRET,
+      // The suite runs as a hosted install that meters Assistant use, so the
+      // usage ledger and the Billing tab are covered (billing-usage.spec.ts).
+      // Nothing is limited in this mode.
+      BILLING_MODE: "meter",
+      // Fixed, so a Mastra stub can make the callbacks only the Mastra server
+      // may make (the model-key ones). Same value as E2E_MASTRA_SERVER_KEY in
+      // e2e/fixture-data.ts.
+      MASTRA_SERVER_API_KEY: "e2e-mastra-server-key",
     },
   },
 });

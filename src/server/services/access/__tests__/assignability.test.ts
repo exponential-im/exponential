@@ -16,6 +16,7 @@ import type { PrismaClient } from "@prisma/client";
 import {
   assertAssignableUser,
   canAssignToUnscopedAction,
+  toAssignableUser,
 } from "../assignability";
 
 const CALLER_ID = "user-caller";
@@ -164,5 +165,67 @@ describe("canAssignToUnscopedAction", () => {
     await expect(
       canAssignToUnscopedAction(db, CALLER_ID, WORKSPACE_ID, OUTSIDER_ID),
     ).resolves.toBe(false);
+  });
+});
+
+describe("toAssignableUser: assistantExecutor", () => {
+  const base = { id: "u", name: "Ada", email: null, image: null };
+  const assistant = { emoji: null, createdBy: { id: "owner", name: "Owner" } };
+
+  it("is null for a human", () => {
+    expect(toAssignableUser({ ...base, isAgent: false, externalAgentShadow: null }).assistantExecutor).toBeNull();
+  });
+
+  it("is null for a plain External agent (not an Assistant)", () => {
+    const row = { ...base, isAgent: true, externalAgentShadow: { description: null, executor: "MASTRA" as const, assistant: null } };
+    expect(toAssignableUser(row).assistantExecutor).toBeNull();
+  });
+
+  it("carries LOCAL_CLI so pickers keep local Assistants without Mastra", () => {
+    const row = { ...base, isAgent: true, externalAgentShadow: { description: null, executor: "LOCAL_CLI" as const, assistant } };
+    expect(toAssignableUser(row).assistantExecutor).toBe("LOCAL_CLI");
+  });
+
+  it("defaults an Assistant to MASTRA when the executor wasn't selected", () => {
+    const row = { ...base, isAgent: true, externalAgentShadow: { description: null, assistant } };
+    expect(toAssignableUser(row).assistantExecutor).toBe("MASTRA");
+  });
+});
+
+describe("an Assistant is assignable only where it works (Agent PRD V2, D7 regression)", () => {
+  // An Assistant's principal is an External agent whose shadow user holds
+  // ordinary WorkspaceUser rows (ADR-0067). No code special-cases it: the
+  // same membership resolver that admits a person admits it, and refuses it
+  // in a workspace its person has not added it to.
+  const ASSISTANT_SHADOW_ID = "user-assistant-shadow";
+  let db: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    db = mockDeep<PrismaClient>();
+    mockReset(db);
+    db.teamUser.findFirst.mockResolvedValue(null);
+    db.team.findFirst.mockResolvedValue(null);
+  });
+
+  it("refuses it in a workspace it has not joined", async () => {
+    stubDirectMembers(db, [CALLER_ID]);
+
+    await expect(
+      assertAssignableUser(db, WORKSPACE_ID, ASSISTANT_SHADOW_ID),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      canAssignToUnscopedAction(db, CALLER_ID, WORKSPACE_ID, ASSISTANT_SHADOW_ID),
+    ).resolves.toBe(false);
+  });
+
+  it("accepts it once its person has added it", async () => {
+    stubDirectMembers(db, [CALLER_ID, ASSISTANT_SHADOW_ID]);
+
+    await expect(
+      assertAssignableUser(db, WORKSPACE_ID, ASSISTANT_SHADOW_ID),
+    ).resolves.toBeUndefined();
+    await expect(
+      canAssignToUnscopedAction(db, CALLER_ID, WORKSPACE_ID, ASSISTANT_SHADOW_ID),
+    ).resolves.toBe(true);
   });
 });

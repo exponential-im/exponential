@@ -25,14 +25,15 @@ import {
   IconUserPlus,
   IconPlug,
   IconCalendarRepeat,
+  IconCreditCard,
   IconFolder,
   IconUsers,
   IconRocket,
   IconMail,
   IconPlugConnected,
-  IconCoin,
   IconSun,
   IconCalendarCheck,
+  IconBrandGithub,
   IconBrandSlack,
   IconBrandNotion,
   IconRefresh,
@@ -53,16 +54,19 @@ import {
   IconAlertTriangle,
   type Icon as TablerIcon,
 } from '@tabler/icons-react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useRef, useState } from 'react';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { canDelegateFromRole } from '~/lib/agentDelegation';
+import { PersonLink } from '~/app/_components/people/PersonLink';
 import { InviteMemberModal } from '~/app/_components/InviteMemberModal';
 import { EditMemberRoleModal } from '~/app/_components/EditMemberRoleModal';
 import { PendingInvitationsTable } from '~/app/_components/PendingInvitationsTable';
 import { WorkspaceTeamsSection } from '~/app/_components/WorkspaceTeamsSection';
 import { PositionsSection } from '~/app/_components/PositionsSection';
 import { SlackChannelSettings } from '~/app/_components/SlackChannelSettings';
+import { GithubRepositoriesSettings } from '~/app/_components/integrations/GithubRepositoriesSettings';
 import { ZulipSettings } from '~/app/_components/ZulipSettings';
 import { MatrixServerSettings } from '~/app/_components/MatrixServerSettings';
 import { SentrySettings } from '~/app/_components/SentrySettings';
@@ -89,22 +93,36 @@ import {
   type SidebarGroup,
 } from '~/app/_components/settings/SettingsShell';
 import { WorkspaceUpdatesSettings } from '~/app/_components/settings/WorkspaceUpdatesSettings';
+import { AiFeaturesSettings } from '~/app/_components/settings/AiFeaturesSettings';
+import { BillingSettings } from '~/app/_components/settings/BillingSettings';
 
-type SectionId =
-  | 'general'
-  | 'members'
-  | 'teams'
-  | 'features'
-  | 'integrations'
-  | 'plugins'
-  | 'ceremonies'
-  | 'updates'
-  | 'danger';
+const SECTION_IDS = [
+  'general',
+  'members',
+  'teams',
+  'features',
+  'integrations',
+  'plugins',
+  'ceremonies',
+  'updates',
+  'billing',
+  'danger',
+] as const;
+
+type SectionId = (typeof SECTION_IDS)[number];
+
+/** `?section=integrations` opens that section, so other pages and OAuth returns can link to it. */
+function sectionFromParam(value: string | null): SectionId {
+  return SECTION_IDS.find((id) => id === value) ?? 'general';
+}
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
   const { workspace, workspaceId, isLoading, userRole, refetchWorkspace } = useWorkspace();
-  const [section, setSection] = useState<SectionId>('general');
+  const searchParams = useSearchParams();
+  const [section, setSection] = useState<SectionId>(() =>
+    sectionFromParam(searchParams.get('section')),
+  );
   const [editingField, setEditingField] = useState<'name' | 'description' | 'aiInstructions' | null>(null);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -169,7 +187,6 @@ export default function WorkspaceSettingsPage() {
   const currentEffortUnit = (workspaceData?.effortUnit as EffortUnit | undefined) ?? 'STORY_POINTS';
   const advancedActionsEnabled = workspaceData?.enableAdvancedActions ?? false;
   const detailedActionsEnabled = workspaceData?.enableDetailedActions ?? false;
-  const bountiesEnabled = workspaceData?.enableBounties ?? false;
   const dailyPlanBannerEnabled = workspaceData?.enableDailyPlanBanner ?? true;
   const weeklyReviewBannerEnabled = workspaceData?.enableWeeklyReviewBanner ?? true;
   const emailNotificationsEnabled = workspaceData?.enableEmailNotifications ?? true;
@@ -239,11 +256,6 @@ export default function WorkspaceSettingsPage() {
       detailedActionsEnabled
         ? 'Detailed action pages have been disabled'
         : 'Detailed action pages have been enabled'
-    ),
-  });
-  const updateBountiesMutation = api.workspace.update.useMutation({
-    onSuccess: featureSuccess(
-      bountiesEnabled ? 'Bounties have been disabled' : 'Bounties have been enabled'
     ),
   });
   const updateDailyPlanBannerMutation = api.workspace.update.useMutation({
@@ -422,6 +434,30 @@ export default function WorkspaceSettingsPage() {
     },
   });
 
+  // "Add my Assistant" (ADR-0072, Agent PRD V2): a person's Assistant joins a
+  // workspace only when they add it, and only where they hold a delegating
+  // role — the same rule the server enforces in assistant.addToWorkspace.
+  const canAddMyAssistant = canDelegateFromRole(userRole);
+  const { data: myAssistant } = api.assistant.getMine.useQuery(undefined, {
+    enabled: section === 'members' && canAddMyAssistant,
+  });
+  const addMyAssistantMutation = api.assistant.addToWorkspace.useMutation({
+    onSuccess: () => {
+      refetchWorkspace();
+      void utils.assistant.getMine.invalidate();
+      void utils.assistant.myWorkspaces.invalidate();
+      notifications.show({
+        title: 'Assistant added',
+        message: `${myAssistant?.name ?? 'Your Assistant'} can now be assigned work in ${workspace?.name ?? 'this workspace'}.`,
+        color: 'green',
+        autoClose: 3000,
+      });
+    },
+    onError: (error) => {
+      notifications.show({ title: 'Could not add your Assistant', message: error.message, color: 'red' });
+    },
+  });
+
   const { data: emailStatus, refetch: refetchEmailStatus } = api.integration.getWorkspaceEmailStatus.useQuery(
     { workspaceId: workspaceId! },
     { enabled: !!workspaceId }
@@ -546,6 +582,17 @@ export default function WorkspaceSettingsPage() {
     }
   );
 
+  // Answers `{ mode: 'off' }` on an install that does not meter Assistant use
+  // (every self-hosted one), and then there is no Billing tab at all.
+  const { data: billingStatus } = api.billing.getStatus.useQuery(
+    { workspaceId: workspaceId! },
+    {
+      enabled:
+        !!workspaceId && (userRole === 'owner' || userRole === 'admin'),
+    }
+  );
+  const showBilling = !!billingStatus && billingStatus.mode !== 'off';
+
   const handleSaveEmail = () => {
     if (!workspaceId || !emailAddress || !emailAppPassword) return;
     createEmailMutation.mutate({
@@ -648,13 +695,16 @@ export default function WorkspaceSettingsPage() {
 
   const canEdit = userRole === 'owner' || userRole === 'admin';
   const canManageMembers = userRole === 'owner' || userRole === 'admin';
+  const myAssistantShadowId = myAssistant?.externalAgent.shadowUserId;
+  const myAssistantIsMember =
+    !!myAssistantShadowId && !!workspace.members?.some((member) => member.userId === myAssistantShadowId);
+  const showAddMyAssistant = canAddMyAssistant && !myAssistantIsMember;
 
   const memberCount = workspace.members?.length ?? 0;
   const pendingCount = pendingInvites?.length ?? 0;
   const featureList = [
     advancedActionsEnabled,
     detailedActionsEnabled,
-    bountiesEnabled,
     keyResultsEnabled,
     dailyPlanBannerEnabled,
     weeklyReviewBannerEnabled,
@@ -681,6 +731,9 @@ export default function WorkspaceSettingsPage() {
         { id: 'ceremonies', label: 'Ceremonies', icon: IconCalendarRepeat },
         ...(userRole === 'owner' || userRole === 'admin'
           ? [{ id: 'updates' as const, label: 'Updates', icon: IconSparkles }]
+          : []),
+        ...(showBilling
+          ? [{ id: 'billing' as const, label: 'Billing', icon: IconCreditCard }]
           : []),
       ],
     },
@@ -945,14 +998,30 @@ export default function WorkspaceSettingsPage() {
               count={`${memberCount} · ${pendingCount} pending`}
               description="People with access to projects, goals, and integrations in this workspace."
               action={
-                canManageMembers && (
-                  <Button
-                    size="xs"
-                    leftSection={<IconUserPlus size={14} />}
-                    onClick={openInviteModal}
-                  >
-                    Invite member
-                  </Button>
+                (showAddMyAssistant || canManageMembers) && (
+                  <Group gap="xs">
+                    {showAddMyAssistant && (
+                      <Button
+                        size="xs"
+                        variant="default"
+                        leftSection={<IconRobotFace size={14} />}
+                        onClick={() => workspaceId && addMyAssistantMutation.mutate({ workspaceId })}
+                        loading={addMyAssistantMutation.isPending}
+                        data-testid="add-my-assistant"
+                      >
+                        Add my Assistant
+                      </Button>
+                    )}
+                    {canManageMembers && (
+                      <Button
+                        size="xs"
+                        leftSection={<IconUserPlus size={14} />}
+                        onClick={openInviteModal}
+                      >
+                        Invite member
+                      </Button>
+                    )}
+                  </Group>
                 )
               }
               flush
@@ -992,7 +1061,9 @@ export default function WorkspaceSettingsPage() {
                       </Avatar>
                       <div className="min-w-0">
                         <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] font-medium text-text-primary">
-                          <span className="max-w-full truncate">{member.user.name ?? 'Unknown'}</span>
+                          <PersonLink userId={member.userId} className="max-w-full truncate">
+                            {member.user.name ?? 'Unknown'}
+                          </PersonLink>
                           {member.user.isAgent && (
                             <span className="inline-flex shrink-0 items-center gap-0.5 rounded border border-border-primary px-1 text-[10px] font-normal text-text-muted">
                               <IconRobotFace size={10} aria-hidden="true" />
@@ -1237,18 +1308,6 @@ export default function WorkspaceSettingsPage() {
               }}
             />
             <FeatureRow
-              icon={IconCoin}
-              tag="Product"
-              title="Bounties"
-              description="Enable bounty rewards on actions in public projects. Projects can override."
-              enabled={bountiesEnabled}
-              disabled={!canEdit || updateBountiesMutation.isPending}
-              onToggle={(checked) => {
-                if (!workspaceId) return;
-                updateBountiesMutation.mutate({ workspaceId, enableBounties: checked });
-              }}
-            />
-            <FeatureRow
               icon={IconTarget}
               tag="Product"
               title="Key Results"
@@ -1325,6 +1384,7 @@ export default function WorkspaceSettingsPage() {
 
         {section === 'integrations' && (
           <>
+            <AiFeaturesSettings />
             <SettingsSection
               icon={IconMail}
               title="Email Account"
@@ -1471,6 +1531,16 @@ export default function WorkspaceSettingsPage() {
                   workspace={{ id: workspaceId, name: workspace.name }}
                   canManage={canEdit}
                 />
+              </SettingsSection>
+            )}
+
+            {workspaceId && (
+              <SettingsSection
+                icon={IconBrandGithub}
+                title="GitHub"
+                description="Choose the repositories this workspace tracks. Their pull requests and commits feed the activity feed, delivery metrics and the Decision Log."
+              >
+                <GithubRepositoriesSettings />
               </SettingsSection>
             )}
 
@@ -1697,6 +1767,8 @@ export default function WorkspaceSettingsPage() {
             members={workspace.members ?? []}
           />
         )}
+
+        {section === 'billing' && showBilling && <BillingSettings workspaceId={workspace.id} />}
 
         {section === 'danger' && userRole === 'owner' && (
           <SettingsDangerZone icon={IconShieldExclamation}>

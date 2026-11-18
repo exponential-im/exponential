@@ -1,5 +1,7 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTicketWithNumber } from "~/plugins/product/server/services/createTicket";
+import { notifyTicketAssigned } from "~/plugins/product/server/services/notifyTicketAssigned";
+import { getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
 import { ticketUrlId } from "~/lib/fun-ids";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 import { buildBugBody, type SentryBug } from "./sentryPayload";
@@ -22,6 +24,16 @@ import { notifyMatrixOfSentryBug } from "./sentryMatrix";
 
 // The Exponential product is the default bug destination (overridable via env).
 const DEFAULT_BUG_PRODUCT_ID = "cmp2ztu9y0003jv04kk2l8sm0";
+
+/**
+ * The product auto-filed bugs land in when the caller names none: the env
+ * override, else the Exponential product. Exported for code that has to find
+ * those tickets again (the tool canary's recovery sweep).
+ */
+export function resolveBugProductId(): string {
+  return process.env.SENTRY_BUG_PRODUCT_ID ?? DEFAULT_BUG_PRODUCT_ID;
+}
+
 const DEFAULT_BOT_EMAIL = "errol@bots.exponential.im";
 const DEFAULT_BOT_NAME = "Errol";
 
@@ -39,6 +51,41 @@ async function findOrCreateErrol(db: PrismaClient): Promise<{ id: string }> {
     update: {},
     select: { id: true },
   });
+}
+
+/**
+ * Who an auto-filed bug is assigned to, so one person is told about it (the
+ * Assignment notification, on whichever channels they chose) and owns its
+ * triage. Set by `SENTRY_BUG_ASSIGNEE_ID`; unset means unassigned, as before.
+ *
+ * The env value describes the platform's own bug product, so it applies only
+ * there: a workspace-scoped Sentry integration that files into its own
+ * product is never assigned to the platform's on-call. A user who is not a
+ * member of the product's workspace is ignored as well, since they could not
+ * open the ticket.
+ */
+export async function resolveBugAssigneeId(
+  db: PrismaClient,
+  product: { id: string; workspaceId: string },
+): Promise<string | null> {
+  const assigneeId = process.env.SENTRY_BUG_ASSIGNEE_ID?.trim();
+  if (!assigneeId) return null;
+
+  const platformProductId = resolveBugProductId();
+  if (product.id !== platformProductId) return null;
+
+  const membership = await getWorkspaceMembership(
+    db,
+    assigneeId,
+    product.workspaceId,
+  );
+  if (!membership) {
+    console.warn(
+      "[sentry bug] SENTRY_BUG_ASSIGNEE_ID is not a member of the bug product's workspace; leaving the ticket unassigned",
+    );
+    return null;
+  }
+  return assigneeId;
 }
 
 // Workspace labels applied to every Sentry-filed ticket. `avatar-plum` ≈ Sentry's
@@ -211,10 +258,7 @@ export async function ingestSentryBug(
   // workspace-scoped Sentry integration) wins; otherwise fall back to the
   // global env default, then the hardcoded Exponential product. This keeps the
   // legacy global `/api/webhooks/sentry` route working unchanged.
-  const productId =
-    options?.productId ??
-    process.env.SENTRY_BUG_PRODUCT_ID ??
-    DEFAULT_BUG_PRODUCT_ID;
+  const productId = options?.productId ?? resolveBugProductId();
   const product = await db.product.findUnique({
     where: { id: productId },
     select: {
@@ -283,6 +327,7 @@ export async function ingestSentryBug(
   }
 
   const errol = await findOrCreateErrol(db);
+  const assigneeId = await resolveBugAssigneeId(db, product);
 
   const ticket = await createTicketWithNumber(db, {
     productId: product.id,
@@ -292,6 +337,7 @@ export async function ingestSentryBug(
     body: options?.body ?? buildBugBody(bug),
     type: "BUG",
     status: "BACKLOG",
+    assigneeId,
     // Priority is left unset — a human assigns it during triage.
     // `sentryIssueId` stays the key for non-Sentry origins too: it is the dedup
     // path queried above, and a second path would mean a second lookup for no
@@ -331,6 +377,16 @@ export async function ingestSentryBug(
   };
   await notifyZulipOfSentryBug(db, bugNotification);
   await notifyMatrixOfSentryBug(bugNotification);
+
+  // And tell the assignee directly. Errol is the actor, so this reaches them
+  // even though nobody "assigned" it by hand. After the labels, so the ticket
+  // they open is complete.
+  await notifyTicketAssigned(db, {
+    ticketId: ticket.id,
+    assigneeId,
+    previousAssigneeId: null,
+    actorUserId: errol.id,
+  });
 
   return { created: true, ticketId: ticket.id };
 }

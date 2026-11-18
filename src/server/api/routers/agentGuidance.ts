@@ -12,6 +12,7 @@ import { env } from "~/env";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { DOCS_DIR } from "~/lib/docs/content";
 import { isMethodPublished } from "~/lib/docs/method";
+import { resolvePrincipal } from "~/server/services/access/principal";
 import {
   canPreviewDraftMethod,
   getContext,
@@ -46,10 +47,27 @@ export const agentGuidanceRouter = createTRPCRouter({
    * The selected workspace's (and optional project's) AI instructions, marked
    * as guidance and assembled exactly as chat assembles them. Requires
    * membership of the workspace; a project outside it is BAD_REQUEST.
+   * ADR metadata is listed for a caller with a write role, agents included
+   * while their owner still belongs (ADR-0049, amended 2026-11-15); a
+   * principal the resolver refuses gets none.
    */
   context: protectedProcedure
     .input(z.object({ workspaceId: z.string().min(1), projectId: z.string().min(1).optional() }))
     .query(({ ctx, input }) =>
-      getContext(ctx.db, { userId: ctx.session.user.id, workspaceId: input.workspaceId, projectId: input.projectId }),
+      getContext(ctx.db, {
+        userId: ctx.session.user.id,
+        workspaceId: input.workspaceId,
+        projectId: input.projectId,
+        resolvePrincipal: async () => {
+          try {
+            return await resolvePrincipal(ctx);
+          } catch (error) {
+            // The resolver refuses (a shadow user with no agent): no ADRs, but
+            // the rest of the context still loads. Anything else is a real failure.
+            if (error instanceof TRPCError) return null;
+            throw error;
+          }
+        },
+      }),
     ),
 });

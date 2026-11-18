@@ -4,7 +4,7 @@ description: Identity, members, teams, feature switches, integrations, plugins, 
 section: reference
 order: 2
 icon: IconBuildingSkyscraper
-updated: 2026-10-02
+updated: 2026-11-15
 ---
 
 Workspace settings apply to everyone in the workspace: who is in it, which features and plugins are on, how effort is estimated, and which recurring meetings it runs. Owners and admins can change them; members can read them. Personal preferences live in [Your settings](/docs/reference/your-settings).
@@ -61,7 +61,6 @@ How the team sizes work, shown only when Advanced Action Features is on: **Story
 | Feature | What it does |
 |---|---|
 | **Detailed Action Pages** | Full pages for actions with an activity thread, comments and a properties sidebar. Projects can override. |
-| **Bounties** | Bounty rewards on actions in public projects. Projects can override. |
 | **Daily Plan Banner** and **Weekly Plan Banner** | Reminders on the home page until the plan is done. |
 | **Email Notifications** | Emails on assignments and mentions. Members can turn theirs off. |
 | **Auto-enrich Contacts** | When a CRM contact is created, run a background search to fill in email, LinkedIn, bio and organisation. |
@@ -78,10 +77,11 @@ The connections that belong to the workspace rather than to you, each on its own
 | **Zulip** | Send workspace notifications to a Zulip stream and direct-message people on assignments and mentions. |
 | **Matrix** | Register your own Matrix homeserver so meeting summaries can be posted into your team's rooms; the bot posts only. |
 | **Sentry** | File Sentry issues as Bug tickets in a product; generates the webhook URL and secret to paste into Sentry. |
+| **GitHub** | Choose the repositories this workspace tracks, from those the installed GitHub App can see; see [GitHub](/docs/integrations/github-google-monday). |
 | **Notion** | Default Notion account and sync direction (**Pull from Notion**, **Push to Notion**, **Bidirectional**) for the workspace's projects; projects can override. |
 | **Fireflies** | Connect one or more Fireflies accounts for the workspace. |
 
-Personal connections (your own Slack app, WhatsApp, Telegram, calendars, GitHub repositories) are on [Settings → Integrations](/settings/integrations); see [Integrations](/docs/integrations).
+Personal connections (your own Slack app, WhatsApp, Telegram, calendars) are on [Settings → Integrations](/settings/integrations); see [Integrations](/docs/integrations).
 
 ## Plugins
 
@@ -123,7 +123,7 @@ Owners only: delete the workspace and everything in it. There is no undo.
 - **Members and access** — roles, invitations and guests in detail: [Members, roles & access](/docs/collaborate/members-and-access).
 
 - **Your settings** — navigation, appearance, notifications and API keys are personal: [Your settings](/docs/reference/your-settings).
-- **Projects** — several features (detailed pages, bounties, restricted access) can be overridden per project: [Projects](/docs/do/projects).
+- **Projects** — several features (detailed pages, restricted access) can be overridden per project: [Projects](/docs/do/projects).
 
 ## FAQ
 

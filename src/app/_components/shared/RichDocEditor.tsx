@@ -5,7 +5,7 @@ import { EditorContent, BubbleMenu, useEditor } from "@tiptap/react";
 import { RichTextEditor } from "@mantine/tiptap";
 import type { Editor, Extensions, JSONContent } from "@tiptap/core";
 import type { EditorView } from "@tiptap/pm/view";
-import { ActionIcon, Group, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Group, Stack, Text, Tooltip } from "@mantine/core";
 import {
   IconColumnInsertLeft,
   IconColumnInsertRight,
@@ -21,15 +21,16 @@ import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { buildPrdExtensions } from "~/lib/prd/extensions";
 import { SlashCommand, type SlashCommandItem } from "~/lib/prd/slash-command";
+import { DomSelectionSync } from "~/lib/prd/dom-selection-sync";
 import { markdownToDoc, EMPTY_DOC, isDocEmpty } from "~/lib/prd/codec";
 import { createSaveQueue } from "~/lib/prd/save-queue";
 import { selectionToMarkdown } from "~/lib/prd/selection-markdown";
+import { uploadImageFile, type UploadImage } from "~/lib/prd/image-upload";
 import { PageLinkWithView } from "./PageLinkView";
+import { BlockTypeMenu } from "./BlockTypeMenu";
 import { CodeBlockWithView } from "./CodeBlockView";
 import { DatabaseWithView } from "~/app/_components/databases/DatabaseBlock";
 import "@mantine/tiptap/styles.css";
-
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /** Imperative handle the comment layer (or any host) needs from the engine. */
 export interface RichDocEditorHandle {
@@ -153,22 +154,33 @@ export interface RichDocEditorProps {
   /** Members edit in place; everyone else gets a read-only render. */
   editable?: boolean;
   placeholder?: string;
-  /** Title + message for the stale-write conflict modal. */
-  conflict?: { title: string; message: string };
+  /**
+   * Title + message for the stale-write conflict modal. `keepMine` adds a
+   * third way out next to Reload: save this tab's content over the newer
+   * version, which stays in the document's history (ADR-0074). Hosts without
+   * history leave it unset and get the two-button modal.
+   */
+  conflict?: { title: string; message: string; keepMine?: boolean };
   /**
    * Persist a save. Returns the new stored `docVersion` so the engine can
    * advance its optimistic-concurrency base. Throw a tRPC CONFLICT to trigger
-   * the stale-write modal.
+   * the stale-write modal. `keptOver` is set when the person chose to keep
+   * their version over a newer one: the version they overrode, for the host
+   * to note on the revision.
    */
   onSave: (input: {
     doc: JSONContent;
     markdown: string;
     baseVersion: number;
+    keptOver?: number;
   }) => Promise<{ docVersion?: number } | undefined | void>;
   /** Persist the one-time lazy migration of legacy Markdown → ProseMirror JSON. */
   onInitDoc?: (doc: JSONContent) => void;
-  /** Upload a pasted/dropped image (base64 in, public URL out). */
-  uploadImage?: (base64Data: string) => Promise<{ url: string }>;
+  /**
+   * Upload an image (base64 in, public URL out). Enables paste, drop and the
+   * `/image` block.
+   */
+  uploadImage?: UploadImage;
 
   // ───────── optional host layer (e.g. Feature comments) ─────────
   /** Extra Tiptap extensions layered on top of the shared set. */
@@ -294,44 +306,51 @@ export function RichDocEditor({
     if (wrapperRef) wrapperRef.current = el;
   };
 
+  // The latest uploader behind a ref: hosts pass an inline arrow, and the
+  // slash extension is configured once, when the editor is created.
+  const uploadImageRef = useRef(uploadImage);
+  uploadImageRef.current = uploadImage;
+  const hasUploader = !!uploadImage;
+  const stableUpload = useMemo<UploadImage | undefined>(
+    () =>
+      hasUploader
+        ? (base64Data) => {
+            const upload = uploadImageRef.current;
+            return upload
+              ? upload(base64Data)
+              : Promise.reject(new Error("No image uploader"));
+          }
+        : undefined,
+    [hasUploader],
+  );
+
   // Image paste/drop handlers, built from the injected uploader. An uploaded
-  // image is inserted as an inline `image` node (the codec serialises it to a
-  // Markdown image link).
+  // image is inserted as an `image` node (the codec serialises it to a
+  // Markdown image link). The size cap, the notifications and the base64 read
+  // live in `uploadImageFile`, shared with the `/image` block.
   const imageHandlers = useMemo(() => {
-    if (!uploadImage) return null;
+    if (!stableUpload) return null;
     const insertImage = (view: EditorView, file: File, pos?: number): boolean => {
       if (!file.type.startsWith("image/")) return false;
-      if (file.size > MAX_IMAGE_BYTES) {
-        notifications.show({
-          title: "Image too large",
-          message: "Please use an image under 5MB.",
-          color: "red",
-        });
-        return true;
-      }
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const result = reader.result;
-        if (typeof result !== "string") return;
-        const base64 = result.split(",")[1];
-        if (!base64) return;
-        uploadImage(base64)
-          .then((res) => {
-            const { state } = view;
-            const node = state.schema.nodes.image?.create({ src: res.url });
-            if (!node) return;
-            const at = pos ?? state.selection.from;
-            view.dispatch(state.tr.insert(at, node));
-          })
-          .catch(() => {
-            notifications.show({
-              title: "Upload failed",
-              message: "Could not upload the image. Please try again.",
-              color: "red",
-            });
+      void uploadImageFile(file, stableUpload).then((url) => {
+        if (!url || view.isDestroyed) return;
+        const { state } = view;
+        const node = state.schema.nodes.image?.create({ src: url });
+        if (!node) return;
+        // A drop carries the position it was dropped at, which the document
+        // may have outgrown while the upload was in flight (an undo, a
+        // deleted block); an out-of-range insert throws.
+        const at = Math.min(pos ?? state.selection.from, state.doc.content.size);
+        try {
+          view.dispatch(state.tr.insert(at, node));
+        } catch {
+          notifications.show({
+            title: "Image not inserted",
+            message: "The upload finished but the image could not be placed.",
+            color: "red",
           });
-      };
-      reader.readAsDataURL(file);
+        }
+      });
       return true;
     };
     const firstImage = (list?: FileList | null): File | null => {
@@ -356,7 +375,7 @@ export function RichDocEditor({
         return insertImage(view, file, coords?.pos);
       },
     };
-  }, [uploadImage]);
+  }, [stableUpload]);
 
   // Resolve the document to render, migrating legacy Markdown once.
   useEffect(() => {
@@ -386,40 +405,90 @@ export function RichDocEditor({
   // reads the editor, content and version base at execution time, and never
   // rejects (errors surface via the conflict modal or an error notification
   // instead) — the queue relies on that.
+  // Set by "Keep my version": the next save goes out at the server's current
+  // version, overriding it, and tells the host which version it overrode.
+  const keepOverRef = useRef<number | null>(null);
   const saveRef = useRef<() => Promise<void>>(() => Promise.resolve());
   saveRef.current = () => {
     const editor = editorRef.current;
     if (!editor || editor.isDestroyed) return Promise.resolve();
     const json = editor.getJSON();
     const serialized = JSON.stringify(json);
-    if (serialized === lastSavedRef.current) return Promise.resolve();
+    // Consumed on success or on a conflict (the modal sets it again if the
+    // person chooses Keep my version once more), kept on any other failure so
+    // the retry still carries the note.
+    const keptOver = keepOverRef.current;
+    if (keptOver === null && serialized === lastSavedRef.current) {
+      return Promise.resolve();
+    }
     const markdown = (
       editor.storage.markdown as { getMarkdown: () => string }
     ).getMarkdown();
-    return onSave({ doc: json, markdown, baseVersion: versionRef.current })
+    return onSave({
+      doc: json,
+      markdown,
+      baseVersion: versionRef.current,
+      ...(keptOver !== null ? { keptOver } : {}),
+    })
       .then((res) => {
         if (res && typeof res.docVersion === "number") {
           versionRef.current = res.docVersion;
         }
         lastSavedRef.current = serialized;
+        keepOverRef.current = null;
       })
-      .catch((err: { data?: { code?: string }; message?: string }) => {
+      .catch(
+        (err: {
+          data?: { code?: string; conflict?: { currentRevision?: number } };
+          message?: string;
+        }) => {
         if (err?.data?.code === "CONFLICT") {
+          keepOverRef.current = null;
           if (conflictShown.current) return;
           conflictShown.current = true;
-          modals.openConfirmModal({
+          const currentRevision = err.data?.conflict?.currentRevision;
+          const canKeepMine =
+            conflict?.keepMine === true && typeof currentRevision === "number";
+          const modalId = "richdoc-conflict";
+          const dismiss = () => {
+            conflictShown.current = false;
+            modals.close(modalId);
+          };
+          modals.open({
+            modalId,
             title: conflict?.title ?? "This document changed",
-            children: (
-              <Text size="sm">
-                {conflict?.message ??
-                  "Someone else saved a newer version. Reload to get the latest? Unsaved changes in this tab will be lost."}
-              </Text>
-            ),
-            labels: { confirm: "Reload", cancel: "Keep editing" },
-            onConfirm: () => window.location.reload(),
-            onCancel: () => {
+            onClose: () => {
               conflictShown.current = false;
             },
+            children: (
+              <Stack gap="md">
+                <Text size="sm">
+                  {conflict?.message ??
+                    "Someone else saved a newer version. Reload to get the latest? Unsaved changes in this tab will be lost."}
+                </Text>
+                <Group justify="flex-end" gap="sm">
+                  <Button variant="default" onClick={dismiss}>
+                    Keep editing
+                  </Button>
+                  {canKeepMine ? (
+                    <Button
+                      variant="light"
+                      onClick={() => {
+                        // Their version is already in history; ours goes on
+                        // top as a forward write at the current version.
+                        keepOverRef.current = currentRevision;
+                        versionRef.current = currentRevision;
+                        dismiss();
+                        void saveQueueRef.current.request();
+                      }}
+                    >
+                      Keep my version
+                    </Button>
+                  ) : null}
+                  <Button onClick={() => window.location.reload()}>Reload</Button>
+                </Group>
+              </Stack>
+            ),
           });
           return;
         }
@@ -434,7 +503,8 @@ export function RichDocEditor({
             "Your edits haven't been saved. Check your connection and try again.",
           color: "red",
         });
-      });
+      },
+      );
   };
 
   // All triggers (typing debounce, blur, flush) funnel through one queue so
@@ -460,7 +530,14 @@ export function RichDocEditor({
         database: DatabaseWithView,
       }),
       ...(editable
-        ? [SlashCommand.configure({ extraCommands: slashExtras ?? [] })]
+        ? [
+            // Keys act on the selection the person sees (see the module).
+            DomSelectionSync,
+            SlashCommand.configure({
+              extraCommands: slashExtras ?? [],
+              ...(stableUpload ? { uploadImage: stableUpload } : {}),
+            }),
+          ]
         : []),
       ...(extraExtensions ?? []),
     ],
@@ -555,13 +632,14 @@ export function RichDocEditor({
             tippyOptions={{ duration: 150 }}
           >
             <RichTextEditor.ControlsGroup>
+              <BlockTypeMenu editor={editor} />
               <RichTextEditor.Bold />
               <RichTextEditor.Italic />
+              <RichTextEditor.Underline />
+              <RichTextEditor.Strikethrough />
+              <RichTextEditor.Highlight />
               <RichTextEditor.Code />
               <RichTextEditor.Link />
-              <RichTextEditor.H1 />
-              <RichTextEditor.H2 />
-              <RichTextEditor.H3 />
               <RichTextEditor.BulletList />
               <RichTextEditor.OrderedList />
               <CopyMarkdownControl editor={editor} />

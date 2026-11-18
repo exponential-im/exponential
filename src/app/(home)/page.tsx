@@ -1,28 +1,23 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { auth } from "~/server/auth";
-import { HeaderAuthButtons } from "~/app/_components/HeaderAuthButtons";
-import { LogoDisplay } from "~/app/_components/layout/LogoDisplay";
-import { ThemeToggle } from "~/app/_components/ThemeToggle";
-import { themes } from "~/config/themes";
-import { getThemeDomain } from "~/config/site";
 import {
   HeroSection,
-  FactsSection,
-  ProblemStatementSection,
-  SolutionIntroSection,
-  ProductDemoSection,
-  HowItWorksSection,
-  KeyFeaturesSection,
-  PersonaSection,
+  ProofStrip,
+  PillarsSection,
+  FeatureTabsSection,
+  AgentAccessSection,
+  SelfHostSection,
   PricingSection,
   FinalCTASection,
   FooterSection,
-  FeaturesMenu,
-  ResourcesMenu,
+  MarketingHeader,
 } from "~/app/_components/home";
-import { PRODUCT_NAME, PRODUCT_SEO_DESCRIPTION, PRODUCT_SEO_TITLE } from "~/lib/brand";
+import {
+  PRODUCT_NAME,
+  PRODUCT_SEO_DESCRIPTION,
+  PRODUCT_SEO_TITLE,
+} from "~/lib/brand";
 
 // The homepage's search-result title and description. Other (home) pages fall
 // back to the layout's branding copy.
@@ -53,81 +48,34 @@ export default async function Home() {
     redirect("/home");
   }
 
-  const domain = getThemeDomain();
-  const theme = themes[domain];
-
   return (
-    <div className="min-h-screen bg-background-primary text-text-primary">
-      {/* Navigation */}
-      <header className="fixed top-0 left-0 right-0 z-50 backdrop-blur-md border-b border-border-primary" style={{ backgroundColor: 'var(--color-bg-nav)' }}>
-        <div className="container mx-auto px-4 md:px-8">
-          <div className="flex justify-between items-center py-3">
-            <div className="flex items-center [&_span]:!text-white">
-              <LogoDisplay theme={theme} href="/" className="text-xl" />
-            </div>
-
-            {/* Desktop Navigation */}
-            <nav className="hidden md:flex items-center space-x-8">
-              <FeaturesMenu />
-              <Link
-                href="#how-it-works"
-                className="text-gray-300 hover:text-white transition-colors text-sm font-medium"
-              >
-                How It Works
-              </Link>
-              <Link
-                href="#pricing"
-                className="text-gray-300 hover:text-white transition-colors text-sm font-medium"
-              >
-                Pricing
-              </Link>
-              <ResourcesMenu />
-            </nav>
-
-            <div className="flex items-center gap-3">
-              <HeaderAuthButtons session={session} />
-              <ThemeToggle />
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Spacer for fixed header */}
-      <div className="h-20" />
+    <div className="mkt min-h-screen bg-background-primary text-text-primary">
+      <MarketingHeader onHomePage />
 
       <main>
-        {/* Section 1: Hero */}
         <HeroSection />
 
-        {/* Section 2: Facts */}
-        <FactsSection />
+        {/* What a visitor can check for themselves: source, licence, and
+            the public record of what we ship. */}
+        <ProofStrip />
 
-        {/* Section 3: Problem Statement */}
-        <ProblemStatementSection />
+        {/* Keeps the "how-it-works" anchor other pages link to. */}
+        <PillarsSection id="how-it-works" />
 
-        {/* Section 4: Solution Introduction */}
-        <SolutionIntroSection />
+        {/* Goals and projects, agents, meetings and decisions, one tab
+            each. Keeps the "features" anchor other pages link to. */}
+        <FeatureTabsSection id="features" />
 
-        {/* Section 5: Product Demo */}
-        <ProductDemoSection id="demo" />
+        {/* CLI, SDK and MCP */}
+        <AgentAccessSection id="agents" />
 
-        {/* Section 6: How It Works */}
-        <HowItWorksSection id="how-it-works" />
+        <SelfHostSection id="self-host" />
 
-        {/* Section 7: Key Features */}
-        <KeyFeaturesSection id="features" />
-
-        {/* Section 8: Who It's For */}
-        <PersonaSection id="personas" />
-
-        {/* Section 9: Pricing */}
         <PricingSection id="pricing" />
 
-        {/* Section 10: Final CTA */}
         <FinalCTASection />
       </main>
 
-      {/* Section 11: Footer */}
       <FooterSection />
     </div>
   );

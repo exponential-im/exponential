@@ -71,6 +71,34 @@ export async function getWorkspaceMembership(
 }
 
 /**
+ * Batch form of {@link getWorkspaceMembership}'s role: each of `userIds` who
+ * belongs to the workspace, with their role. A direct `WorkspaceUser` row
+ * wins; otherwise a team linked to the workspace makes them a "member".
+ * People outside the workspace are absent from the map.
+ */
+export async function getWorkspaceRoles(
+  db: PrismaClient,
+  workspaceId: string,
+  userIds: string[],
+): Promise<Map<string, WorkspaceRole>> {
+  const roles = new Map<string, WorkspaceRole>();
+  if (userIds.length === 0) return roles;
+  const [direct, viaTeam] = await Promise.all([
+    db.workspaceUser.findMany({
+      where: { workspaceId, userId: { in: userIds } },
+      select: { userId: true, role: true },
+    }),
+    db.teamUser.findMany({
+      where: { team: { workspaceId }, userId: { in: userIds } },
+      select: { userId: true },
+    }),
+  ]);
+  for (const { userId } of viaTeam) roles.set(userId, "member");
+  for (const { userId, role } of direct) roles.set(userId, role as WorkspaceRole);
+  return roles;
+}
+
+/**
  * Batch form of {@link getWorkspaceMembership}'s yes/no: which of `userIds`
  * belong to the workspace, directly or via a team linked to it.
  */
@@ -107,6 +135,28 @@ export function buildWorkspaceAccessWhere(userId: string) {
       { members: { some: { userId } } },
       // Team-based workspace access: user is in a team linked to this workspace
       { teams: { some: { members: { some: { userId } } } } },
+    ],
+  };
+}
+
+/**
+ * Build a Prisma WHERE clause that matches workspaces the user holds a
+ * **write role** in: the DB-level twin of
+ * `canEditWorkspaceContent((await getWorkspaceMembership(…))?.role)`.
+ *
+ * A direct `owner` / `admin` / `member` row qualifies. Team-based access
+ * resolves to `member`, but only without a direct row: `getWorkspaceMembership`
+ * lets the direct row win, so a direct `viewer` stays a viewer. Guests never
+ * match.
+ */
+export function buildWorkspaceWriteWhere(userId: string) {
+  return {
+    OR: [
+      { members: { some: { userId, role: { in: ["owner", "admin", "member"] } } } },
+      {
+        teams: { some: { members: { some: { userId } } } },
+        members: { none: { userId } },
+      },
     ],
   };
 }
@@ -303,14 +353,81 @@ export async function assertWorkspaceWriteRole(
   }
 
   if (!canEditWorkspaceContent(membership.role)) {
-    throw new TRPCError({
-      code: "FORBIDDEN",
-      message:
-        "You need owner, admin, or member access to this workspace to make changes.",
-    });
+    throw writeRoleRequiredError();
   }
 
   return membership;
+}
+
+/** The FORBIDDEN a member without a write role gets. */
+function writeRoleRequiredError(): TRPCError {
+  return new TRPCError({
+    code: "FORBIDDEN",
+    message:
+      "You need owner, admin, or member access to this workspace to make changes.",
+  });
+}
+
+/**
+ * The workspace a write lands in when the caller may not have named one: the
+ * requested workspace, or, with none requested, the first workspace the user
+ * holds a write role in. Used by agent tools, which forward the workspace of
+ * the chat when there is one.
+ *
+ * Unlike `assertWorkspaceWriteRole` this tells "not a member" from "a member
+ * who may not write". It returns null for the first (and for a user who
+ * belongs to no workspace at all), so each caller keeps its own answer for
+ * that, and throws `FORBIDDEN` for the second. A workspace the user only
+ * views is never picked as the fallback.
+ *
+ * The fallback follows `getWorkspaceMembership`: direct memberships first, in
+ * the order the user joined them, then a workspace reached only through a
+ * team, which resolves to `member`. A direct `viewer` row is never upgraded
+ * by a team in the same workspace.
+ */
+export async function resolveWritableWorkspace(
+  db: PrismaClient,
+  userId: string,
+  requestedWorkspaceId?: string | null,
+): Promise<string | null> {
+  if (requestedWorkspaceId) {
+    const membership = await getWorkspaceMembership(
+      db,
+      userId,
+      requestedWorkspaceId,
+    );
+    if (!membership) return null;
+    if (!canEditWorkspaceContent(membership.role)) throw writeRoleRequiredError();
+    return membership.workspaceId;
+  }
+
+  const direct = await db.workspaceUser.findMany({
+    where: { userId },
+    select: { workspaceId: true, role: true },
+    orderBy: { joinedAt: "asc" },
+  });
+  const writable = direct.find((membership) =>
+    canEditWorkspaceContent(membership.role as WorkspaceRole),
+  );
+  if (writable) return writable.workspaceId;
+
+  const viaTeam = await db.teamUser.findFirst({
+    where: {
+      userId,
+      team: {
+        workspaceId: {
+          not: null,
+          notIn: direct.map((membership) => membership.workspaceId),
+        },
+      },
+    },
+    select: { team: { select: { workspaceId: true } } },
+    orderBy: { joinedAt: "asc" },
+  });
+  if (viaTeam?.team.workspaceId) return viaTeam.team.workspaceId;
+
+  if (direct.length === 0) return null;
+  throw writeRoleRequiredError();
 }
 
 function formatRoleList(roles: readonly WorkspaceRole[]): string {
