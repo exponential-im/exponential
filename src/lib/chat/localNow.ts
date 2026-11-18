@@ -22,13 +22,17 @@ export function isValidTimeZone(value: unknown): value is string {
   }
 }
 
-/** The browser's IANA zone, or UTC where it cannot be read. */
-export function browserTimeZone(): string {
+/**
+ * The browser's IANA zone, or undefined where it cannot be read. Never a UTC
+ * stand-in: the stream route saves the reported zone as the person's own, and
+ * an unknown zone must make the assistant ask.
+ */
+export function browserTimeZone(): string | undefined {
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    return isValidTimeZone(zone) ? zone : 'UTC';
+    return isValidTimeZone(zone) ? zone : undefined;
   } catch {
-    return 'UTC';
+    return undefined;
   }
 }
 
