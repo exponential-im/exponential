@@ -139,6 +139,33 @@ export async function setPillar({
   });
 }
 
+/**
+ * The workspace's Pillars, by name, for any member. Inactive ones only when
+ * asked for (the list page's toggle); the sidebar and pickers never show them.
+ */
+export async function listPillars({
+  db,
+  userId,
+  workspaceId,
+  includeArchived = false,
+}: {
+  db: PrismaClient;
+  userId: string;
+  workspaceId: string;
+  includeArchived?: boolean;
+}) {
+  await assertWorkspaceMembership(db, userId, workspaceId);
+  return db.tag.findMany({
+    where: {
+      workspaceId,
+      category: PILLAR_CATEGORY,
+      ...(includeArchived ? {} : { archivedAt: null }),
+    },
+    select: { id: true, name: true, color: true, description: true, archivedAt: true },
+    orderBy: { name: "asc" },
+  });
+}
+
 /** Slug rule shared with `tag.create`. */
 export function slugifyTagName(name: string): string {
   return name

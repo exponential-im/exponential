@@ -203,6 +203,16 @@ test.describe("Pillars", () => {
     await expect(page.getByRole("link", { name: names.pillar })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("settings-pillars.png"), fullPage: true });
 
+    // The sidebar gains a Pillars row, leading to the list of Pillars.
+    const sidebarPillars = page.locator("aside.app-sidebar nav").getByRole("link", { name: "Pillars", exact: true });
+    await expect(sidebarPillars).toBeVisible();
+    await sidebarPillars.click();
+    await expect(page.getByRole("heading", { name: "Pillars", level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    await expect(page.getByRole("link", { name: new RegExp(names.pillar) })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("pillars-list.png"), fullPage: true });
+
     // File the project under the Pillar from the project page.
     await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.projectSlug}-${seeded.projectId}`);
     const addPillar = page.getByRole("button", { name: "Add Pillar" });
@@ -314,6 +324,10 @@ test.describe("Pillars", () => {
     await expect(page.getByRole("link", { name: names.pillar })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
     await expect(page.getByText("Inactive", { exact: true })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    // With no active Pillar left, the sidebar row goes away.
+    await expect(
+      page.locator("aside.app-sidebar nav").getByRole("link", { name: "Pillars", exact: true }),
+    ).toHaveCount(0);
 
     await trpc(page.request, "tag.setPillarArchived", { tagId: seeded.tagId, archived: false });
   });

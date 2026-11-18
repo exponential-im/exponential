@@ -19,7 +19,7 @@ vi.mock("~/server/services/access", () => ({
 }));
 
 import { assertWorkspaceMembership, assertWorkspaceRole } from "~/server/services/access";
-import { createPillar, getPillarPage, setPillar, setPillarArchived } from "../PillarService";
+import { createPillar, getPillarPage, listPillars, setPillar, setPillarArchived } from "../PillarService";
 
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
 const membershipMock = vi.mocked(assertWorkspaceMembership);
@@ -127,6 +127,23 @@ describe("setPillar", () => {
       where: { id: "tag-devops" },
       data: { category: null, archivedAt: null },
     });
+  });
+});
+
+describe("listPillars", () => {
+  it("lists a workspace's active Pillars for a member, inactive ones only on request", async () => {
+    db.tag.findMany.mockResolvedValue([] as never);
+
+    await listPillars({ db, userId: USER, workspaceId: WS });
+    expect(membershipMock).toHaveBeenCalledWith(db, USER, WS);
+    expect(db.tag.findMany.mock.calls[0]![0]!.where).toEqual({
+      workspaceId: WS,
+      category: "pillar",
+      archivedAt: null,
+    });
+
+    await listPillars({ db, userId: USER, workspaceId: WS, includeArchived: true });
+    expect(db.tag.findMany.mock.calls[1]![0]!.where).toEqual({ workspaceId: WS, category: "pillar" });
   });
 });
 
