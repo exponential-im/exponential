@@ -3,7 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/api/trpc";
 import { TEXT_LIMITS } from "~/lib/text-limits";
-import { getWorkspaceMembership } from "~/server/services/access";
+import { AccessControlService, getWorkspaceMembership } from "~/server/services/access";
 import { getPublicBrief, listPublicBriefs } from "~/server/services/cycleBriefs/public";
 import { OUTCOME_RESULTS, OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
 import { pendingChange } from "~/server/services/cycleBriefs/changes";
@@ -163,8 +163,14 @@ export const cycleBriefRouter = createTRPCRouter({
     .input(z.object({ productId: z.string(), userIds: z.array(z.string()).max(20) }))
     .mutation(async ({ ctx, input }) => {
       const product = await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
-      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, product.workspaceId);
-      if (membership?.role !== "owner" && membership?.role !== "admin") {
+      // Workspace owners and admins: the centralized `manage_members` gate (ACCESS_CONTROL.md).
+      const access = await new AccessControlService(ctx.db).canAccess({
+        userId: ctx.session.user.id,
+        resourceType: "workspace",
+        resourceId: product.workspaceId,
+        permission: "manage_members",
+      });
+      if (!access.allowed) {
         throw new TRPCError({
           code: "FORBIDDEN",
           message: "Only workspace owners and admins can set Product owners",
