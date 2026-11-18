@@ -21,7 +21,6 @@ import {
 import { IconRobot, IconCheck, IconAlertCircle, IconCopy, IconTrash } from '@tabler/icons-react';
 import { useState, useEffect } from 'react';
 import { api } from '~/trpc/react';
-import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { useAiCapabilities } from '~/providers/AiCapabilitiesProvider';
 import { AiNotConfiguredNote } from '~/app/_components/ai/AiNotConfiguredNote';
 import { TelegramGatewayCard } from '~/app/_components/TelegramGatewayCard';
@@ -31,9 +30,6 @@ import { MarkdownInput } from '~/app/_components/shared/MarkdownInput';
 const PERSONALITY_PLACEHOLDER = `Example: You're warm, direct, and a little playful. You have opinions and share them honestly. Skip the corporate tone — be real. When something doesn't add up, say so (kindly). You're genuinely helpful, not performatively helpful.`;
 
 const INSTRUCTIONS_PLACEHOLDER = `Example: When asked to create tasks, always confirm the project first. Keep responses concise unless detail is requested. Use bullet points for lists.`;
-
-// Roles that pass `requireWorkspaceMembership("edit")` on assistant.create
-const EDITABLE_ROLES = new Set(['owner', 'admin', 'member']);
 
 const USER_CONTEXT_PLACEHOLDER = `Example: I'm a startup founder working on a SaaS product. I manage a small team of 5. I prefer morning focus blocks and async communication.`;
 
@@ -48,33 +44,14 @@ const EXECUTOR_OPTIONS = [
 ];
 
 export default function AssistantSettingsPage() {
-  const { workspaceId: currentWorkspaceId } = useWorkspace();
   const { assistant: hasAssistant } = useAiCapabilities();
   const utils = api.useUtils();
 
-  // Assistants are per workspace, but this page has no workspace in its URL.
-  // Open on the one the Telegram/Matrix gateways use, so the page and the
-  // gateways agree; fall back to the current workspace for a first assistant.
-  const { data: gatewayAssistant, isLoading: gatewayLoading } =
-    api.assistant.getGatewayDefault.useQuery(undefined, {
-      refetchOnWindowFocus: false,
-    });
-  const { data: workspaces } = api.workspace.list.useQuery();
-  const editableWorkspaces = (workspaces ?? []).filter((ws) =>
-    EDITABLE_ROLES.has(ws.currentUserRole ?? '')
-  );
-
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
-  const workspaceId = gatewayLoading
-    ? null
-    : (selectedWorkspaceId ?? gatewayAssistant?.workspaceId ?? currentWorkspaceId);
-
-  const { data: assistant, isLoading: assistantLoading } = api.assistant.getDefault.useQuery(
-    { workspaceId: workspaceId ?? '' },
-    { enabled: !!workspaceId, refetchOnWindowFocus: false }
-  );
-  // Full-page loader only on first load; switching workspace keeps the picker mounted
-  const isLoading = gatewayLoading || (assistantLoading && !selectedWorkspaceId);
+  // One Assistant per person (ADR-0072): the same one in every workspace, so
+  // this page needs no workspace. Null until the person first saves it.
+  const { data: assistant, isLoading } = api.assistant.getMine.useQuery(undefined, {
+    refetchOnWindowFocus: false,
+  });
 
   const [name, setName] = useState('');
   const [emoji, setEmoji] = useState('');
@@ -84,8 +61,7 @@ export default function AssistantSettingsPage() {
   const [description, setDescription] = useState('');
   const [saved, setSaved] = useState(false);
 
-  // Populate form when data loads — and clear it when switching to a
-  // workspace with no assistant, so its fields aren't saved into the wrong one
+  // Populate the form when the Assistant loads.
   useEffect(() => {
     setName(assistant?.name ?? '');
     setEmoji(assistant?.emoji ?? '');
@@ -98,8 +74,7 @@ export default function AssistantSettingsPage() {
   const createMutation = api.assistant.create.useMutation({
     onSuccess: () => {
       console.log('[AssistantSettings] Create succeeded');
-      void utils.assistant.getDefault.invalidate();
-      void utils.assistant.getGatewayDefault.invalidate();
+      void utils.assistant.getMine.invalidate();
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     },
@@ -111,8 +86,7 @@ export default function AssistantSettingsPage() {
   const updateMutation = api.assistant.update.useMutation({
     onSuccess: () => {
       console.log('[AssistantSettings] Update succeeded');
-      void utils.assistant.getDefault.invalidate();
-      void utils.assistant.getGatewayDefault.invalidate();
+      void utils.assistant.getMine.invalidate();
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     },
@@ -126,38 +100,64 @@ export default function AssistantSettingsPage() {
   // would start runs nobody claims.
   const executorMutation = api.assistant.update.useMutation({
     onSuccess: () => {
-      void utils.assistant.getDefault.invalidate();
+      void utils.assistant.getMine.invalidate();
     },
   });
   const [runnerSecret, setRunnerSecret] = useState<string | null>(null);
   const createKeyMutation = api.assistant.createRunnerKey.useMutation({
     onSuccess: (result) => {
       setRunnerSecret(result.secret);
-      void utils.assistant.getDefault.invalidate();
+      void utils.assistant.getMine.invalidate();
     },
   });
   const revokeKeyMutation = api.assistant.revokeRunnerKey.useMutation({
     onSuccess: () => {
-      void utils.assistant.getDefault.invalidate();
+      void utils.assistant.getMine.invalidate();
     },
   });
 
+  // Where it works (ADR-0072, Agent PRD V2): the Assistant joins a workspace
+  // only when its person adds it, and only where they are at least a member.
+  const { data: myWorkspaces } = api.assistant.myWorkspaces.useQuery(undefined, {
+    enabled: !!assistant,
+  });
+  const [workspaceToAdd, setWorkspaceToAdd] = useState<string | null>(null);
+  const invalidateWorkspaces = () => {
+    void utils.assistant.myWorkspaces.invalidate();
+    void utils.assistant.list.invalidate();
+  };
+  const addToWorkspaceMutation = api.assistant.addToWorkspace.useMutation({
+    onSuccess: () => {
+      setWorkspaceToAdd(null);
+      invalidateWorkspaces();
+    },
+  });
+  const removeFromWorkspaceMutation = api.assistant.removeFromWorkspace.useMutation({
+    onSuccess: invalidateWorkspaces,
+  });
+  const joinedWorkspaces = (myWorkspaces ?? []).filter((w) => w.assistantIsMember);
+  const addableWorkspaces = (myWorkspaces ?? []).filter((w) => w.canAdd && !w.assistantIsMember);
+
   const isSaving = createMutation.isPending || updateMutation.isPending;
   const error =
-    createMutation.error ?? updateMutation.error ?? executorMutation.error ?? createKeyMutation.error ?? revokeKeyMutation.error;
+    createMutation.error ??
+    updateMutation.error ??
+    executorMutation.error ??
+    createKeyMutation.error ??
+    revokeKeyMutation.error ??
+    addToWorkspaceMutation.error ??
+    removeFromWorkspaceMutation.error;
 
   const handleSave = () => {
     console.log('[AssistantSettings] handleSave called', {
-      workspaceId,
       name: name.trim(),
       personality: personality.trim().substring(0, 50),
       hasAssistant: !!assistant,
       assistantId: assistant?.id,
     });
 
-    if (!workspaceId || !name.trim() || !personality.trim()) {
+    if (!name.trim() || !personality.trim()) {
       console.log('[AssistantSettings] Early return - missing required fields', {
-        workspaceId: !!workspaceId,
         name: !!name.trim(),
         personality: !!personality.trim(),
       });
@@ -177,13 +177,11 @@ export default function AssistantSettingsPage() {
       });
     } else {
       createMutation.mutate({
-        workspaceId,
         name: name.trim(),
         emoji: emoji.trim() || undefined,
         personality: personality.trim(),
         instructions: instructions.trim() || undefined,
         userContext: userContext.trim() || undefined,
-        isDefault: true,
       });
     }
   };
@@ -213,6 +211,18 @@ export default function AssistantSettingsPage() {
             responds to you across the app, and it can be assigned work like a
             teammate.
           </Text>
+          <Alert
+            icon={<IconAlertCircle size={16} />}
+            variant="light"
+            mt="md"
+            data-testid="assistant-persona-warning"
+          >
+            You have one assistant, the same in every workspace it works in. Its
+            name, personality, instructions and what you write about yourself go
+            with it into shared workspaces too, including work assigned to it
+            there. Don&apos;t write anything here you wouldn&apos;t want a teammate&apos;s
+            task to draw on.
+          </Alert>
           {!hasAssistant && (
             <AiNotConfiguredNote requirement="assistant" feature="The Assistant" className="mt-3" />
           )}
@@ -228,19 +238,6 @@ export default function AssistantSettingsPage() {
           <Alert icon={<IconCheck size={16} />} color="green" variant="light">
             Assistant saved successfully!
           </Alert>
-        )}
-
-        {editableWorkspaces.length > 1 && (
-          <Select
-            label="Workspace"
-            description="Each workspace has its own assistant."
-            data={editableWorkspaces.map((ws) => ({ value: ws.id, label: ws.name }))}
-            value={workspaceId}
-            onChange={(value) => {
-              if (value) setSelectedWorkspaceId(value);
-            }}
-            allowDeselect={false}
-          />
         )}
 
         {/* Identity */}
@@ -347,6 +344,73 @@ export default function AssistantSettingsPage() {
           </Paper>
         )}
 
+        {/* Where it works (ADR-0072, Agent PRD V2) */}
+        {assistant && (
+          <Paper p="lg" withBorder className="bg-surface-secondary" data-testid="assistant-workspaces">
+            <Text fw={500} className="text-text-primary mb-1">
+              Where it works
+            </Text>
+            <Text size="xs" c="dimmed" mb="md">
+              {assistant.name} can be assigned work only in these workspaces. It is in your
+              Personal workspace from the start; add it anywhere else you are at least a member.
+            </Text>
+            <Stack gap="xs">
+              {joinedWorkspaces.map((workspace) => (
+                <Group
+                  key={workspace.id}
+                  justify="space-between"
+                  wrap="nowrap"
+                  data-testid="assistant-workspace-row"
+                >
+                  <Text size="sm" className="text-text-primary" truncate>
+                    {workspace.name}
+                  </Text>
+                  <Tooltip label={`Remove from ${workspace.name}`}>
+                    <ActionIcon
+                      variant="subtle"
+                      color="red"
+                      aria-label={`Remove ${assistant.name} from ${workspace.name}`}
+                      loading={
+                        removeFromWorkspaceMutation.isPending &&
+                        removeFromWorkspaceMutation.variables?.workspaceId === workspace.id
+                      }
+                      onClick={() => removeFromWorkspaceMutation.mutate({ workspaceId: workspace.id })}
+                    >
+                      <IconTrash size={14} />
+                    </ActionIcon>
+                  </Tooltip>
+                </Group>
+              ))}
+              {myWorkspaces && joinedWorkspaces.length === 0 && (
+                <Text size="sm" c="dimmed">
+                  Not in any workspace yet, so nobody can assign it work. Add it to one below.
+                </Text>
+              )}
+            </Stack>
+            {addableWorkspaces.length > 0 && (
+              <Group mt="md" align="flex-end" wrap="nowrap">
+                <Select
+                  className="flex-1"
+                  label="Add to a workspace"
+                  placeholder="Pick a workspace"
+                  data={addableWorkspaces.map((w) => ({ value: w.id, label: w.name }))}
+                  value={workspaceToAdd}
+                  onChange={setWorkspaceToAdd}
+                  data-testid="assistant-add-workspace"
+                />
+                <Button
+                  variant="default"
+                  disabled={!workspaceToAdd}
+                  loading={addToWorkspaceMutation.isPending}
+                  onClick={() => workspaceToAdd && addToWorkspaceMutation.mutate({ workspaceId: workspaceToAdd })}
+                >
+                  Add
+                </Button>
+              </Group>
+            )}
+          </Paper>
+        )}
+
         {/* Delegation (ADR-0067) */}
         {assistant && (
           <Paper p="lg" withBorder className="bg-surface-secondary">
@@ -355,8 +419,8 @@ export default function AssistantSettingsPage() {
             </Text>
             <Text size="sm" c="dimmed">
               <b>{assistant.name}</b> can be assigned work. Pick it from the Assign
-              modal on any action in this workspace and it will research, delegate,
-              or do the work inside Exponential, asking you when it gets stuck.
+              modal on any action in a workspace it works in and it will research,
+              delegate, or do the work inside Exponential, asking you when it gets stuck.
               Everything it writes is attributed to it, never to you.
             </Text>
             <Select
@@ -454,10 +518,9 @@ export default function AssistantSettingsPage() {
           </Paper>
         )}
 
-        {gatewayAssistant && (
+        {assistant && (
           <Text size="sm" c="dimmed">
-            Telegram and Matrix chat with <b>{gatewayAssistant.name}</b>, your
-            assistant in {gatewayAssistant.workspace.name}.
+            Telegram and Matrix chat with <b>{assistant.name}</b>, your assistant.
           </Text>
         )}
 
@@ -485,7 +548,7 @@ export default function AssistantSettingsPage() {
             <Button
               onClick={handleSave}
               loading={isSaving}
-              disabled={assistantLoading || !name.trim() || !personality.trim()}
+              disabled={isLoading || !name.trim() || !personality.trim()}
             >
               {assistant ? 'Update Assistant' : 'Create Assistant'}
             </Button>

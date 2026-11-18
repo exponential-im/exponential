@@ -6,7 +6,7 @@
  * the test layout from `ticket.test.ts` / `problem.test.ts`.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
@@ -103,6 +103,7 @@ import {
   buildActionAccessWhere,
   buildWorkspaceAccessWhere,
 } from "~/server/services/access";
+import { matchesWhere } from "~/test/prismaWhere";
 
 const callerId = "user-1";
 const workspaceId = "ws-1";
@@ -117,6 +118,7 @@ function stubEmptyResults(dbMock: DeepMockProxy<PrismaClient>) {
   dbMock.ticket.findMany.mockResolvedValue([]);
   dbMock.feature.findMany.mockResolvedValue([]);
   dbMock.epic.findMany.mockResolvedValue([]);
+  dbMock.list.findMany.mockResolvedValue([]);
   dbMock.knowledgePage.findMany.mockResolvedValue([]);
   dbMock.transcriptionSession.findMany.mockResolvedValue([]);
   dbMock.crmContact.findMany.mockResolvedValue([]);
@@ -202,6 +204,115 @@ describe("search router — global (mocked)", () => {
     expect(epicWhere?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
   });
 
+  it("finds cycles: SPRINT lists only, workspace-membership gate, product-nested url", async () => {
+    dbMock.list.findMany
+      // Active cycles first…
+      .mockResolvedValueOnce([
+        {
+          id: "c20",
+          name: "Cycle 20",
+          status: "ACTIVE",
+          startDate: new Date("2026-11-13T00:00:00Z"),
+          endDate: new Date("2026-11-25T00:00:00Z"),
+          workspace: workspaceRef,
+          product: { slug: "clear", name: "CLEAR" },
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any)
+      // …then the rest.
+      .mockResolvedValueOnce([
+        {
+          id: "c22",
+          name: "Cycle 22",
+          status: "PLANNED",
+          startDate: new Date("2026-12-11T00:00:00Z"),
+          endDate: new Date("2026-12-23T00:00:00Z"),
+          workspace: workspaceRef,
+          product: { slug: "clear", name: "CLEAR" },
+        },
+        {
+          id: "legacy",
+          name: "Cycle 3",
+          status: "COMPLETED",
+          startDate: null,
+          endDate: null,
+          workspace: workspaceRef,
+          product: null,
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ] as any);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "cycle", limit: 5 });
+
+    const [activeArgs, restArgs] = dbMock.list.findMany.mock.calls.map((c) => c[0]);
+    const [shared, activeOnly] = (activeArgs?.where?.AND ?? []) as Record<string, unknown>[];
+    // Generic curated lists share the table; only sprints are cycles.
+    expect(shared?.listType).toBe("SPRINT");
+    expect(shared?.name).toEqual({ contains: "cycle", mode: "insensitive" });
+    expect(shared?.workspace).toEqual({ is: buildWorkspaceAccessWhere(callerId) });
+    expect(activeOnly).toEqual({ status: "ACTIVE" });
+    expect(activeArgs?.take).toBe(5);
+
+    const cycles = res.results.filter((r) => r.type === "cycle");
+    expect(cycles.map((c) => c.id)).toEqual(["c20", "c22", "legacy"]);
+    expect(cycles[0]?.url).toBe("/w/clear/products/clear/cycles/c20");
+    expect(cycles[0]?.subtitle).toBe("CLEAR · ACTIVE · 2026-11-13 → 2026-11-25");
+    // A workspace-shared cycle has no product route to point at.
+    expect(cycles[2]?.url).toBeNull();
+    expect(cycles[2]?.subtitle).toBe("COMPLETED");
+    // The non-active query only fills what the active ones left of the limit.
+    expect(restArgs?.where?.AND?.[1]).toEqual({ status: { not: "ACTIVE" } });
+    expect(restArgs?.take).toBe(4);
+  });
+
+  it("keeps the active cycle when upcoming cycles alone would fill the limit", async () => {
+    const cycle = (id: string, status: string, start: string) => ({
+      id,
+      name: `Cycle ${id}`,
+      status,
+      startDate: new Date(start),
+      endDate: null,
+      workspace: workspaceRef,
+      product: { slug: "clear", name: "CLEAR" },
+    });
+    dbMock.list.findMany
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .mockResolvedValueOnce([cycle("20", "ACTIVE", "2026-11-13T00:00:00Z")] as any)
+      .mockResolvedValueOnce(
+        ["25", "24", "23", "22"].map((n) =>
+          cycle(n, "PLANNED", `2027-0${Number(n) - 21}-01T00:00:00Z`),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ) as any,
+      );
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "cycle", limit: 5 });
+
+    const ids = res.results.filter((r) => r.type === "cycle").map((c) => c.id);
+    expect(ids).toEqual(["20", "25", "24", "23", "22"]);
+  });
+
+  it("skips the second cycle query when active cycles fill the limit", async () => {
+    dbMock.list.findMany.mockResolvedValueOnce(
+      Array.from({ length: 2 }, (_, i) => ({
+        id: `a${i}`,
+        name: `Cycle ${i}`,
+        status: "ACTIVE",
+        startDate: null,
+        endDate: null,
+        workspace: workspaceRef,
+        product: { slug: "clear", name: "CLEAR" },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      })) as any,
+    );
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.search.global({ query: "cycle", limit: 2 });
+
+    expect(dbMock.list.findMany).toHaveBeenCalledTimes(1);
+  });
+
   it("workspace-scoped search filters projects/goals to the workspace for members", async () => {
     // Direct membership: not a guest, getWorkspaceMembership succeeds.
     dbMock.workspaceUser.findUnique.mockResolvedValue(
@@ -239,6 +350,269 @@ describe("search router — global (mocked)", () => {
 
     expect(dbMock.goal.findMany).not.toHaveBeenCalled();
     expect(res.results.filter((r) => r.type === "goal")).toEqual([]);
+  });
+});
+
+describe("search router — global finds what the caller's agent created (mocked)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  const AGENT = "agent-shadow-1";
+
+  interface WorkspaceRow {
+    members: { userId: string; role: string }[];
+    teams: { members: { userId: string }[] }[];
+  }
+
+  interface ActionRow {
+    id: string;
+    name: string;
+    status: string;
+    workspaceId: string | null;
+    workspace: WorkspaceRow | null;
+    createdById: string;
+    /** The creator's agent row: null for a person, the owner for a shadow user. */
+    createdBy: { externalAgentShadow: { ownerId: string } | null };
+    assignees: { userId: string }[];
+    projectId: null;
+    project: null;
+  }
+
+  /** The columns the action block of `search.global` selects. */
+  interface ActionHit {
+    id: string;
+    name: string;
+    kanbanStatus: null;
+    workspace: typeof workspaceRef;
+    project: null;
+  }
+
+  /** The workspace as the caller stands in it: `role` null means not a member. */
+  const workspaceWhere = (role: string | null): WorkspaceRow => ({
+    members: role ? [{ userId: callerId, role }] : [],
+    teams: [],
+  });
+
+  /** What an MCP `actions.create` with no project and no assignee writes. */
+  const agentAction = (ownerId: string, overrides: Partial<ActionRow> = {}): ActionRow => ({
+    id: "a-paddle",
+    name: "Open a Paddle account for the Venture Studio UG",
+    status: "ACTIVE",
+    workspaceId,
+    workspace: workspaceWhere("owner"),
+    createdById: AGENT,
+    createdBy: { externalAgentShadow: { ownerId } },
+    assignees: [],
+    projectId: null,
+    project: null,
+    ...overrides,
+  });
+
+  /** Stand-in for Postgres: returns the rows the query's own `where` admits. */
+  function stubActions(rows: ActionRow[]) {
+    const findMany = dbMock.action.findMany as unknown as Mock<
+      (args: { where: Record<string, unknown> }) => Promise<ActionHit[]>
+    >;
+    findMany.mockImplementation((args) =>
+      Promise.resolve(
+        rows
+          .filter((r) => matchesWhere({ ...r }, args.where))
+          .map((r) => ({
+            id: r.id,
+            name: r.name,
+            kanbanStatus: null,
+            workspace: workspaceRef,
+            project: null,
+          })),
+      ),
+    );
+  }
+
+  const actionIds = (res: { results: { type: string; id: string }[] }) =>
+    res.results.filter((r) => r.type === "action").map((r) => r.id);
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    stubEmptyResults(dbMock);
+  });
+
+  it("finds a project-less, unassigned action created by an agent the caller owns", async () => {
+    stubActions([agentAction(callerId)]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual(["a-paddle"]);
+    // The palette's "all workspaces" scope sends no workspaceId.
+    expect(actionIds(await caller.search.global({ query: "paddle" }))).toEqual(["a-paddle"]);
+  });
+
+  it("stops finding it once the caller no longer belongs to the action's workspace", async () => {
+    // Removed from the workspace (the agent leaves with its owner, ADR-0049):
+    // the all-workspaces scope sends no workspaceId, so the access clause
+    // alone has to keep the row out.
+    stubActions([agentAction(callerId, { workspace: workspaceWhere(null) })]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle" }))).toEqual([]);
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual([]);
+  });
+
+  it("keeps it from everyone else: a project-less action stays personal", async () => {
+    // Created by a teammate's agent, and by a teammate in person, in a
+    // workspace the caller owns.
+    stubActions([
+      agentAction("someone-else"),
+      agentAction("someone-else", {
+        id: "a-human",
+        createdById: "someone-else",
+        createdBy: { externalAgentShadow: null },
+      }),
+    ]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual([]);
+  });
+
+  it("still leaves out the owner's agent's DELETED and DRAFT actions", async () => {
+    stubActions([
+      agentAction(callerId, { id: "a-deleted", status: "DELETED" }),
+      agentAction(callerId, { id: "a-draft", status: "DRAFT" }),
+    ]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    expect(actionIds(await caller.search.global({ query: "paddle", workspaceId }))).toEqual([]);
+  });
+});
+
+describe("search router — global ticket search (mocked)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+
+  interface TicketRow {
+    id: string;
+    title: string;
+    shortId: string | null;
+    number: number;
+    status: string;
+    updatedAt: number;
+    /** The only workspace the caller is a member of is `workspaceId`. */
+    workspaceId: string;
+  }
+
+  const ticketRow = (
+    id: string,
+    title: string,
+    shortId: string | null,
+    number: number,
+    ws = workspaceId,
+    updatedAt = 0,
+  ): TicketRow => ({ id, title, shortId, number, status: "BACKLOG", updatedAt, workspaceId: ws });
+
+  const accessClause = () => ({
+    product: { workspace: { is: buildWorkspaceAccessWhere(callerId) } },
+  });
+
+  /**
+   * Stand-in for Postgres: honours the match clauses the search builds, and
+   * hides tickets outside the caller's workspace only when the query carries
+   * the access clause — so a search that dropped the scope would leak.
+   */
+  function matchesTicket(row: TicketRow, where: Record<string, unknown>): boolean {
+    if (Array.isArray(where.OR)) {
+      return (where.OR as Record<string, unknown>[]).some((w) => matchesTicket(row, w));
+    }
+    if (Array.isArray(where.AND)) {
+      return (where.AND as Record<string, unknown>[]).every((w) => matchesTicket(row, w));
+    }
+    if ("product" in where) {
+      expect(where).toEqual(accessClause());
+      return row.workspaceId === workspaceId;
+    }
+    if (typeof where.number === "number") return row.number === where.number;
+    const title = where.title as { contains?: string } | undefined;
+    if (title?.contains !== undefined) {
+      return row.title.toLowerCase().includes(title.contains.toLowerCase());
+    }
+    const shortId = where.shortId as { contains?: string; in?: string[] } | undefined;
+    if (shortId?.in) return row.shortId !== null && shortId.in.includes(row.shortId);
+    if (shortId?.contains !== undefined) {
+      return (row.shortId ?? "").toLowerCase().includes(shortId.contains.toLowerCase());
+    }
+    return true;
+  }
+
+  function stubTickets(rows: TicketRow[]) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    dbMock.ticket.findMany.mockImplementation(((args: any) => {
+      const where = args.where as Record<string, unknown>;
+      const hits = rows
+        .filter((r) => matchesTicket(r, where))
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, args.take as number)
+        .map((r) => ({
+          ...r,
+          product: { slug: "exponential", name: "Exponential", workspace: workspaceRef },
+        }));
+      return Promise.resolve(hits);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+  }
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    stubEmptyResults(dbMock);
+  });
+
+  // Six fresher tickets whose fallback shortIds contain both words, so a
+  // plain `contains` search fills a 5-row page before reaching the one named.
+  const decoys = Array.from({ length: 6 }, (_, i) =>
+    ticketRow(`d${i}`, `Thunder work ${i}`, `snappy.thunder.${i}`, 100 + i, workspaceId, 10 + i),
+  );
+  const named = ticketRow("named", "Search doesn't find fun ids", "snappy.thunder", 42);
+
+  it("finds the ticket an exact short ID names, first", async () => {
+    stubTickets([...decoys, named]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "snappy.thunder", limit: 5 });
+
+    const tickets = res.results.filter((r) => r.type === "ticket");
+    expect(tickets[0]).toMatchObject({
+      id: "named",
+      subtitle: "snappy.thunder BACKLOG",
+      url: "/w/clear/products/exponential/tickets/snappy.thunder",
+    });
+    expect(tickets).toHaveLength(5);
+  });
+
+  it("tolerates case, whitespace and either word order", async () => {
+    stubTickets([...decoys, named]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    for (const query of ["  Snappy.THUNDER  ", "thunder snappy", "#42"]) {
+      const res = await caller.search.global({ query, limit: 5 });
+      expect(res.results.find((r) => r.type === "ticket")?.id, query).toBe("named");
+    }
+  });
+
+  it("never returns a ticket the caller cannot see, even when the ID matches exactly", async () => {
+    const hidden = ticketRow("hidden", "Someone else's ticket", "brave.otter", 7, "ws-other");
+    stubTickets([hidden, named]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+    const res = await caller.search.global({ query: "brave.otter" });
+    expect(res.results.filter((r) => r.type === "ticket")).toEqual([]);
+    // Both the exact-ID and the text query carried the access clause.
+    expect(dbMock.ticket.findMany).toHaveBeenCalledTimes(2);
+    for (const [args] of dbMock.ticket.findMany.mock.calls) {
+      expect((args?.where?.AND as unknown[])[0]).toEqual(accessClause());
+    }
+  });
+
+  it("still finds tickets by ordinary title text", async () => {
+    stubTickets([...decoys, named]);
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const res = await caller.search.global({ query: "doesn't find fun" });
+    expect(res.results.filter((r) => r.type === "ticket").map((r) => r.id)).toEqual(["named"]);
+    // Title text names no ticket, so only the text query ran.
+    expect(dbMock.ticket.findMany).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -283,6 +657,8 @@ describe("search router — knowledge (mocked)", () => {
       pageViewerId: callerId,
       transcriptionViewerId: callerId,
       resourceViewerId: callerId,
+      // A person also finds Resources filed under Projects they are in (ADR-0082).
+      resourceSharedWithViewer: true,
       sourceTypes: ["transcription", "resource", "page"],
       limit: 20,
     });

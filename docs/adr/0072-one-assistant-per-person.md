@@ -54,8 +54,8 @@ lose its author. `assistant.delete` did exactly that (ADR-0067 §3), with no cal
    `assistant: { is: { retiredAt: null } }`, the shared `RUN_ELIGIBLE_AGENT_WHERE`, rather than
    the bare existence of an Assistant.
 
-Membership becomes opt-in per workspace (the person adds their Assistant; their Personal
-workspace is automatic). That lands with the V2 scope and does not change this decision.
+Membership is opt-in per workspace: the person adds their Assistant, and their Personal
+workspace is automatic. This landed with the V2 scope and does not change this decision.
 
 ## Considered options
 
@@ -69,11 +69,20 @@ workspace is automatic). That lands with the V2 scope and does not change this d
 
 ## Consequences
 
-- The schema change ships as expand then contract. V1a (this change) adds `retiredAt`, the
-  resolver, the migration and the index beside the per-workspace reads. V1b moves every caller
-  and drops `Assistant.workspaceId` and `isDefault`.
-- Until V1b, `assistant.create` refuses a person who already has an Assistant (`CONFLICT`)
-  rather than making one per workspace.
+- The schema change ships as expand then contract. V1a added `retiredAt`, the resolver, the
+  migration and the index beside the per-workspace reads (merged 2026-11-15). V1b moved every
+  caller onto the resolver (`assistant.getMine`) and dropped `Assistant.workspaceId` and
+  `isDefault`.
+- `assistant.create` refuses a person who already has an Assistant (`CONFLICT`). It takes no
+  workspace: `ensureAssistantForUser` makes every new Assistant a `member` of its person's
+  Personal workspace, whichever first need created it.
+- Every other workspace it joins only through `assistant.addToWorkspace` (Members' "Add my
+  Assistant" and Settings → Assistant's "Where it works"), which shares the External-agent grant
+  path (`requireDelegableWorkspaces`, `memberGrant`). It leaves through
+  `assistant.removeFromWorkspace`, an owner or admin's `workspace.removeMember`, or the ADR-0049
+  cascades when its person is removed or demoted.
+- The Telegram and Matrix `/pair` body still carries a workspace (the agent's knowledge tools
+  need one): the person's default workspace, else their Personal workspace.
 - Every reader that treats "has an Assistant" as "may run" must check `retiredAt`. The display
   readers (Delegated, Waiting on me, the assignee roster, Positions) need nothing, because a
   retired Assistant holds no membership and no live run.

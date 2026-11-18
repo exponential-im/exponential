@@ -8,7 +8,6 @@ Thank you for your interest in contributing to Exponential! This guide will help
 - [Development Setup](#development-setup)
 - [Code Style](#code-style)
 - [Pull Request Process](#pull-request-process)
-- [Claiming Bounties](#claiming-bounties)
 - [Reporting Bugs](#reporting-bugs)
 
 ## Getting Started
@@ -141,7 +140,7 @@ git checkout -b feature/my-feature-with-migrations
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat: add bounty claim button
+feat: add a tag filter to the actions list
 fix: correct date picker reset on time selection
 chore: update dependencies
 docs: add API documentation
@@ -164,26 +163,9 @@ If your changes modify `prisma/schema.prisma`:
 3. Target your PR at `develop` (not `main`)
 4. Never use `npx prisma db push` - it bypasses migrations and can cause data loss
 
-## Claiming Bounties
-
-Some issues have bounties attached. To claim one:
-
-1. Browse open bounties on the [project board](https://www.exponential.im)
-2. Comment on the issue to claim it
-3. Fork the repo and implement the solution
-4. Submit a PR referencing the bounty issue
-5. Once reviewed and merged, the bounty will be processed
-
-### Bounty Guidelines
-
-- One active bounty claim per contributor at a time
-- If you can't complete a bounty within 7 days, let us know so others can pick it up
-- Partial work is welcome - open a draft PR and explain what's left
-- Bounty amount is paid after the PR is merged and verified
-
 ## Reporting Bugs
 
-Open a [GitHub Issue](https://github.com/positonic/exponential/issues) with:
+Open a [GitHub Issue](https://github.com/exponential-im/exponential/issues) with:
 
 - A clear title describing the bug
 - Steps to reproduce
@@ -197,7 +179,7 @@ By contributing to Exponential, you agree that your contributions are licensed u
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/positonic/exponential/discussions) for general questions
+- Open a [Discussion](https://github.com/exponential-im/exponential/discussions) for general questions
 - Check existing issues before creating new ones
 
 Thank you for contributing!

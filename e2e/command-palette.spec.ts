@@ -153,3 +153,35 @@ test("toggling by keyboard keeps focus on the checkbox", async ({ page }) => {
   // would cost them a full re-tab before every toggle.
   await expect(checkbox).toBeFocused();
 });
+
+test("a product tab name navigates to that product's tab", async ({ page }) => {
+  const { input, modal } = await openPalette(page);
+  await input.fill("cycles");
+  // The fixture's product is named "Fixture Product".
+  const row = modal.getByText("Fixture Product - Cycles");
+  await expect(row).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+  await row.click();
+  await expect(page).toHaveURL(
+    new RegExp(`/w/${fixture.workspaceSlug}/products/${fixture.productSlug}/cycles$`),
+    { timeout: FIRST_PAINT_TIMEOUT },
+  );
+});
+
+test("a cycle's name finds the cycle and opens it", async ({ page }) => {
+  // Visiting the Cycles tab generates the product's upcoming cycles, so the
+  // fixture needs no cycle of its own.
+  await page.goto(`/w/${fixture.workspaceSlug}/products/${fixture.productSlug}/cycles`);
+  await page.waitForLoadState("networkidle", { timeout: FIRST_PAINT_TIMEOUT });
+
+  const { input, modal } = await openPalette(page);
+  await input.fill("cycle");
+  const heading = modal.getByText("Cycles", { exact: true });
+  await expect(heading).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+  // The first row under the Cycles heading is a cycle, not a nav row.
+  const cycleRow = heading.locator("xpath=following-sibling::*[@data-palette-index][1]");
+  await cycleRow.click();
+  await expect(page).toHaveURL(
+    new RegExp(`/w/${fixture.workspaceSlug}/products/${fixture.productSlug}/cycles/[a-z0-9]+$`),
+    { timeout: FIRST_PAINT_TIMEOUT },
+  );
+});

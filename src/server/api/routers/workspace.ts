@@ -4,6 +4,7 @@ import { TRPCError } from "@trpc/server";
 import {
   cascadeOwnerRemovedFromWorkspace,
   cascadeOwnerRoleChanged,
+  revokeAgentProjectMembershipsInWorkspace,
 } from "~/server/services/externalAgentAccess";
 import {
   getWorkspaceMembership,
@@ -402,7 +403,6 @@ export const workspaceRouter = createTRPCRouter({
         effortUnit: z.enum(["STORY_POINTS", "T_SHIRT", "HOURS"]).optional(),
         enableAdvancedActions: z.boolean().optional(),
         enableDetailedActions: z.boolean().optional(),
-        enableBounties: z.boolean().optional(),
         enableDailyPlanBanner: z.boolean().optional(),
         enableWeeklyReviewBanner: z.boolean().optional(),
         enableEmailNotifications: z.boolean().optional(),
@@ -438,7 +438,6 @@ export const workspaceRouter = createTRPCRouter({
           effortUnit: input.effortUnit,
           enableAdvancedActions: input.enableAdvancedActions,
           enableDetailedActions: input.enableDetailedActions,
-          enableBounties: input.enableBounties,
           enableDailyPlanBanner: input.enableDailyPlanBanner,
           enableWeeklyReviewBanner: input.enableWeeklyReviewBanner,
           enableEmailNotifications: input.enableEmailNotifications,
@@ -914,7 +913,7 @@ export const workspaceRouter = createTRPCRouter({
             workspaceId: input.workspaceId,
           },
         },
-        include: { user: { select: { email: true } } },
+        include: { user: { select: { email: true, isAgent: true } } },
       });
 
       if (memberToRemove?.role === "owner") {
@@ -937,6 +936,13 @@ export const workspaceRouter = createTRPCRouter({
       // Delegation invariant (ADR-0049): the removed member's external agents
       // lose their memberships here too — agent access never outlives its owner's.
       await cascadeOwnerRemovedFromWorkspace(ctx.db, input.userId, input.workspaceId);
+
+      // An agent removed here — someone's Assistant or External agent, which
+      // an owner or admin may take out of their workspace — also loses the
+      // direct project grants it held in it, as when its owner revokes it.
+      if (memberToRemove?.user.isAgent) {
+        await revokeAgentProjectMembershipsInWorkspace(ctx.db, [input.userId], input.workspaceId);
+      }
 
       // Retire any invitation row for this address. Its token renders a public
       // landing page carrying the workspace name, inviter and member count, and

@@ -16,6 +16,7 @@ function db() {
   mock.gitHubActivity.findMany.mockResolvedValue([] as never);
   mock.integration.findMany.mockResolvedValue([] as never);
   mock.integrationUserMapping.findMany.mockResolvedValue([] as never);
+  mock.user.findMany.mockResolvedValue([] as never);
   return mock;
 }
 
@@ -152,6 +153,21 @@ describe("ticket and commit sources", () => {
       eventTimestamp: { gt: since, lte: until },
     });
     expect(answers.done).toBe("- `9ac790c` feat(ceremonies): draft an update");
+  });
+
+  it("matches commits through the participant's linked GitHub identity first", async () => {
+    const mock = db();
+    mock.user.findMany.mockResolvedValue([{ id: "u-1", githubLogin: "linked-login" }] as never);
+    mock.integrationUserMapping.findMany.mockResolvedValue([
+      { userId: "u-1", externalUserId: "set-by-admin" },
+    ] as never);
+    mock.gitHubActivity.findMany.mockResolvedValue([
+      { commitSha: "7654321", commitMessage: "feat: linked" },
+    ] as never);
+    await buildDraftAnswers(mock, { workspaceId: "ws-1", userId: "u-1", questions, since, until });
+    expect(mock.gitHubActivity.findMany.mock.calls[0]![0]!.where).toMatchObject({
+      commitAuthor: { equals: "linked-login", mode: "insensitive" },
+    });
   });
 
   it("matches commits through a username a workspace admin set", async () => {

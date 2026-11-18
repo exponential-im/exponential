@@ -2,12 +2,15 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { getKnowledgeService } from "~/server/services/KnowledgeService";
+import { resolvePrincipal } from "~/server/services/access/principal";
+import { assertWorkspaceWriteRole } from "~/server/services/access";
 
 // ────────────────────────────────────────────────────────────────────
 // One2b agent integration: lightweight wrappers around KnowledgeService
 // for the meetingContextAgent. KnowledgeService now scopes primarily by
 // workspaceId (with optional userId/projectId/participantEmail narrowing).
-// These procedures (a) verify caller workspace membership and
+// These procedures (a) verify the caller's standing in the workspace
+// (membership to search, a write role to ingest or delete) and
 // (b) wrap KnowledgeService.search with similarity-threshold filtering.
 // ────────────────────────────────────────────────────────────────────
 
@@ -44,19 +47,9 @@ export const knowledgeChunkRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
-      // 1. Verify caller workspace membership.
-      const membership = await ctx.db.workspaceUser.findUnique({
-        where: {
-          userId_workspaceId: { userId, workspaceId: input.workspaceId },
-        },
-        select: { userId: true },
-      });
-      if (!membership) {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: "You are not a member of this workspace",
-        });
-      }
+      // 1. Re-embedding replaces the workspace's chunks for this meeting, so
+      //    it is a write: membership alone (a `viewer`) is not enough.
+      await assertWorkspaceWriteRole(ctx.db, userId, input.workspaceId);
 
       // 2. Verify the transcript exists and belongs to this workspace.
       const transcript = await ctx.db.transcriptionSession.findUnique({
@@ -152,7 +145,8 @@ export const knowledgeChunkRouter = createTRPCRouter({
       //    originally ingested the transcript). Access still applies per
       //    source: `pageViewerId` keeps only Pages the caller can view,
       //    `transcriptionViewerId` only Meetings they can view, and
-      //    `resourceViewerId` only Resources they own, so restricted Pages,
+      //    `resourceViewerId` only Resources they own or were shared
+      //    through a Project they are in, so restricted Pages,
       //    restricted-project Meetings and other members' private Resources
       //    don't reach the agent through search. A brief needs no more than that: `transcription.findRelated`
       //    already returns only Meetings the caller can view.
@@ -165,9 +159,15 @@ export const knowledgeChunkRouter = createTRPCRouter({
         participantEmail: input.participantEmail,
         pageViewerId: userId,
         transcriptionViewerId: userId,
-        // Resources are private to their owner: the agent finds the caller's
-        // own saved pages and notes, never another member's.
+        // A Resource with no Project is private to its owner; one filed
+        // under a Project is shared with the people in it (ADR-0082). So a
+        // person finds their own and those, and an agent principal only what
+        // its own user owns (ADR-0079).
         resourceViewerId: userId,
+        resourceSharedWithViewer: (await resolvePrincipal(ctx)).kind !== "agent",
+        // In the query, so one source's chunks aren't crowded out of the
+        // top `limit` by better-ranked chunks from other sources.
+        sourceId: input.sourceId,
         limit: input.limit,
       });
 
@@ -217,18 +217,8 @@ export const knowledgeChunkRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
-      const membership = await ctx.db.workspaceUser.findUnique({
-        where: {
-          userId_workspaceId: { userId, workspaceId: input.workspaceId },
-        },
-        select: { userId: true },
-      });
-      if (!membership) {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: "You are not a member of this workspace",
-        });
-      }
+      // Deleting the workspace's chunks is a write: a `viewer` is refused.
+      await assertWorkspaceWriteRole(ctx.db, userId, input.workspaceId);
 
       const result = await ctx.db.knowledgeChunk.deleteMany({
         where: {

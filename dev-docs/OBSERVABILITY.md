@@ -67,16 +67,94 @@ Agent-stream failures carry `mastraRunId`, `occurredAt` and a ready-to-run
 `mastraLogs` Railway command in the ticket body, so tracing one is a paste,
 not a log hunt.
 
+These tickets are labelled `client-error` + `bug`. A failure in a turn with
+the assistant (areas `chat-stream`, `chat-stream-server`, `agent-stream`,
+`agent-tool`, `zoe-canvas-stream`) is also labelled `chat-error`, so assistant failures can
+be listed on their own. The areas live in `clientErrorLabels`
+(`src/server/services/clientErrors/clientErrorBug.ts`); a new assistant surface
+adds its area there. Labels are set when the ticket is created, so a
+recurrence that dedups onto an older ticket does not relabel it.
+
 - **Repeat alerts.** A billing or auth provider failure (out of credit,
   revoked key) fails every turn for everyone until someone acts, so it
   re-announces as **"Still happening"** at most hourly while it recurs
   (`renotifyAfterMs`; the clock is `links.lastNotifiedAt` on the ticket).
   Everything else stays creation-only.
+- **Broken agent tools.** A tool call the app rejects (a 400 on the request
+  shape, a 405, a 5xx) or whose output fails the tool's own schema fails on
+  every call for everyone, while the reply still looks fine. The chat route
+  files it on first sight as `agent-tool: <tool>: <procedure> rejected the
+  request (<issue> at <field>)`, once per tool per turn; the title carries no
+  ids, so every recurrence lands on the same ticket. Ordinary outcomes
+  (not found, no access, rate limit, timeout) are not filed. The rules are in
+  `src/lib/chat/toolErrors.ts`, which also gives the chat the plain sentence
+  shown for a failed step; the raw error text is streamed to admins only.
+- **Tool canary.** `/api/cron/tool-canary` (06:30 UTC, daily) finds a broken
+  tool before a person's chat does. See "Tool canary" below.
 - **Daily agent-health digest.** `/api/cron/agent-health-digest` (07:00 UTC)
   reads the last 24h of `AiInteractionHistory` and posts failed turns and the
   most frequent failing tools to the Matrix room. It catches what tickets
   miss: a tool that errors on every call while the agent narrates around it.
   A clean day posts nothing.
+
+### Tool canary
+
+A contract test proves the shape of a tool's request. The tool canary proves
+the tool works against a running app. Once a day the cron asks the assistant
+service (`POST /api/ops/tool-canary` on Mastra) to call every agent tool that
+reads from the app, with a fixed input, against a **non-production** app. No
+model is involved. The assistant service refuses to run it against production
+(`docs/tool-canary.md` in the Mastra repo has the rules and the list of tools).
+
+The run returns every tool as `ok`, `failed` or `skipped` with a reason. This
+app turns that into tickets and ops-room posts
+(`src/server/services/toolCanary/`):
+
+| What the run found | What happens |
+|---|---|
+| A tool the app rejected, that failed server-side, or whose answer fails its own output schema | Filed as `agent-tool`, with the same title the chat route uses for that fault, so a fault seen by both lands on one ticket. The ops room is told when the ticket is created. |
+| The same tool still failing on a later run | Nothing: no new ticket, no post, no write. |
+| That tool answering again | One post, "Tool canary, working again", and the ticket is marked recovered. A later failure posts once more, "failing again". |
+| Tools that failed for a reason that is not theirs (not found, forbidden, timeout, a 412 "not configured") | One `tool-canary` ticket for all of them. These are the fixture's or the canary's to fix. |
+| The target app not answering, or refusing the canary's credential | One `tool-canary` ticket. No tool is blamed and none is declared recovered. |
+| The assistant service not answering, or the canary not configured there | One `tool-canary` ticket, and the cron answers 502. |
+
+"Was failing" is kept on the ticket, in `links.toolCanary = { key, state }`,
+so it survives between runs without a schema change. It is written only when
+the state changes. If a "working again" or "failing again" post does not go out
+(the ops room is down), the ticket is flagged `unannounced` and the next run
+sends it. Two tickets carrying the same key are both marked recovered, with
+one post.
+
+**Check the checker.** The cron is in `vercel.json`, so `automaticVercelMonitors`
+gives it a Sentry cron monitor: a canary that stops running, or answers 5xx, is
+reported by Sentry. A run that finds broken tools is a 200; the canary worked.
+The cron answers 502 when the canary could not run, and when it found faults
+it could not file (`fileErrors` in the response names them).
+
+**Limits.** Write tools are never called. A tool is called with one input.
+Four read tools need a connected mailbox or Google Calendar and are skipped,
+with that reason in the run's response. Three search tools make the target app
+embed a three-word query, which is the only model use in a run.
+
+**Turning it on.** It is off until both sides are configured:
+
+| Where | Variable | Value |
+|---|---|---|
+| Vercel production | `TOOL_CANARY_SECRET` | A new random secret. `MASTRA_API_URL` and `CRON_SECRET` are already set. |
+| Railway `mastra` | `TOOL_CANARY_SECRET` | The same secret. |
+| Railway `mastra` | `TOOL_CANARY_APP_URL` | Origin of the non-production app. |
+| Railway `mastra` | `TOOL_CANARY_AUTH_TOKEN` | An API token or agent key for a member of the fixture workspace on that app. |
+| Railway `mastra` | `TOOL_CANARY_WORKSPACE_ID` | Id of the fixture workspace on that app. |
+
+With only the app's half set, the first run files "the tool canary could not
+run (the assistant service answered 503)". Bug filing itself needs
+`CLIENT_ERROR_BUGS`, as for every handled error.
+
+To run it by hand: `curl -H "Authorization: Bearer $CRON_SECRET"
+https://<app>/api/cron/tool-canary`. The response lists the counts, what is
+failing, what was announced, what recovered, and every skipped tool with its
+reason.
 
 ### GlitchTip senders
 
@@ -128,6 +206,73 @@ out *this* repo) could not fix it.
 selects on `--status READY_TO_PLAN --label ai-fixable`, and Sentry files
 tickets as `BACKLOG`. A human moving the ticket to `READY_TO_PLAN` is what
 arms it — deliberate, since a raw stack trace is rarely a sufficient spec.
+
+## Product analytics (PostHog)
+
+Usage events, as opposed to errors, go to PostHog. They are captured **once, server-side**,
+by the analytics middleware on `protectedProcedure` (`src/server/api/trpc.ts`), so every
+client surface is covered without its own SDK. Decision:
+[ADR-0076](../docs/adr/0076-posthog-server-side-analytics.md).
+
+- **Event name** = procedure path (`action.create`). **Distinct id** = user id.
+- **Properties**: `procedure`, `type`, `surface`, `ok`, `error_code`, `duration_ms`. The
+  `surface` comes from the request's `tokenType` (`api`, `external-agent`, `assistant`,
+  `whatsapp`, `telegram`, `matrix`, `voice`, `browser-extension`, `native-app`) or, for
+  cookie sessions, `web` / `rsc` / `electron`. Person properties `first_seen_surface` and
+  `last_seen_surface` are set alongside.
+- **What is captured**: every mutation; queries only from non-browser surfaces. Inputs and
+  IPs never.
+- **Delivery**: events queue in memory and are flushed via `after()` in
+  `src/app/api/trpc/[trpc]/route.ts`, after the response but before Vercel freezes the
+  function.
+
+### Browser: masked session replay only
+
+The browser runs **no general analytics SDK**: no page views, no identification. Vercel Web
+Analytics counts public page views. The only browser-side PostHog is session replay, in
+`src/app/_components/layout/SessionReplay.tsx`, mounted in the signed-in layout.
+
+- **Where**: only `REPLAY_PATHS` (`/onboarding`, `/welcome`, `/w/exponential`), meaning the
+  signup path and our own workspace. Customer workspaces are never recorded, and other pages
+  never download `posthog-js` (it is imported dynamically on the first recorded page).
+- **Masking, in the browser before anything is sent**: every text node
+  (`maskTextSelector: '*'`) and input; images, video, canvas and iframes are blocked; and
+  attributes go through an allowlist (`maskAttribute`). Only what a replay needs to render
+  is kept (class, SVG geometry, ARIA state, short Mantine `data-*` tokens, stylesheet links).
+  `title`, `aria-label`, `alt`, `href`, `id`, `value` and anything unlisted are masked.
+  posthog-js's `mask_all_text` / `mask_all_element_attributes` only affect autocapture, so
+  they do nothing for replay.
+- **Anonymous and storage-free**: never `identify`d, `person_profiles: 'identified_only'`,
+  `persistence: 'memory'`. That means no cookies or localStorage, so replays cannot be joined
+  to the server events' person.
+- **Off**: autocapture, page views, heatmaps, dead clicks, exceptions, surveys, console logs,
+  network timing, request headers and bodies.
+- **Transport**: straight to `*.i.posthog.com`, which is listed in the report-only CSP. There is
+  no same-origin proxy, so ad blockers drop some replays. That's acceptable for a sample, and
+  it avoids `skipTrailingSlashRedirect`, which would disable Next's trailing-slash redirect
+  that the public allowlist relies on (`/features/` vs `/features`).
+- **Navigation**: recording starts only if the visitor is still on a recorded page when
+  `posthog-js` finishes loading, and leaving one always stops it
+  (`SessionReplay.navigation.test.tsx`).
+
+Widening `REPLAY_PATHS` to customer workspaces, or identifying replays, is a privacy decision
+(and a privacy-page change), not a config tweak.
+
+### Environment variables
+
+| Variable | Where | Notes |
+|---|---|---|
+| `NEXT_PUBLIC_POSTHOG_KEY` | Vercel production (preview optional) | Project API key. Enables server events and browser replay. Unset = disabled. |
+| `NEXT_PUBLIC_POSTHOG_HOST` | Optional | Browser replay host, defaults to `https://eu.i.posthog.com`. |
+| `POSTHOG_KEY` | Optional | Server-side override of the key. |
+| `POSTHOG_HOST` | Optional | Server-side host, defaults to `https://eu.i.posthog.com`. |
+
+In the PostHog project settings: enable session replay, enable **Discard client IP data**,
+and leave console-log and network capture off.
+
+To see real events locally, put a project key in `.env.local` as `NEXT_PUBLIC_POSTHOG_KEY`,
+run the dev server, perform a mutation, and watch PostHog's Activity tab. Open `/welcome` to
+produce a replay.
 
 ## Other signals
 

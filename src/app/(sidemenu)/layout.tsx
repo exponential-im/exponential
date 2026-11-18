@@ -14,7 +14,8 @@ import { resolveAiCapabilities } from '~/server/services/ai/capabilities';
 import { BugReportProvider } from '~/providers/BugReportProvider';
 import { themes } from '~/config/themes';
 import { getThemeDomain } from '~/config/site';
-import { Analytics } from '@vercel/analytics/next';
+import { PublicAnalytics } from '~/app/_components/layout/PublicAnalytics';
+import { SessionReplay } from '~/app/_components/layout/SessionReplay';
 import { GoogleAnalytics } from '@next/third-parties/google';
 import { ZoeDrawer, ZoeFab } from '~/app/_components/layout/ZoeDrawer';
 import { CommandPalette } from '~/app/_components/layout/CommandPalette';
@@ -85,7 +86,8 @@ export default async function RootLayout({
                       <ActiveTimerProvider>
                         <Layout domain={domain}>
                           {children}
-                          <Analytics />
+                          <PublicAnalytics />
+                          <SessionReplay />
                           {process.env.NEXT_PUBLIC_GA_ID && (
                             <GoogleAnalytics gaId={process.env.NEXT_PUBLIC_GA_ID} />
                           )}

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { PrismaClient } from "@prisma/client";
+import type { Prisma, PrismaClient } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import {
   buildActionAccessWhere,
@@ -12,8 +12,10 @@ import {
   isWorkspaceGuest,
 } from "~/server/services/access";
 import { stripHtml } from "~/lib/utils";
-import { shortIdSearchWhere, ticketUrlId } from "~/lib/fun-ids";
+import { ticketUrlId } from "~/lib/fun-ids";
+import { searchTicketsIdFirst } from "~/plugins/product/server/services/ticketTextSearch";
 import { getKnowledgeService } from "~/server/services/KnowledgeService";
+import { resolvePrincipal } from "~/server/services/access/principal";
 import { isAiConfigured } from "~/server/services/ai/requireAi";
 
 /**
@@ -35,6 +37,7 @@ export interface SearchResult {
     | "ticket"
     | "feature"
     | "epic"
+    | "cycle"
     | "page"
     | "meeting"
     | "contact"
@@ -234,36 +237,41 @@ async function searchKeyResults({ db, userId, q, workspaceId, limit }: SearchArg
 }
 
 // Mirrors ticket.list's assertWorkspaceAccess gate (direct or team-based
-// workspace membership via the ticket's product; guests denied).
+// workspace membership via the ticket's product; guests denied). A query that
+// names a ticket (`snappy.thunder`, `42`, `#42`, `EXP-42`) puts that ticket
+// first; see searchTicketsIdFirst.
 async function searchTickets({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
-  const tickets = await db.ticket.findMany({
-    where: {
-      product: {
-        ...(workspaceId ? { workspaceId } : {}),
-        workspace: { is: buildWorkspaceAccessWhere(userId) },
-      },
-      OR: [
-        { title: insensitive(q) },
-        // Fun shortIds match word-order-insensitively ("toucan.prime" finds
-        // prime.toucan).
-        ...shortIdSearchWhere(q),
-        // An all-digits query also matches the ticket's sequential number.
-        ...(/^\d+$/.test(q) && parseInt(q, 10) > 0
-          ? [{ number: parseInt(q, 10) }]
-          : []),
-      ],
+  const accessWhere: Prisma.TicketWhereInput = {
+    product: {
+      ...(workspaceId ? { workspaceId } : {}),
+      workspace: { is: buildWorkspaceAccessWhere(userId) },
     },
-    select: {
-      id: true,
-      title: true,
-      number: true,
-      shortId: true,
-      status: true,
-      product: {
-        select: { slug: true, workspace: { select: { id: true, slug: true, name: true } } },
-      },
-    },
-    take: limit,
+  };
+  const tickets = await searchTicketsIdFirst({
+    query: q,
+    limit,
+    find: (match, take, skip = 0) =>
+      db.ticket.findMany({
+        where: { AND: [accessWhere, match] },
+        select: {
+          id: true,
+          title: true,
+          number: true,
+          shortId: true,
+          status: true,
+          product: {
+            select: {
+              slug: true,
+              name: true,
+              workspace: { select: { id: true, slug: true, name: true } },
+            },
+          },
+        },
+        orderBy: { updatedAt: "desc" },
+        take,
+        ...(skip > 0 ? { skip } : {}),
+      }),
+    productName: (t) => t.product.name,
   });
   return tickets.map((t) => ({
     type: "ticket",
@@ -335,6 +343,79 @@ async function searchEpics({ db, userId, q, workspaceId, limit }: SearchArgs): P
       ? `/w/${e.workspace.slug}/products/${e.product.slug}/epics/${e.id}`
       : null,
   }));
+}
+
+// A cycle is a `List` row with listType SPRINT. Mirrors the cycle router's
+// gate: direct or team-based workspace membership (assertWorkspaceAccess
+// "view", guests denied).
+//
+// The current cycle is the one you most often look for, so active cycles are
+// fetched first and the rest fill what is left of the limit. Ranking has to
+// happen in the query, not after it: the Cycles tab auto-generates upcoming
+// cycles, and with a plain newest-first `take` those future cycles fill the
+// limit and push the active one out of the results.
+async function searchCycles({ db, userId, q, workspaceId, limit }: SearchArgs): Promise<SearchResult[]> {
+  const where: Prisma.ListWhereInput = {
+    listType: "SPRINT",
+    ...(workspaceId ? { workspaceId } : {}),
+    workspace: { is: buildWorkspaceAccessWhere(userId) },
+    name: insensitive(q),
+  };
+  const select = {
+    id: true,
+    name: true,
+    status: true,
+    startDate: true,
+    endDate: true,
+    workspace: { select: { id: true, slug: true, name: true } },
+    product: { select: { slug: true, name: true } },
+  } satisfies Prisma.ListSelect;
+  // Undated legacy cycles go last; Postgres would otherwise put nulls first.
+  const orderBy: Prisma.ListOrderByWithRelationInput[] = [
+    { startDate: { sort: "desc", nulls: "last" } },
+    { createdAt: "desc" },
+  ];
+
+  const active = await db.list.findMany({
+    where: { AND: [where, { status: "ACTIVE" }] },
+    select,
+    orderBy,
+    take: limit,
+  });
+  const rest =
+    active.length < limit
+      ? await db.list.findMany({
+          where: { AND: [where, { status: { not: "ACTIVE" } }] },
+          select,
+          orderBy,
+          take: limit - active.length,
+        })
+      : [];
+
+  return [...active, ...rest].map((c) => ({
+    type: "cycle" as const,
+    id: c.id,
+    title: c.name,
+    // Cycle names repeat across products and restarts ("Cycle 3" more than
+    // once), so the subtitle carries what tells two of them apart.
+    subtitle: [c.product?.name, c.status, cycleDates(c.startDate, c.endDate)]
+      .filter(Boolean)
+      .join(" · "),
+    workspace: c.workspace,
+    // The detail route is product-nested. A legacy workspace-shared cycle
+    // (productId null) has no product to sit under, so it stays unlinked.
+    url: c.product
+      ? `/w/${c.workspace.slug}/products/${c.product.slug}/cycles/${c.id}`
+      : null,
+  }));
+}
+
+/** "2026-11-13 → 2026-11-25", or null when the cycle is undated. */
+function cycleDates(start: Date | null, end: Date | null): string | null {
+  const day = (d: Date) => d.toISOString().slice(0, 10);
+  if (start && end) return `${day(start)} → ${day(end)}`;
+  if (start) return `from ${day(start)}`;
+  return null;
 }
 
 // Mirrors page.list (buildKnowledgePageAccessWhere, ADR-0033).
@@ -540,6 +621,7 @@ export const searchRouter = createTRPCRouter({
       searchTickets(args),
       searchFeatures(args),
       searchEpics(args),
+      searchCycles(args),
       searchPages(args),
       searchMeetings(args),
       searchContacts(args),
@@ -593,6 +675,10 @@ export const searchRouter = createTRPCRouter({
         pageViewerId: userId,
         transcriptionViewerId: userId,
         resourceViewerId: userId,
+        // A person also finds the Resources filed under Projects they are
+        // in (ADR-0082). An agent's shadow user is a workspace member too,
+        // and must not: its reach is its owner's own Resources (ADR-0079).
+        resourceSharedWithViewer: (await resolvePrincipal(ctx)).kind !== "agent",
         // Uploaded documents have no page to link to yet, so their chunks are
         // always dropped below; searching them would only spend the over-fetch.
         sourceTypes: input.sourceTypes ?? SEARCHABLE_KNOWLEDGE_SOURCES,

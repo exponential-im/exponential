@@ -23,7 +23,22 @@ const E2E_CRON_SECRET = "e2e-cron-secret";
 const NOT_E2E = ["perf/**", "docs-screenshots/**"];
 
 /** Specs that write the fixture user's saved product view prefs directly. */
-const SHARED_VIEW_PREFS_SPECS = ["product-view-prefs.spec.ts", "ticket-dependency-nesting.spec.ts"];
+const SHARED_VIEW_PREFS_SPECS = [
+  "product-view-prefs.spec.ts",
+  "ticket-dependency-nesting.spec.ts",
+  "ticket-short-id-search.spec.ts",
+];
+
+/**
+ * Specs that start their own Mastra stub on E2E_MASTRA_STUB_URL. One port, so
+ * they run one file at a time.
+ */
+const MASTRA_STUB_SPECS = [
+  "agent-run.spec.ts",
+  "billing-usage.spec.ts",
+  "chat-tool-card.spec.ts",
+  "low-rating-trace.spec.ts",
+];
 
 export default defineConfig({
   testDir: "./e2e",
@@ -49,7 +64,7 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
-      testIgnore: [...NOT_E2E, ...SHARED_VIEW_PREFS_SPECS],
+      testIgnore: [...NOT_E2E, ...SHARED_VIEW_PREFS_SPECS, ...MASTRA_STUB_SPECS],
     },
     {
       // These specs rewrite the fixture user's saved Backlog view prefs (one
@@ -59,6 +74,12 @@ export default defineConfig({
       name: "chromium-shared-prefs",
       use: { ...devices["Desktop Chrome"] },
       testMatch: SHARED_VIEW_PREFS_SPECS,
+      workers: 1,
+    },
+    {
+      name: "chromium-mastra-stub",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: MASTRA_STUB_SPECS,
       workers: 1,
     },
   ],
@@ -80,6 +101,20 @@ export default defineConfig({
       // secret is fixed so a spec can kick the dispatcher deterministically.
       MASTRA_API_URL: E2E_MASTRA_STUB_URL,
       CRON_SECRET: E2E_CRON_SECRET,
+      // The suite runs as a hosted install that meters Assistant use, so the
+      // usage ledger and the Billing tab are covered (billing-usage.spec.ts).
+      // Nothing is limited in this mode.
+      BILLING_MODE: "meter",
+      // Fixed, so a Mastra stub can make the callbacks only the Mastra server
+      // may make (the model-key ones). Same value as E2E_MASTRA_SERVER_KEY in
+      // e2e/fixture-data.ts.
+      MASTRA_SERVER_API_KEY: "e2e-mastra-server-key",
+      // The ops room is the same stub port: low-rating-trace.spec.ts answers
+      // the Matrix send there and reads what was posted. With no stub up the
+      // send fails and is swallowed, as it is on any install without Matrix.
+      MATRIX_HOMESERVER_URL: E2E_MASTRA_STUB_URL,
+      MATRIX_ACCESS_TOKEN: "e2e-matrix-token",
+      MATRIX_SENTRY_ROOM_ID: "!e2e-ops:localhost",
     },
   },
 });

@@ -1,6 +1,6 @@
 import { db } from '~/server/db';
 import { FirefliesService, type FirefliesSummary } from './FirefliesService';
-import { ActionExtractionService, filterNearDuplicateActions, mergeActionItems, numberScreenshotMarkers } from './ActionExtractionService';
+import { ActionExtractionService, filterDiscardedActions, filterNearDuplicateActions, mergeActionItems, numberScreenshotMarkers } from './ActionExtractionService';
 import { InternalActionProcessor } from './processors/InternalActionProcessor';
 import { type ParsedActionItem } from './processors/ActionProcessor';
 import { NotificationServiceFactory } from './notifications/NotificationServiceFactory';
@@ -30,6 +30,14 @@ export interface DraftTranscriptionActionsResult {
   actionsCreated: number;
   alreadyPublished: boolean;
   draftCount: number;
+  /** Unreviewed drafts a re-extract removed to make way for the new ones. */
+  draftsReplaced?: number;
+  /**
+   * A re-extract left the existing drafts in place because the transcript
+   * could not be read in full. Said out loud so the reviewer is not left
+   * looking at an unchanged list with no explanation.
+   */
+  draftsKept?: boolean;
   errors: string[];
 }
 
@@ -41,6 +49,18 @@ export interface GenerateDraftActionsOptions {
    * is a decision or an action. Undefined means that pass did not run.
    */
   transcriptActionItems?: ActionCandidate[];
+  /**
+   * A re-extract: draft again and put the new drafts in place of the
+   * unreviewed ones. Actions already created from the meeting are kept and
+   * are not drafted a second time.
+   */
+  replaceDrafts?: boolean;
+  /**
+   * The combined pass could not read part of the transcript, so its action
+   * items are from part of the meeting. A re-extract then keeps the drafts
+   * it has rather than replace them with less.
+   */
+  transcriptIncomplete?: boolean;
 }
 
 /** The meeting page's single "Extract outputs" run: actions and decisions. */
@@ -58,6 +78,12 @@ export interface ExtractMeetingOutputsOptions {
    * looking so the decision drafts notify the meeting owner.
    */
   trigger?: "manual" | "auto_extract";
+  /**
+   * Read the meeting again and replace its unreviewed drafts (the meeting
+   * page's "Re-extract outputs"). What a person already confirmed, created
+   * or rejected stays, and is not proposed again.
+   */
+  replaceDrafts?: boolean;
 }
 
 /**
@@ -176,7 +202,7 @@ export class TranscriptionProcessingService {
         },
       });
 
-      if (existingActiveCount > 0) {
+      if (existingActiveCount > 0 && !options.replaceDrafts) {
         // Report any drafts left over from a partial "Create selected" too:
         // without the count the caller can only say "already created" and the
         // leftovers become unreachable once the review card has left the
@@ -188,7 +214,7 @@ export class TranscriptionProcessingService {
         return result;
       }
 
-      if (existingDraftCount > 0) {
+      if (existingDraftCount > 0 && !options.replaceDrafts) {
         console.log(`[generateDraftActions] Already has ${existingDraftCount} drafts, returning existing`);
         result.success = true;
         result.draftCount = existingDraftCount;
@@ -210,6 +236,7 @@ export class TranscriptionProcessingService {
       const transcriptText = transcription.transcription || "";
       let summary: FirefliesSummary = {};
       let transcriptItems: ParsedActionItem[] = [];
+      let transcriptPassFailed = false;
 
       if (transcription.summary) {
         try {
@@ -255,6 +282,7 @@ export class TranscriptionProcessingService {
           );
           console.log(`[generateDraftActions] AI extraction returned ${transcriptItems.length} items`);
         } catch (extractError) {
+          transcriptPassFailed = true;
           console.error("[generateDraftActions] Transcript extraction failed, continuing with notes items:", extractError);
           const { reportHandledErrorServer } = await import(
             "~/server/utils/reportHandledErrorServer"
@@ -279,15 +307,62 @@ export class TranscriptionProcessingService {
         }
       }
 
+      let mergedItems = mergeActionItems(notesItems, transcriptItems);
+      // A draft a reviewer discarded from this meeting is not drafted again.
+      const discarded = await db.discardedActionDraft.findMany({
+        where: { transcriptionSessionId: transcriptionId },
+        select: { name: true },
+      });
+      mergedItems = filterDiscardedActions(
+        mergedItems,
+        discarded.map((draft) => draft.name),
+      );
+      let draftIdsToReplace: string[] = [];
+      const removeReplacedDrafts = async () => {
+        if (draftIdsToReplace.length === 0) return;
+        const { count } = await db.action.deleteMany({
+          where: { id: { in: draftIdsToReplace }, transcriptionSessionId: transcriptionId, status: "DRAFT" },
+        });
+        result.draftsReplaced = count;
+      };
+      if (options.replaceDrafts) {
+        // Actions already created from this meeting are not drafted again.
+        const created = await db.action.findMany({
+          where: { transcriptionSessionId: transcriptionId, status: { notIn: ["DELETED", "DRAFT"] } },
+          select: { name: true },
+        });
+        mergedItems = filterNearDuplicateActions(
+          mergedItems,
+          created.map((action) => ({ text: action.name })),
+        );
+        if ((transcriptPassFailed || options.transcriptIncomplete === true) && existingDraftCount > 0) {
+          // The transcript could not be read in full this time; the drafts
+          // already there came from a reading that could, so they stay.
+          result.success = true;
+          result.draftCount = existingDraftCount;
+          result.draftsKept = true;
+          return result;
+        }
+        // The old drafts are removed only once the new ones exist (below):
+        // deleting first would lose them if a write failed part-way.
+        const oldDrafts = await db.action.findMany({
+          where: { transcriptionSessionId: transcriptionId, status: "DRAFT" },
+          select: { id: true },
+        });
+        draftIdsToReplace = oldDrafts.map((draft) => draft.id);
+      }
+
       const processedData = {
         summary,
-        actionItems: mergeActionItems(notesItems, transcriptItems),
+        actionItems: mergedItems,
         transcriptText,
       };
       console.log(`[generateDraftActions] Merged ${notesItems.length} notes + ${transcriptItems.length} transcript items into ${processedData.actionItems.length}`);
 
       if (!processedData.actionItems || processedData.actionItems.length === 0) {
         console.log("[generateDraftActions] processedData exists but 0 action items found");
+        // A complete reading that found nothing replaces the old drafts with nothing.
+        await removeReplacedDrafts();
         result.success = true;
         return result;
       }
@@ -304,6 +379,22 @@ export class TranscriptionProcessingService {
       const actionResult = await draftProcessor.processActionItems(
         processedData.actionItems
       );
+
+      if (draftIdsToReplace.length > 0 && actionResult.errors.length > 0) {
+        // Some of the new drafts could not be written. Take back the ones
+        // that were, and leave the old set as it was: a re-extract replaces
+        // the drafts whole or not at all.
+        // By "not one of the old drafts", not by the ids the processor
+        // reported: an action whose assignee write failed is on the table but
+        // counted as a failure, and would otherwise be left behind.
+        await db.action.deleteMany({
+          where: { transcriptionSessionId: transcriptionId, status: "DRAFT", id: { notIn: draftIdsToReplace } },
+        });
+        result.errors = actionResult.errors;
+        result.draftCount = draftIdsToReplace.length;
+        return result;
+      }
+      await removeReplacedDrafts();
 
       result.actionsCreated = actionResult.processedCount;
       result.draftCount = actionResult.processedCount;
@@ -370,9 +461,12 @@ export class TranscriptionProcessingService {
   ): Promise<ExtractMeetingOutputsResult> {
     const { actionItems, ...decisions } = await this.generateDraftDecisions(transcriptionId, userId, {
       trigger: options.trigger ?? "manual",
+      replaceDrafts: options.replaceDrafts,
     });
     const actions = await this.generateDraftActions(transcriptionId, userId, {
       transcriptActionItems: actionItems,
+      replaceDrafts: options.replaceDrafts,
+      transcriptIncomplete: decisions.transcriptIncomplete,
     });
     // The run counts as done once both halves got through (including the
     // "already drafted" short-circuits): the stamp is what keeps the

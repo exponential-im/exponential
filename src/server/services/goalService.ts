@@ -1,19 +1,26 @@
 import type { Prisma } from "@prisma/client";
+import { TRPCError } from "@trpc/server";
 import { type Context } from "~/server/auth/types";
 import {
   getWorkspaceMembership,
-  canEditWorkspaceContent,
+  assertWorkspaceWriteRole,
 } from "~/server/services/access/resolvers/workspaceResolver";
+import { assertCanEditGoal } from "~/server/services/access/resolvers/goalResolver";
 import { resolveGoalProgress, isManualProgress } from "~/server/services/goalProgress";
 import { recordActivity } from "~/server/services/activity/recordActivity";
+import { reportBackgroundFailure } from "~/server/utils/runAfterResponse";
 
 /**
- * Verifies the current user has access to the given goal.
- * Returns the goal if access is granted, throws otherwise.
+ * Verifies the current user can SEE the given goal: its owner, its DRI, or any
+ * member of its workspace, a `viewer` included. Returns the goal if access is
+ * granted, throws otherwise.
+ *
+ * This is the read gate, and the gate for commenting. Never put it alone in
+ * front of a change to the goal: use {@link verifyGoalWriteAccess}.
  */
 export async function verifyGoalAccess({ ctx, goalId }: { ctx: Context; goalId: number }) {
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
 
   const goal = await ctx.db.goal.findUnique({
     where: { id: goalId },
@@ -22,7 +29,7 @@ export async function verifyGoalAccess({ ctx, goalId }: { ctx: Context; goalId: 
     select: { id: true, userId: true, driUserId: true, workspaceId: true, title: true },
   });
 
-  if (!goal) throw new Error("Goal not found");
+  if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found" });
 
   // Owner or DRI always has access
   if (goal.userId === userId || goal.driUserId === userId) return goal;
@@ -33,7 +40,35 @@ export async function verifyGoalAccess({ ctx, goalId }: { ctx: Context; goalId: 
     if (membership) return goal;
   }
 
-  throw new Error("Access denied");
+  throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
+}
+
+/**
+ * Verifies the current user may CHANGE the given goal, and returns it.
+ *
+ * A goal in a workspace needs a write role there (`assertCanEditGoal`): a
+ * `viewer` is refused with FORBIDDEN, including on a goal they created or are
+ * the DRI of. A personal goal is its owner's and its DRI's.
+ *
+ * Every mutation below used `verifyGoalAccess`, the read gate, so any member
+ * of the workspace, a viewer included, could edit, re-parent and delete its
+ * goals.
+ */
+export async function verifyGoalWriteAccess({ ctx, goalId }: { ctx: Context; goalId: number }) {
+  const userId = ctx.session?.user?.id;
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
+
+  const goal = await ctx.db.goal.findUnique({
+    where: { id: goalId },
+    select: { id: true, userId: true, driUserId: true, workspaceId: true, title: true },
+  });
+
+  if (!goal) throw new TRPCError({ code: "NOT_FOUND", message: "Goal not found" });
+
+  await assertCanEditGoal(ctx.db, userId, goal, {
+    notFound: "Goal not found or access denied",
+  });
+  return goal;
 }
 
 /** The health a check-in can set. Mirrors the auto `Goal.health` values an
@@ -51,7 +86,7 @@ export type GoalUpdateHealth = "on-track" | "at-risk" | "off-track";
  * This is the single place the update-write rule lives: both the human router
  * (`goalUpdate.addUpdate`) and the agent-facing proxy (`mastra.addGoalUpdate`)
  * call it, so the health-sync behaviour cannot drift between surfaces. Access
- * mirrors the human path exactly via `verifyGoalAccess`. See ADR-0016.
+ * mirrors the human path exactly via `verifyGoalWriteAccess`. See ADR-0016.
  */
 export async function createGoalUpdate({
   ctx,
@@ -64,10 +99,11 @@ export async function createGoalUpdate({
   content: string;
   health: GoalUpdateHealth;
 }) {
-  const goal = await verifyGoalAccess({ ctx, goalId });
+  // An update moves the objective's health, so it needs write access.
+  const goal = await verifyGoalWriteAccess({ ctx, goalId });
 
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
 
   const [update] = await ctx.db.$transaction([
     ctx.db.goalUpdate.create({
@@ -134,7 +170,7 @@ export async function createGoalComment({
   const goal = await verifyGoalAccess({ ctx, goalId });
 
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
 
   const comment = await ctx.db.goalComment.create({
     data: {
@@ -213,7 +249,7 @@ interface GoalInput {
 
 export async function createGoal({ ctx, input }: { ctx: Context, input: GoalInput }) {
   if (!ctx.session?.user?.id) {
-    throw new Error("User not authenticated");
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
   }
 
   // A sub-goal's parent must be ACCESSIBLE to the caller — never nest under
@@ -283,7 +319,8 @@ export async function createGoal({ ctx, input }: { ctx: Context, input: GoalInpu
  * edit it, so writing one is an access change, not a field edit. Bare
  * membership is not the test: `viewer` is read-only and `guest` is synthesized
  * for project-only access, and neither should be filing goals into a workspace.
- * `canEditWorkspaceContent` is the repo's answer (see its docstring).
+ * `assertWorkspaceWriteRole` is the repo's answer: FORBIDDEN for both, and
+ * for someone who is not a member at all.
  */
 async function assertCanPlaceGoalInWorkspace({
   ctx,
@@ -293,11 +330,8 @@ async function assertCanPlaceGoalInWorkspace({
   workspaceId: string;
 }) {
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
-  const membership = await getWorkspaceMembership(ctx.db, userId, workspaceId);
-  if (!canEditWorkspaceContent(membership?.role ?? null)) {
-    throw new Error("You are not a member of the target workspace");
-  }
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
+  await assertWorkspaceWriteRole(ctx.db, userId, workspaceId);
 }
 
 /**
@@ -316,7 +350,7 @@ async function validateParentAssignment({
   parentGoalId: number;
 }) {
   if (goalId !== undefined && parentGoalId === goalId) {
-    throw new Error("A goal cannot be its own parent");
+    throw new TRPCError({ code: "BAD_REQUEST", message: "A goal cannot be its own parent" });
   }
   let depth = 1;
   let currentParentId: number | null = parentGoalId;
@@ -327,12 +361,12 @@ async function validateParentAssignment({
     });
     if (!parent) break;
     if (goalId !== undefined && parent.parentGoalId === goalId) {
-      throw new Error("Cannot set a descendant goal as parent (would create a cycle)");
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot set a descendant goal as parent (would create a cycle)" });
     }
     currentParentId = parent.parentGoalId;
     depth++;
     if (depth > 5) {
-      throw new Error("Maximum nesting depth of 5 levels exceeded");
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Maximum nesting depth of 5 levels exceeded" });
     }
   }
 }
@@ -375,10 +409,10 @@ interface UpdateGoalInput {
 
 export async function updateGoal({ ctx, input }: { ctx: Context, input: UpdateGoalInput }) {
   if (!ctx.session?.user?.id) {
-    throw new Error("User not authenticated");
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
   }
 
-  await verifyGoalAccess({ ctx, goalId: input.id });
+  await verifyGoalWriteAccess({ ctx, goalId: input.id });
 
   const existingGoal = await ctx.db.goal.findUniqueOrThrow({
     where: { id: input.id },
@@ -493,9 +527,10 @@ export async function setGoalParent({
   parentGoalId: number | null;
 }) {
   if (!ctx.session?.user?.id) {
-    throw new Error("User not authenticated");
+    throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
   }
-  await verifyGoalAccess({ ctx, goalId });
+  // Write access to the goal being moved; the parent only has to be visible.
+  await verifyGoalWriteAccess({ ctx, goalId });
   if (parentGoalId !== null) {
     await verifyGoalAccess({ ctx, goalId: parentGoalId });
     await validateParentAssignment({ ctx, goalId, parentGoalId });
@@ -514,7 +549,7 @@ export async function setGoalParent({
  */
 export async function getProjectGoals({ ctx, projectId }: { ctx: Context, projectId: string }) {
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
   return await ctx.db.goal.findMany({
     where: {
       userId,
@@ -540,7 +575,7 @@ export async function getProjectGoals({ ctx, projectId }: { ctx: Context, projec
  */
 export async function getGoalTree({ ctx, workspaceId, status }: { ctx: Context, workspaceId?: string, status?: string }) {
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
 
   const goals = await ctx.db.goal.findMany({
     where: {
@@ -688,9 +723,16 @@ export async function computeGoalHealth({ ctx, goalId }: { ctx: Context, goalId:
   });
 
   // If this goal has a parent, recompute parent health too
+  // Awaited rather than void'd: a bare promise can be frozen with the
+  // serverless function once the request returns, leaving the parent's cached
+  // health stale. Goal trees are shallow, so the extra latency is small. A
+  // parent failure is reported and never fails this goal's recompute.
   if (goal.parentGoalId) {
-    // Fire-and-forget to avoid deep recursion blocking
-    void computeGoalHealth({ ctx, goalId: goal.parentGoalId });
+    try {
+      await computeGoalHealth({ ctx, goalId: goal.parentGoalId });
+    } catch (error) {
+      await reportBackgroundFailure(error, "goalHealth.parentRecompute", { goalId: String(goal.parentGoalId) });
+    }
   }
 
   return health;
@@ -698,7 +740,7 @@ export async function computeGoalHealth({ ctx, goalId }: { ctx: Context, goalId:
 
 export async function getGoalById({ ctx, id }: { ctx: Context, id: number }) {
   const userId = ctx.session?.user?.id;
-  if (!userId) throw new Error("User not authenticated");
+  if (!userId) throw new TRPCError({ code: "UNAUTHORIZED", message: "User not authenticated" });
 
   const goal = await ctx.db.goal.findUnique({
     where: { id },
@@ -759,7 +801,7 @@ export async function getGoalById({ ctx, id }: { ctx: Context, id: number }) {
 export async function deleteGoal({ ctx, input }: { ctx: Context, input: { id: number } }) {
   // The access check already fetches the title + workspaceId the feed row
   // needs, captured here before the row is gone.
-  const goal = await verifyGoalAccess({ ctx, goalId: input.id });
+  const goal = await verifyGoalWriteAccess({ ctx, goalId: input.id });
 
   const deleted = await ctx.db.goal.delete({
     where: { id: input.id },
@@ -783,7 +825,7 @@ export async function deleteGoal({ ctx, input }: { ctx: Context, input: { id: nu
 }
 
 export async function updateGoalIcon({ ctx, input }: { ctx: Context; input: { id: number; icon: string | null; iconColor: string | null } }) {
-  await verifyGoalAccess({ ctx, goalId: input.id });
+  await verifyGoalWriteAccess({ ctx, goalId: input.id });
 
   return ctx.db.goal.update({
     where: { id: input.id },

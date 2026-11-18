@@ -24,14 +24,18 @@
 #                            email or OAuth before inviting anyone
 #                            (README, "Docker Compose").
 #   SMTP_*, EMAIL_FROM, AUTH_POSTMARK_KEY, GOOGLE_*, AUTH_DISCORD_*: other ways in
+#   MCP_ALLOWED_ORIGINS      optional: browser origins, besides this install's,
+#                            that may call the MCP endpoint (/api/mcp)
+#   MCP_OAUTH_MODE           optional: off (default), admin or on. Lets MCP
+#                            clients connect by signing in instead of a key
 #   POSTGRES_PASSWORD        default "exponential"; letters and digits only
 #                            (it goes into a URL). Postgres is not published
 #                            on the host. Set it before the first start: the
 #                            database keeps the password it was created with.
-#   MASTRA_BUILD_CONTEXT     where Mastra builds from (default positonic/mastra main)
+#   MASTRA_BUILD_CONTEXT     where Mastra builds from (default exponential-im/mastra main)
 #
 # Images build locally from this checkout (the app from ./Dockerfile, the
-# scheduler from docker/scheduler.Dockerfile) and from positonic/mastra's
+# scheduler from docker/scheduler.Dockerfile) and from exponential-im/mastra's
 # docker/Dockerfile. Building the app needs a Docker host with at least 10 GB
 # of memory. To run published images instead, see the README.
 
@@ -104,6 +108,8 @@ services:
       GOOGLE_CLIENT_SECRET:
       AUTH_DISCORD_ID:
       AUTH_DISCORD_SECRET:
+      MCP_ALLOWED_ORIGINS:
+      MCP_OAUTH_MODE:
     volumes:
       - ./docker/compose:/selfhost:ro
       - secrets:/selfhost-secrets:ro
@@ -147,7 +153,7 @@ services:
     <<: *with-secrets
     profiles: ["assistant"]
     build:
-      context: ${MASTRA_BUILD_CONTEXT:-https://github.com/positonic/mastra.git#main}
+      context: ${MASTRA_BUILD_CONTEXT:-https://github.com/exponential-im/mastra.git#main}
       dockerfile: docker/Dockerfile
     command: ["node", ".mastra/output/index.mjs"]
     environment:

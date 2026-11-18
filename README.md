@@ -1,10 +1,12 @@
 # Exponential.im
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/positonic/exponential/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/positonic/exponential)](https://github.com/positonic/exponential)
-[![Open Source](https://img.shields.io/badge/Open%20Source-%E2%9D%A4-green)](https://github.com/positonic/exponential)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/exponential-im/exponential/blob/main/LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/exponential-im/exponential)](https://github.com/exponential-im/exponential)
+[![Open Source](https://img.shields.io/badge/Open%20Source-%E2%9D%A4-green)](https://github.com/exponential-im/exponential)
 
 An open-source productivity and project management platform built with the T3 Stack. Manage projects, track goals and key results, plan your day with AI, and collaborate across workspaces.
+
+**[Website](https://www.exponential.im)** · **[Docs](https://www.exponential.im/docs)** · **[Integrations](https://www.exponential.im/features/integrations)** · **[Pricing](https://www.exponential.im/pricing)** · **[Changelog](https://www.exponential.im/product-timeline)**
 
 Run your own copy in one click (see [Self-hosting](#self-hosting)):
 
@@ -20,7 +22,6 @@ Run your own copy in one click (see [Self-hosting](#self-hosting)):
 - **Meetings** - Calendar integration with transcription and auto-generated action items
 - **CRM** - Contact/organization management, deal pipeline (Kanban), Gmail/Calendar import
 - **Workspaces** - Organize everything by team or client (personal, team, organization)
-- **Bounty System** - Attach bounties to actions for open-source contributors *(coming soon)*
 
 <img width="1709" alt="image" src="https://github.com/user-attachments/assets/bbc16660-53c9-4bf1-ac87-af756ad3ec8c" />
 
@@ -51,7 +52,7 @@ Run your own copy in one click (see [Self-hosting](#self-hosting)):
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/positonic/exponential.git
+   git clone https://github.com/exponential-im/exponential.git
    cd exponential
    ```
 
@@ -190,7 +191,7 @@ or in your shell. None is required:
 | `AUTH_LOG_SIGN_IN_CODES` | `true` | The instance admin's sign-in codes go to the app's log; nobody else gets one. Ignored once SMTP or Postmark is set. **Anyone who can read the log can sign in as the admin**; see the security note above. |
 | `SMTP_*`, `EMAIL_FROM`, `AUTH_POSTMARK_KEY`, `GOOGLE_CLIENT_*`, `AUTH_DISCORD_*` | unset | Other ways in, as in the table below. |
 | `POSTGRES_PASSWORD` | `exponential` | Letters and digits only. Set it before the first start: the database keeps the password it was created with. |
-| `MASTRA_BUILD_CONTEXT` | positonic/mastra `main` | Where the Assistant builds from. |
+| `MASTRA_BUILD_CONTEXT` | exponential-im/mastra `main` | Where the Assistant builds from. |
 
 **The Assistant is opt-in.** Mastra (chat, Assign to Assistant) needs an
 Anthropic key, so it sits behind the `assistant` profile:
@@ -201,7 +202,7 @@ ANTHROPIC_API_KEY=… OPENAI_API_KEY=… docker compose --profile assistant up -
 
 With the profile on, the app finds the `mastra` service and points
 `MASTRA_API_URL` at it; without it, the Assistant stays off. Mastra builds
-from [positonic/mastra](https://github.com/positonic/mastra)'s
+from [exponential-im/mastra](https://github.com/exponential-im/mastra)'s
 `docker/Dockerfile` and shares the database (schema `mastra`).
 
 **Memory.** Building the app image needs a Docker host with at least 10 GB of
@@ -215,10 +216,10 @@ merges in automatically:
 ```yaml
 services:
   app:
-    image: ghcr.io/positonic/exponential-app:latest
+    image: ghcr.io/exponential-im/exponential-app:latest
     build: !reset null
   scheduler:
-    image: ghcr.io/positonic/exponential-scheduler:latest
+    image: ghcr.io/exponential-im/exponential-scheduler:latest
     build: !reset null
 ```
 
@@ -241,12 +242,12 @@ Both are published to the GitHub Container Registry by
 each release. When several commits land while a build runs, only the newest
 is built next, so not every commit has a `sha-` tag. For a repeatable install,
 pin a version tag or a `sha-` tag listed on the package page
-([app](https://github.com/positonic/exponential/pkgs/container/exponential-app),
-[scheduler](https://github.com/positonic/exponential/pkgs/container/exponential-scheduler)).
+([app](https://github.com/exponential-im/exponential/pkgs/container/exponential-app),
+[scheduler](https://github.com/exponential-im/exponential/pkgs/container/exponential-scheduler)).
 
 ```bash
-docker pull ghcr.io/positonic/exponential-app:latest
-docker pull ghcr.io/positonic/exponential-scheduler:latest
+docker pull ghcr.io/exponential-im/exponential-app:latest
+docker pull ghcr.io/exponential-im/exponential-scheduler:latest
 ```
 
 To build them yourself:
@@ -267,7 +268,7 @@ docker build -f docker/scheduler.Dockerfile -t exponential-scheduler .      # th
   point `SCHEDULER_TARGET_URL` at the app's address on the network they share.
 
 A full install is four services: Postgres with pgvector, the app, the
-scheduler, and the [Mastra agent service](https://github.com/positonic/mastra)
+scheduler, and the [Mastra agent service](https://github.com/exponential-im/mastra)
 (agent runs and chat; optional, like every AI key). The scheduler and Mastra reach the app over the
 private network; only the app needs a public address.
 
@@ -385,7 +386,19 @@ exponential actions list
 exponential actions create -n "My task" -p <project-id>
 ```
 
-See [exponential-cli](https://github.com/positonic/exponential-cli) for full docs.
+See [exponential-cli](https://github.com/exponential-im/exponential-cli) and the [CLI reference](https://www.exponential.im/docs/developers/cli) for full docs.
+
+### MCP server (Claude, Cursor, Codex)
+
+[`exponential-mcp`](https://github.com/exponential-im/exponential-mcp) gives any MCP client tools over your workspace: projects, actions, goals and key results, meetings, tickets and more. Setup guides for [Claude](https://www.exponential.im/features/integrations/claude), [Cursor](https://www.exponential.im/features/integrations/cursor) and [Codex](https://www.exponential.im/features/integrations/codex).
+
+```bash
+npx exponential-mcp init
+```
+
+### TypeScript SDK
+
+[`exponential-sdk`](https://github.com/exponential-im/exponential-sdk) is the client the CLI and the MCP server are built on. See the [SDK page](https://www.exponential.im/features/integrations/sdk) and the [MCP & SDK docs](https://www.exponential.im/docs/developers/mcp-and-sdk).
 
 ### OpenClaw (AI Agent)
 
@@ -397,14 +410,6 @@ npx clawhub install exponential
 
 Your agent can then create tasks, manage kanban boards, and track projects through natural conversation.
 
-### Bounty API
-
-All bounties are machine-readable — no auth required to browse:
-
-- **REST API:** [`GET /api/bounties`](https://www.exponential.im/api/bounties)
-- **LLMs.txt:** [`/llms.txt`](https://www.exponential.im/llms.txt)
-- **RSS Feed:** [`/api/bounties/feed.xml`](https://www.exponential.im/api/bounties/feed.xml)
-
 ## Contributing
 
 We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) for details on:
@@ -412,7 +417,6 @@ We welcome contributions! Please read our [Contributing Guide](CONTRIBUTING.md) 
 - Development setup
 - Code style and linting rules
 - Pull request process
-- Claiming bounties
 - Database migration safety
 
 Please also review our [Code of Conduct](CODE_OF_CONDUCT.md).

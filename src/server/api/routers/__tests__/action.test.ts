@@ -1209,9 +1209,9 @@ describe("action router (mocked)", () => {
     });
 
     it("withholds the workspace roster on a merely-public project", async () => {
-      // A stranger holding a bounty action id from the unauthenticated
-      // /api/bounties feed passes canViewAction via `isPublic`. They must not
-      // inherit the workspace's member list (names + emails) with it.
+      // A stranger holding an action id from a public project passes
+      // canViewAction via `isPublic`. They must not inherit the workspace's
+      // member list (names + emails) with it.
       dbMock.action.findUnique.mockResolvedValue({
         id: "a1",
         createdById: "someone-else",
@@ -1219,7 +1219,7 @@ describe("action router (mocked)", () => {
         assignees: [],
         project: {
           id: "p1",
-          name: "Public bounty project",
+          name: "Public project",
           workspaceId: "w1",
           isRestricted: false,
           createdById: "someone-else",
@@ -1304,6 +1304,61 @@ describe("action router (mocked)", () => {
       expect(byId.get("u2")?.positions.map((p) => p.title)).toEqual(["Delivery lead"]);
       expect(byId.get(callerId)?.positions).toEqual([]);
     });
+
+    /** A project-less action, e.g. one extracted from a meeting with no project. */
+    function stubLooseAction(workspaceId: string | null) {
+      dbMock.action.findUnique.mockResolvedValue({
+        id: "a1",
+        createdById: callerId,
+        projectId: null,
+        workspaceId,
+        teamId: null,
+        assignees: [],
+        project: null,
+        team: null,
+      } as never);
+      dbMock.workspaceUser.findUnique.mockResolvedValue(
+        workspaceId
+          ? ({ userId: callerId, workspaceId, role: "member", joinedAt: new Date() } as never)
+          : null,
+      );
+      dbMock.teamUser.findFirst.mockResolvedValue(null);
+      dbMock.team.findMany.mockResolvedValue([]);
+      dbMock.workspaceUser.findMany.mockResolvedValue([
+        { user: { id: "u2", name: "Colleague", email: "u2@test.com", image: null } } as never,
+      ]);
+      dbMock.user.findUnique.mockResolvedValue(
+        { id: callerId, name: "Me", email: "caller-1@test.com", image: null } as never,
+      );
+    }
+
+    it("only takes teams from the action's own workspace", async () => {
+      // The caller's teams in other workspaces used to land in the picker
+      // (people from one workspace offered on another's action).
+      stubLooseAction("w1");
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      const result = await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      expect(dbMock.team.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(dbMock.workspaceUser.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(result.assignableUsers.map((u) => u.id).sort()).toEqual([callerId, "u2"]);
+    });
+
+    it("keeps every team as the fallback for an action with no workspace", async () => {
+      stubLooseAction(null);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      const teamWhere = (dbMock.team.findMany.mock.calls[0]?.[0] as { where: object }).where;
+      expect(teamWhere).not.toHaveProperty("workspaceId");
+      expect(dbMock.workspaceUser.findMany).not.toHaveBeenCalled();
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────
@@ -1357,24 +1412,46 @@ describe("action router (mocked)", () => {
       expect(dbMock.action.create).toHaveBeenCalled();
     });
 
+    // The last column: an agent principal's project-less, unassigned Action is
+    // assigned to the agent's owner (slim.lake). A person, and an agent acting
+    // as a person, is already the creator, so nobody is added.
     it.each([
-      [undefined, false, "ui"],
-      ["api-token", false, "cli"],
-      ["agent-key", false, "agent"],
-      ["agent-context", false, "agent"], // Zoe in chat, for the person: not the UI
-      ["agent-context", true, "agent"], // an Assistant run's shadow user
-      ["telegram-gateway", false, "telegram"],
-    ] as const)("names the source from the principal: %s (shadow user: %s) is %s", async (tokenType, isAgent, source) => {
+      [undefined, false, "ui", false],
+      ["api-token", false, "cli", false],
+      ["agent-key", false, "agent", true],
+      ["agent-context", false, "agent", false], // Zoe in chat, for the person: not the UI
+      ["agent-context", true, "agent", true], // an Assistant run's shadow user
+      ["telegram-gateway", false, "telegram", false],
+    ] as const)("names the source from the principal: %s (shadow user: %s) is %s", async (tokenType, isAgent, source, assignsOwner) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       dbMock.user.findUnique.mockResolvedValue({ id: callerId, isAgent } as any);
       dbMock.externalAgent.findUnique.mockResolvedValue({ id: "agent-1", ownerId: "owner-1" } as never);
+      // The owner is a person, so assigning them starts no Agent run.
+      dbMock.externalAgent.findMany.mockResolvedValue([] as never);
       dbMock.action.create.mockResolvedValue(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         { id: "a1", name: "Personal", workspaceId: null, project: null, assignees: [] } as any,
       );
+      dbMock.action.findUniqueOrThrow.mockResolvedValue({
+        id: "a1",
+        name: "Personal",
+        workspaceId: null,
+        project: null,
+        assignees: [{ userId: "owner-1" }],
+      } as never);
       const caller = createMockCaller({ userId: callerId, db: dbMock, tokenType });
-      await caller.action.create({ name: "Personal" });
+      const created = await caller.action.create({ name: "Personal" });
       expect(dbMock.action.create.mock.calls[0]![0]!.data).toMatchObject({ source });
+
+      if (assignsOwner) {
+        expect(dbMock.actionAssignee.createMany).toHaveBeenCalledWith({
+          data: [{ actionId: "a1", userId: "owner-1" }],
+        });
+        expect(created.assignees).toEqual([{ userId: "owner-1" }]);
+        expect(created.agentRunsQueued).toBe(0);
+      } else {
+        expect(dbMock.actionAssignee.createMany).not.toHaveBeenCalled();
+      }
     });
 
     it("needs no membership probe when no workspaceId is supplied", async () => {
@@ -1810,6 +1887,189 @@ describe("action router (mocked)", () => {
   });
 
   // ────────────────────────────────────────────────────────────────────
+  // Assignees by email, and clearing them (CLI / MCP / agents)
+  //
+  // Callers outside the UI know a colleague's email, not their CUID. An email
+  // must reach no further than an id: it resolves to a user, then the same
+  // containment check runs, and an unregistered address fails exactly like a
+  // registered one that is not assignable here.
+  // ────────────────────────────────────────────────────────────────────
+  describe("assignees by email and clear", () => {
+    const callerId = "caller-1";
+    const workspaceId = "w1";
+    const actionId = "a1";
+    const jamesId = "user-james";
+
+    /** A project-less action in `workspaceId`; `members` are the users with
+     *  a WorkspaceUser row in `workspaceId` (any other workspace is ignored). */
+    function stubAction(members: string[]) {
+      dbMock.action.findUnique.mockResolvedValue({
+        id: actionId, name: "Follow up", projectId: null, project: null,
+        teamId: null, team: null, workspaceId,
+      } as never);
+      dbMock.action.findFirst.mockResolvedValue({ id: actionId } as never);
+      type MembershipArgs = { where?: { userId_workspaceId?: { userId?: string; workspaceId?: string } } };
+      dbMock.workspaceUser.findUnique.mockImplementation(((args: MembershipArgs) => {
+        const key = args?.where?.userId_workspaceId;
+        return Promise.resolve(
+          key?.workspaceId === workspaceId && key.userId && members.includes(key.userId)
+            ? { userId: key.userId, workspaceId, role: "member", joinedAt: new Date() }
+            : null,
+        );
+      }) as unknown as typeof dbMock.workspaceUser.findUnique);
+      dbMock.teamUser.findFirst.mockResolvedValue(null as never);
+      dbMock.team.findFirst.mockResolvedValue(null as never);
+      dbMock.externalAgent.findMany.mockResolvedValue([] as never);
+    }
+
+    it("assigns a workspace member by email, case-insensitively", async () => {
+      stubAction([jamesId]);
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+      dbMock.actionAssignee.findMany.mockResolvedValue([]);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.assign({ actionId, emails: ["James@Example.com"] });
+
+      expect(dbMock.actionAssignee.createMany).toHaveBeenCalledWith({
+        data: [{ actionId, userId: jamesId }],
+        skipDuplicates: true,
+      });
+    });
+
+    it("refuses a registered user who is not a member of the action's workspace", async () => {
+      stubAction([]);
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await expect(
+        caller.action.assign({ actionId, emails: ["james@example.com"] }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(dbMock.actionAssignee.createMany).not.toHaveBeenCalled();
+    });
+
+    it("refuses a member of another workspace (cross-workspace), by id", async () => {
+      stubAction([]);
+      // A member of w2 only: the containment lookup is keyed on w1.
+      const otherWorkspaceUser = "user-in-w2";
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await expect(
+        caller.action.assign({ actionId, userIds: [otherWorkspaceUser] }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(dbMock.workspaceUser.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { userId_workspaceId: { userId: otherWorkspaceUser, workspaceId } },
+        }),
+      );
+      expect(dbMock.actionAssignee.createMany).not.toHaveBeenCalled();
+    });
+
+    it("answers an unregistered email exactly like a non-member, so it is no oracle", async () => {
+      stubAction([]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      dbMock.user.findMany.mockResolvedValue([] as never);
+      const unknown = await caller.action
+        .assign({ actionId, emails: ["nobody@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+      const nonMember = await caller.action
+        .assign({ actionId, emails: ["james@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      expect(unknown).toMatchObject({ code: "NOT_FOUND" });
+      expect(unknown.message).toBe(nonMember.message);
+    });
+
+    it("refuses an assign naming nobody", async () => {
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await expect(caller.action.assign({ actionId })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    });
+
+    it("unassign all removes every current assignee", async () => {
+      stubAction([]);
+      dbMock.actionAssignee.findMany.mockResolvedValue([
+        { userId: "u1", user: { email: "a@example.com" } },
+        { userId: "u2", user: { email: null } },
+      ] as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.unassign({ actionId, all: true });
+
+      expect(dbMock.actionAssignee.deleteMany).toHaveBeenCalledWith({
+        where: { actionId, userId: { in: ["u1", "u2"] } },
+      });
+    });
+
+    it("unassign by email matches current assignees only", async () => {
+      stubAction([]);
+      dbMock.actionAssignee.findMany.mockResolvedValue([
+        { userId: "u1", user: { email: "a@example.com" } },
+        { userId: "u2", user: { email: "b@example.com" } },
+      ] as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.unassign({ actionId, emails: ["B@example.com", "stranger@example.com"] });
+
+      expect(dbMock.user.findMany).not.toHaveBeenCalled();
+      expect(dbMock.actionAssignee.deleteMany).toHaveBeenCalledWith({
+        where: { actionId, userId: { in: ["u2"] } },
+      });
+    });
+
+    it("create with an unregistered assignee email writes nothing", async () => {
+      stubAction([callerId]);
+      dbMock.user.findMany.mockResolvedValue([] as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await expect(
+        caller.action.create({ name: "Follow up", workspaceId, assigneeEmails: ["nobody@example.com"] }),
+      ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(dbMock.action.create).not.toHaveBeenCalled();
+    });
+
+    it("create checks workspace access before any assignee email, so it is no oracle", async () => {
+      // The caller is not in the workspace. A registered and an unregistered
+      // email must both get the same authorisation error.
+      stubAction([]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      dbMock.user.findMany.mockResolvedValue([] as never);
+      const unknown = await caller.action
+        .create({ name: "Probe", workspaceId, assigneeEmails: ["nobody@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+      const known = await caller.action
+        .create({ name: "Probe", workspaceId, assigneeEmails: ["james@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      expect(unknown).toMatchObject({ code: "FORBIDDEN" });
+      expect(known).toMatchObject({ code: unknown.code, message: unknown.message });
+      expect(dbMock.action.create).not.toHaveBeenCalled();
+    });
+
+    it("create resolves assignee emails and attaches them in the create", async () => {
+      stubAction([callerId, jamesId]);
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+      dbMock.action.create.mockResolvedValue(
+        { id: "a2", name: "Follow up", workspaceId, project: null, assignees: [] } as never,
+      );
+      dbMock.action.findUniqueOrThrow.mockResolvedValue(
+        { id: "a2", name: "Follow up", workspaceId, project: null, assignees: [{ userId: jamesId }] } as never,
+      );
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.create({ name: "Follow up", workspaceId, assigneeEmails: ["james@example.com"] });
+
+      expect(dbMock.actionAssignee.createMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: [{ actionId: "a2", userId: jamesId }] }),
+      );
+    });
+  });
+
+  // ────────────────────────────────────────────────────────────────────
   // create / update — workspace write authorisation
   //
   // `workspaceId` is free-form input on both mutations. Before this suite
@@ -2175,8 +2435,15 @@ describe("action router (mocked)", () => {
         dbMock.externalAgent.findUnique.mockResolvedValue({ id: "agent-1", ownerId: "owner-1" } as never);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         dbMock.action.create.mockResolvedValue({ id: "a1", name: "x", project: null } as any);
+        // An agent principal's project-less Action is assigned to its owner,
+        // so the create re-reads the row with its assignee.
+        dbMock.action.findUniqueOrThrow.mockResolvedValue({ id: "a1", name: "x", project: null } as never);
       }
       const stored = () => dbMock.action.create.mock.calls[0]![0]!.data.source;
+      const assignedOwner = () =>
+        dbMock.actionAssignee.createMany.mock.calls.some(
+          ([args]) => JSON.stringify(args?.data) === JSON.stringify([{ actionId: "a1", userId: "owner-1" }]),
+        );
 
       it.each(["ui", "cli", "ios", "ios-shortcut", "meeting"])(
         "an agent key that sends source %s is recorded as the agent",
@@ -2185,6 +2452,7 @@ describe("action router (mocked)", () => {
           const caller = createMockCaller({ userId: callerId, db: dbMock, tokenType: "agent-key" });
           await caller.action.quickCreate({ name: "x", source });
           expect(stored()).toBe("agent");
+          expect(assignedOwner()).toBe(true);
         },
       );
 
@@ -2193,6 +2461,7 @@ describe("action router (mocked)", () => {
         const caller = createMockCaller({ userId: callerId, db: dbMock, tokenType: "agent-context", agentRunId: "run-1" });
         await caller.action.quickCreate({ name: "x", source: "ui" });
         expect(stored()).toBe("agent");
+        expect(assignedOwner()).toBe(true);
       });
 
       it.each([
@@ -2204,6 +2473,8 @@ describe("action router (mocked)", () => {
         const caller = createMockCaller({ userId: callerId, db: dbMock, tokenType });
         await caller.action.quickCreate({ name: "x", source: "ui" });
         expect(stored()).toBe(source);
+        // The row is written as the person, so there is no owner to add.
+        expect(assignedOwner()).toBe(false);
       });
 
       it.each(["agent", "whatsapp", "voice"])("a person cannot claim an agent's source (%s)", async (source) => {
@@ -2821,21 +3092,36 @@ describe("action router (mocked)", () => {
       });
     });
 
+    // The last column: only an agent principal's Action goes to its owner.
     it.each([
-      ["agent-context", false, "agent"], // Zoe in chat, for the person
-      ["agent-context", true, "agent"], // an Assistant run's shadow user
-      ["agent-key", false, "agent"],
-      ["api-token", false, "cli"], // a person's own token is the person, not an agent
-    ] as const)("mastra.quickCreateAction names the source from the principal: %s (shadow user: %s) is %s", async (tokenType, isAgent, source) => {
+      ["agent-context", false, "agent", false], // Zoe in chat, for the person
+      ["agent-context", true, "agent", true], // an Assistant run's shadow user
+      ["agent-key", false, "agent", true],
+      ["api-token", false, "cli", false], // a person's own token is the person, not an agent
+    ] as const)("mastra.quickCreateAction names the source from the principal: %s (shadow user: %s) is %s", async (tokenType, isAgent, source, assignsOwner) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       dbMock.user.findUnique.mockResolvedValue({ id: callerId, isAgent } as any);
       dbMock.externalAgent.findUnique.mockResolvedValue({ id: "agent-1", ownerId: "owner-1" } as never);
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       dbMock.action.create.mockResolvedValue({ id: "a1", name: "Buy milk", priority: "Quick", dueDate: null, scheduledStart: null, project: null } as any);
+      dbMock.action.findUniqueOrThrow.mockResolvedValue({
+        id: "a1",
+        name: "Buy milk",
+        priority: "Quick",
+        dueDate: null,
+        scheduledStart: null,
+        project: null,
+      } as never);
 
       await createGatewayCaller(tokenType).mastra.quickCreateAction({ text: "Buy milk" });
 
       expect(dbMock.action.create.mock.calls[0]![0]!.data).toMatchObject({ source });
+      expect(dbMock.actionAssignee.createMany).toHaveBeenCalledTimes(assignsOwner ? 1 : 0);
+      if (assignsOwner) {
+        expect(dbMock.actionAssignee.createMany).toHaveBeenCalledWith({
+          data: [{ actionId: "a1", userId: "owner-1" }],
+        });
+      }
     });
 
     it("mastra.quickCreateAction rejects an unmapped gateway token type with BAD_REQUEST and no row", async () => {
@@ -3068,6 +3354,143 @@ describe("action router (mocked)", () => {
       );
     });
   });
+
+  // ────────────────────────────────────────────────────────────────────
+  // Paused projects leave Today's actions (getTodaysActions / getOverdueTriage)
+  // ────────────────────────────────────────────────────────────────────
+  // The mocked findMany evaluates the router's real `where` against in-memory
+  // rows, so these assert what the caller (Zoe, the MCP tools, the CLI) gets
+  // back. The motivating case: a goal whose projects were set On hold kept
+  // every dated action in the overdue pile.
+  describe("paused projects on the plate", () => {
+    const callerId = "caller-1";
+    const now = new Date();
+    const daysAgo = (n: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() - n, 9);
+    const todayAtNine = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9);
+
+    type PlateRow = Record<string, unknown> & { id: string };
+    let rows: PlateRow[];
+
+    function plateRow(
+      id: string,
+      projectStatus: string | null,
+      dates: { scheduledStart?: Date | null; dueDate?: Date | null },
+    ): PlateRow {
+      return {
+        id,
+        name: id,
+        status: "ACTIVE",
+        priority: "Quick",
+        createdById: callerId,
+        assignees: [],
+        workspaceId: projectStatus ? null : "ws-1",
+        workspace: projectStatus ? null : { name: "Personal" },
+        projectId: projectStatus ? `p-${id}` : null,
+        project: projectStatus
+          ? { name: `Project ${id}`, status: projectStatus, workspaceId: "ws-1", workspace: { name: "Personal" } }
+          : null,
+        scheduledStart: dates.scheduledStart ?? null,
+        dueDate: dates.dueDate ?? null,
+        completedAt: null,
+      };
+    }
+
+    beforeEach(() => {
+      rows = [
+        plateRow("loose-overdue", null, { scheduledStart: daysAgo(3) }),
+        plateRow("active-overdue", "ACTIVE", { dueDate: daysAgo(3) }),
+        plateRow("active-today", "ACTIVE", { scheduledStart: todayAtNine }),
+        plateRow("loose-inbox", null, {}),
+        // One bulk-dated cohort per paused status, like a generated plan.
+        ...["ON_HOLD", "COMPLETED", "CANCELLED"].flatMap((status) => [
+          plateRow(`${status}-overdue-1`, status, { scheduledStart: daysAgo(10) }),
+          plateRow(`${status}-overdue-2`, status, { scheduledStart: daysAgo(10) }),
+          plateRow(`${status}-overdue-3`, status, { scheduledStart: daysAgo(10) }),
+          plateRow(`${status}-today`, status, { scheduledStart: todayAtNine }),
+        ]),
+      ];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const matching = (args: any) => rows.filter((r) => matchesWhere(r, args?.where ?? {}));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      dbMock.action.findMany.mockImplementation(((args: any) => Promise.resolve(matching(args))) as any);
+    });
+
+    const caller = () => createMockCaller({ userId: callerId, db: dbMock });
+    const ids = (group: { actions: Array<{ id: string }> }) => group.actions.map((a) => a.id).sort();
+
+    it("getTodaysActions leaves a paused project's actions out of overdue and today", async () => {
+      const result = await caller().action.getTodaysActions();
+
+      expect(ids(result.overdue)).toEqual(["active-overdue", "loose-overdue"]);
+      expect(result.overdue.count).toBe(2);
+      expect(ids(result.today)).toEqual(["active-today"]);
+      expect(ids(result.inbox)).toEqual(["loose-inbox"]);
+    });
+
+    it("getTodaysActions keeps project-less actions when scoped to a workspace", async () => {
+      const result = await caller().action.getTodaysActions({ workspaceId: "ws-1" });
+
+      expect(ids(result.overdue)).toEqual(["active-overdue", "loose-overdue"]);
+      expect(ids(result.inbox)).toEqual(["loose-inbox"]);
+    });
+
+    it("getOverdueTriage describes the same pile: no cohort from a paused project", async () => {
+      const result = await caller().action.getOverdueTriage();
+
+      expect(result.totalOverdue).toBe(2);
+      expect(result.cohortCount).toBe(0);
+      expect(result.cohorts).toEqual([]);
+      expect(result.loose.map((a) => a.id).sort()).toEqual(["active-overdue", "loose-overdue"]);
+    });
+
+    describe("getByDateRange (home Tomorrow / This week / This month, CLI `actions range`)", () => {
+      const inDays = (n: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + n, 9);
+      const thisWeek = { startDate: inDays(1), endDate: inDays(8) };
+
+      beforeEach(() => {
+        rows.push(
+          plateRow("loose-due-soon", null, { dueDate: inDays(3) }),
+          plateRow("active-due-soon", "ACTIVE", { dueDate: inDays(3) }),
+          ...["ON_HOLD", "COMPLETED", "CANCELLED"].map((status) =>
+            plateRow(`${status}-due-soon`, status, { dueDate: inDays(3) }),
+          ),
+        );
+      });
+
+      it("leaves a paused project's actions out of the range", async () => {
+        const result = await caller().action.getByDateRange(thisWeek);
+
+        expect(result.map((a) => a.id).sort()).toEqual(["active-due-soon", "loose-due-soon"]);
+      });
+
+      it("scoped to a workspace, still drops paused projects", async () => {
+        const result = await caller().action.getByDateRange({ ...thisWeek, workspaceId: "ws-1" });
+
+        // Workspace scoping goes through the project, so project-less actions drop out too.
+        expect(result.map((a) => a.id)).toEqual(["active-due-soon"]);
+      });
+    });
+
+    it("a project set back to Active puts its actions back on the plate", async () => {
+      rows = rows.map((r) =>
+        r.id.startsWith("ON_HOLD")
+          ? { ...r, project: { ...(r.project as Record<string, unknown>), status: "ACTIVE" } }
+          : r,
+      );
+
+      const triage = await caller().action.getOverdueTriage();
+
+      expect(triage.totalOverdue).toBe(5);
+      // cohortCount counts the actions inside cohorts: one cohort of three.
+      expect(triage.cohorts).toHaveLength(1);
+      expect(triage.cohortCount).toBe(3);
+      expect(triage.cohorts[0]?.actionIds.slice().sort()).toEqual([
+        "ON_HOLD-overdue-1",
+        "ON_HOLD-overdue-2",
+        "ON_HOLD-overdue-3",
+      ]);
+    });
+  });
   // ────────────────────────────────────────────────────────────────────
   // Bulk writes are scoped by edit rights, not read rights
   // ────────────────────────────────────────────────────────────────────
@@ -3086,6 +3509,8 @@ describe("action router (mocked)", () => {
       return {
         id,
         createdById: ownerId,
+        // A person created it, so there is no agent row behind the creator.
+        createdBy: { externalAgentShadow: null },
         assignees: [],
         dueDate: day,
         scheduledStart: day,

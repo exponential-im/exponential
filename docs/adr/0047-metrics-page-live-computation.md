@@ -40,11 +40,11 @@ pushed commit toward the member whose GitHub login authored it; confirmed time t
 it — PRs/commits/time only inside the cycle window(s). Filtering keeps the same cycles on the trend
 chart (zeros where the members had nothing) so the x-axis doesn't shift. Still live, still batched
 (`getContributions` is a fixed handful of queries regardless of member count), still nothing
-persisted. **Known gap:** member ↔ GitHub login reuses the `github_metadata.githubUsername` lookup
-the standup drafts already use (`resolveGithubLogins`), which in practice links only the member who
-connected GitHub. `CONTEXT.md` says the real mapping is the OAuth-verified **GitHub identity claim**
-(`User.githubLogin`), still unbuilt; once it exists, `resolveGithubLogins` should read it instead —
-members without a link show "—", never a guessed number.
+persisted. Member ↔ GitHub login (`resolveGithubLogins`) trusts, in order: the member's **GitHub
+identity claim** (`User.githubLogin`, linked via OAuth on `/settings/profile` — see `CONTEXT.md`),
+the `github_metadata.githubUsername` of the member's own GitHub integration, then a username a
+workspace admin set. A verified login belongs to its owner, so a weaker link naming someone else's
+claimed or connected login is ignored. Members with none show "—", never a guessed number.
 
 ## Context
 

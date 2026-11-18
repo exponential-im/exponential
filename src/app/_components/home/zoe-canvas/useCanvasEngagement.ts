@@ -71,10 +71,7 @@ export function useCanvasEngagement({
   const engagementIdRef = useRef<string | null>(null);
 
   const startConversation = api.aiInteraction.startConversation.useMutation();
-  const { data: customAssistant } = api.assistant.getDefault.useQuery(
-    { workspaceId: workspaceId ?? '' },
-    { enabled: enabled && !!workspaceId },
-  );
+  const { data: customAssistant } = api.assistant.getMine.useQuery(undefined, { enabled });
   const { data: mastraAgents } = api.mastra.getMastraAgents.useQuery(undefined, {
     enabled,
     staleTime: 10 * 60 * 1000,
@@ -134,7 +131,7 @@ export function useCanvasEngagement({
       } else {
         // Retry reuses the trailing (failed/incomplete) bubble — reset its text
         // and clear the failure/tool markers so the re-stream renders cleanly.
-        patchTrailingAi({ agentName, content: '', failure: undefined, toolCalls: undefined });
+        patchTrailingAi({ agentName, content: '', failure: undefined, toolCalls: undefined, answerOffset: undefined });
       }
 
       if (isNewEngagement) {
@@ -212,6 +209,7 @@ export function useCanvasEngagement({
               streamedChars = update.rawLength;
               patchTrailingAi({
                 content: update.displayText,
+                answerOffset: update.answerOffset,
                 ...(update.toolCalls.length > 0 ? { toolCalls: update.toolCalls } : {}),
               });
             },

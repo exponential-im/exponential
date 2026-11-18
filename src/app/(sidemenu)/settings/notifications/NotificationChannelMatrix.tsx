@@ -24,6 +24,8 @@ const CATEGORY_ORDER = [
   'update_review',
   'page_shared',
   'agent_run',
+  'position_assigned',
+  'billing',
 ] as const;
 type Category = (typeof CATEGORY_ORDER)[number];
 
@@ -41,6 +43,8 @@ const CATEGORY_LABELS: Record<Category, string> = {
   update_review: 'Workspace update to review',
   page_shared: 'Page shared with you',
   agent_run: 'Assistant runs',
+  position_assigned: 'Your Assistant given a Position',
+  billing: 'Billing and Assistant usage',
 };
 
 const CHANNEL_LABELS: Record<Channel, string> = {

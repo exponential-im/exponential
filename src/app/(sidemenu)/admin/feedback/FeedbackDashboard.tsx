@@ -1,6 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import {
+  Anchor,
   Card,
   SimpleGrid,
   Text,
@@ -204,9 +206,20 @@ export function FeedbackDashboard() {
                         {feedback.aiInteraction?.agentName ?? "Unknown Agent"}
                       </Text>
                     </Group>
-                    <Text size="xs" className="text-text-muted">
-                      {new Date(feedback.createdAt).toLocaleDateString()}
-                    </Text>
+                    <Group gap="sm">
+                      <Text size="xs" className="text-text-muted">
+                        {new Date(feedback.createdAt).toLocaleDateString()}
+                      </Text>
+                      {feedback.aiInteraction && (
+                        <Anchor
+                          component={Link}
+                          href={`/admin/feedback/trace/${feedback.aiInteraction.id}`}
+                          size="xs"
+                        >
+                          Open trace
+                        </Anchor>
+                      )}
+                    </Group>
                   </Group>
                   {feedback.content && (
                     <Text size="sm" className="text-text-secondary" lineClamp={2}>

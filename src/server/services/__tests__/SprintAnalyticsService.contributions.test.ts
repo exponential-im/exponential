@@ -78,9 +78,12 @@ function makeService(opts: {
   members?: string[];
   /** Usernames a workspace admin set (`IntegrationUserMapping`). */
   workspaceLogins?: { userId: string; login: string }[];
+  /** GitHub identity claims (`User.githubLogin`), from the profile link flow. */
+  claims?: { userId: string; login: string }[];
 }) {
   const activity = opts.activity ?? [];
   const workspaceLogins = opts.workspaceLogins ?? [];
+  const claims = opts.claims ?? [];
   const prisma = {
     list: {
       findMany: vi
@@ -101,8 +104,13 @@ function makeService(opts: {
     user: {
       findMany: vi
         .fn()
-        .mockImplementation((args: { where: { id: { in: string[] } } }) =>
-          Promise.resolve(USERS.filter((u) => args.where.id.in.includes(u.id))),
+        .mockImplementation((args: { where: { id?: { in: string[] } } }) =>
+          Promise.resolve(
+            args.where.id
+              ? USERS.filter((u) => args.where.id!.in.includes(u.id))
+              : // The claims lookup (`resolveGithubIdentities`).
+                claims.map((c) => ({ id: c.userId, githubLogin: c.login })),
+          ),
         ),
     },
     integration: {
@@ -315,6 +323,33 @@ describe("SprintAnalyticsService.getContributions", () => {
       githubLoginSource: "account",
     });
     expect(byId.get("bob")).toMatchObject({ githubLoginSource: "account" });
+  });
+
+  it("credits a linked GitHub identity ahead of a connected account", async () => {
+    const service = makeService({
+      tickets: TICKETS,
+      claims: [
+        { userId: "alice", login: "alice-linked" },
+        // Carol linked the login Bob's integration names, so it's hers.
+        { userId: "carol", login: "bobby" },
+      ],
+      activity: [
+        merged(1, "alice-linked", "2026-01-05"),
+        merged(2, "Alice-GH", "2026-01-06"),
+        merged(3, "bobby", "2026-01-07"),
+      ],
+    });
+
+    const { rows } = await service.getContributions("ws-1");
+    const byId = new Map(rows.map((r) => [r.userId, r]));
+
+    expect(byId.get("alice")).toMatchObject({
+      mergedPrs: 1,
+      githubLogin: "alice-linked",
+      githubLoginSource: "claim",
+    });
+    expect(byId.get("carol")).toMatchObject({ mergedPrs: 1, githubLoginSource: "claim" });
+    expect(byId.get("bob")).toMatchObject({ mergedPrs: 0, githubLinked: false });
   });
 
   it("dedups commits by full SHA, so a shared 7-char prefix still counts twice", async () => {

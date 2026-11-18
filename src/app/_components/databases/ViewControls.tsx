@@ -128,13 +128,15 @@ function ControlButton({
       className={styles.controlButton}
       data-active={active ? "true" : "false"}
       aria-label={label}
+      title={label}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
       }}
     >
       {icon}
-      {label}
+      {/* Bare icon until it does something; then it says what. */}
+      {active ? label : null}
     </UnstyledButton>
   );
 }
@@ -268,7 +270,7 @@ export function ViewControls({ properties, view, onChangeView, onSearchRelation 
             <ControlButton
               active={!!view.sort}
               label={view.sort ? `Sort: ${byId.get(view.sort.propertyId)?.name ?? "?"}` : "Sort"}
-              icon={<IconArrowsSort size={13} />}
+              icon={<IconArrowsSort size={16} stroke={1.5} />}
               onClick={() => setOpen(open === "sort" ? null : "sort")}
             />
           </div>
@@ -319,7 +321,7 @@ export function ViewControls({ properties, view, onChangeView, onSearchRelation 
             <ControlButton
               active={draftFilters.length > 0}
               label={draftFilters.length ? `Filter (${draftFilters.length})` : "Filter"}
-              icon={<IconFilter size={13} />}
+              icon={<IconFilter size={16} stroke={1.5} />}
               onClick={() => setOpen(open === "filter" ? null : "filter")}
             />
           </div>
@@ -408,7 +410,7 @@ export function ViewControls({ properties, view, onChangeView, onSearchRelation 
             <ControlButton
               active={view.hiddenPropertyIds.length > 0}
               label={view.hiddenPropertyIds.length ? `Hidden (${view.hiddenPropertyIds.length})` : "Hide"}
-              icon={<IconEyeOff size={13} />}
+              icon={<IconEyeOff size={16} stroke={1.5} />}
               onClick={() => setOpen(open === "hide" ? null : "hide")}
             />
           </div>

@@ -29,6 +29,7 @@ export const PUBLIC_EXACT = new Set([
   '/setup', // self-host first-run claim (ADR-0081); 404s once the install has an admin
   '/privacy',
   '/terms',
+  '/pricing', // marketing pricing page
   '/roadmap', // public product roadmap (embeds Loom)
   // File conventions served through the middleware matcher.
   '/llms.txt',
@@ -49,16 +50,23 @@ export const PUBLIC_EXACT = new Set([
 export const PUBLIC_PREFIXES = [
   '/p/', // published Knowledge Pages (ADR-0038)
   '/updates/', // a workspace's approved, opted-in Workspace updates (ADR-0064)
+  '/briefs/', // a product's signed-off Cycle briefs (ADR-0085)
   '/f/', // public forms intake (ADR-0029)
   '/auth/verify-request', // sign-in code redemption happens logged-out
   '/invite/', // token pages render their own signed-out state
   '/team-invite/',
   // Marketing pages from the (home) route group.
   '/blog',
-  '/explore',
   '/learn',
   '/product-timeline',
   '/features/', // marketing feature pages — bare /features is the app's
+  /**
+   * RFC 8615 well-known URIs: the OAuth discovery documents MCP clients read
+   * before they have a session (hosted MCP Agent PRD, D9). The matcher does
+   * not skip them the way it skips /api. `/oauth/authorize` is deliberately
+   * NOT public: a signed-out visitor must go through sign-in first.
+   */
+  '/.well-known/',
   /**
    * Product documentation. Bare, because `/docs` is itself a public index
    * (it is the URL listed in sitemap.ts). The docs route lives in the

@@ -13,6 +13,15 @@ import { after } from "next/server";
 import type OpenAI from "openai";
 import { getOpenAIClient } from "~/server/services/ai/clients";
 import { isAiConfigured, requireAi, requireMastraUrl } from "~/server/services/ai/requireAi";
+import { priceTokenBreakdown, turnTokenBreakdown } from "~/server/services/ai/cost";
+import { readGenerateUsage } from "~/server/services/billing/mastraUsage";
+import { recordTurnUsage, resolveMeteredWorkspaceId } from "~/server/services/billing/usage";
+import { isMeteringOn, resolveBillingMode } from "~/server/services/billing/config";
+import { getWorkingModelKey, markModelKeyFailing } from "~/server/services/billing/modelKey";
+import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
+import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
+import { isMastraServerRequest } from "~/server/utils/mastraServerAuth";
+import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { TRPCError } from "@trpc/server";
 // import { mastraClient } from "~/lib/mastra";
 import { PRIORITY_VALUES } from "~/types/priority";
@@ -26,6 +35,9 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { testFirefliesConnection } from "./integration";
 import { pageRouter } from "./page";
+import { ticketRouter } from "~/plugins/product/server/routers/ticket";
+import { okrPeriodSchema, periodChangeData } from "~/plugins/okr/server/keyResultPeriod";
+import { applyTicketLabels } from "~/server/services/tags/ticketLabels";
 import { GoogleCalendarService } from "~/server/services/GoogleCalendarService";
 import { decryptBufferSafe, encryptString, encryptToBase64 } from "~/server/utils/encryption";
 import { encryptCredential, getDecryptedKey } from "~/server/utils/credentialHelper";
@@ -35,13 +47,24 @@ import { userEmailService } from "~/server/services/UserEmailService";
 import { slugify } from "~/utils/slugify";
 import { sanitizeAIOutput } from "~/lib/sanitize-output";
 import { getProjectAccess, hasProjectAccess, canEditProject } from "~/server/services/access/resolvers/projectResolver";
-import { getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
+import {
+  assertWorkspaceWriteRole,
+  getWorkspaceMembership,
+  resolveWritableWorkspace,
+} from "~/server/services/access/resolvers/workspaceResolver";
+import {
+  assertCanEditGoal,
+  assertCanEditKeyResult,
+} from "~/server/services/access/resolvers/goalResolver";
 import { buildMeetingTranscriptionsWhere } from "~/server/services/meetings/meetingTranscriptionsWhere";
+import { buildTranscriptionAccessWhere } from "~/server/services/access";
+import type { Prisma } from "@prisma/client";
 import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { filterAgentInstructions } from "~/server/services/agent-routing/agentInstructionFilter";
 import { loadProductWithAccess, assertWorkspaceAccess } from "~/plugins/product/server/routers/product";
 import { createTicketWithNumber } from "~/plugins/product/server/services/createTicket";
+import { notifyTicketAssigned } from "~/plugins/product/server/services/notifyTicketAssigned";
 import { matchCycle, wouldCreateCycle } from "~/plugins/product/server/services/ticketDependencies";
 import { COMPLETED_TICKET_STATUSES } from "~/lib/ticket-statuses";
 import { generateFunId } from "~/lib/fun-ids";
@@ -54,6 +77,9 @@ import {
   resolveOrCreateWorkspaceTags,
   attachTicketTags,
 } from "~/server/services/notionTicketImport";
+
+// Label references an agent passes for a ticket: tag ids, slugs or names.
+const ticketLabelRefsSchema = z.array(z.string().min(1).max(100)).max(20);
 
 // Parse an ISO date string supplied by an agent tool into a Date. Empty/nullish
 // values clear the field (return null); a malformed string throws BAD_REQUEST
@@ -114,26 +140,6 @@ function hashApiKey(key: string): string {
 const API_KEY_ENC_PREFIX = 'enc:';
 function encryptApiKey(key: string): string {
   return API_KEY_ENC_PREFIX + encryptToBase64(key);
-}
-
-// Approximate costs in USD per 1M tokens (prices as of April 2026)
-const MODEL_COSTS: Record<string, { input: number; output: number }> = {
-  'gpt-4o': { input: 2.50, output: 10.00 },
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'gpt-4-turbo': { input: 10.00, output: 30.00 },
-  'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
-};
-
-function estimateCost(
-  modelId: string | undefined,
-  usage: { promptTokens?: number; completionTokens?: number }
-): number | undefined {
-  if (!modelId) return undefined;
-  const rates = Object.entries(MODEL_COSTS).find(([k]) => modelId.toLowerCase().includes(k))?.[1];
-  if (!rates || !usage.promptTokens) return undefined;
-  const inputCost = ((usage.promptTokens ?? 0) / 1_000_000) * rates.input;
-  const outputCost = ((usage.completionTokens ?? 0) / 1_000_000) * rates.output;
-  return Math.round((inputCost + outputCost) * 100_000) / 100_000;
 }
 
 type AgentEmbedding = { id: string; vector: number[] };
@@ -621,20 +627,21 @@ export const mastraRouter = createTRPCRouter({
           console.warn('🔒 [mastra/callAgent] Redacted potential secret leak from AI response');
         }
 
-        // Extract token usage from Mastra response (fire-and-forget — don't block return)
-        const rawUsage = (responseData.usage ?? responseData.tokenUsage) as
-          | { promptTokens?: number; completionTokens?: number; totalTokens?: number; prompt_tokens?: number; completion_tokens?: number; total_tokens?: number }
-          | undefined
-          | null;
-        const tokenUsage = rawUsage
+        // What the turn used, priced the same way as chat (services/ai/cost.ts).
+        const used = readGenerateUsage(responseData);
+        const tokens = turnTokenBreakdown(used.turnUsage, used.stepUsages);
+        const promptTokens = tokens
+          ? tokens.noCacheInputTokens + tokens.cacheReadInputTokens + tokens.cacheWriteInputTokens
+          : undefined;
+        const tokenUsage = tokens && promptTokens !== undefined
           ? {
-              prompt: rawUsage.promptTokens ?? rawUsage.prompt_tokens,
-              completion: rawUsage.completionTokens ?? rawUsage.completion_tokens,
-              total: rawUsage.totalTokens ?? rawUsage.total_tokens,
-              cost: estimateCost(responseData.model as string | undefined, {
-                promptTokens: rawUsage.promptTokens ?? rawUsage.prompt_tokens,
-                completionTokens: rawUsage.completionTokens ?? rawUsage.completion_tokens,
-              }),
+              prompt: promptTokens,
+              completion: tokens.outputTokens,
+              total: promptTokens + tokens.outputTokens,
+              cost: priceTokenBreakdown(used.modelId, tokens),
+              cacheReadInput: tokens.cacheReadInputTokens,
+              cacheCreationInput: tokens.cacheWriteInputTokens,
+              modelId: used.modelId,
             }
           : undefined;
 
@@ -665,22 +672,40 @@ export const mastraRouter = createTRPCRouter({
           }),
         );
 
-        void getAiInteractionLogger(ctx.db).logInteraction({
-          platform: 'direct',
-          systemUserId: ctx.session.user.id,
-          userName: ctx.session.user.name ?? undefined,
-          userMessage: lastUserMessage,
-          aiResponse: safeResponse,
-          agentId,
-          agentName: agentId,
-          model: (responseData.model as string | undefined) ?? 'mastra-agent',
-          conversationId: input.threadId ?? undefined,
-          projectId: input.resourceId ?? undefined,
-          workspaceId: input.workspaceId ?? undefined,
-          responseTime: Date.now() - startTime,
-          tokenUsage,
-          toolsUsed,
-          toolCalls: loggedToolCalls.length > 0 ? loggedToolCalls : undefined,
+        // Logged and metered once the reply has gone back: neither blocks the return.
+        const logged = getAiInteractionLogger(ctx.db)
+          .logInteraction({
+            platform: 'direct',
+            systemUserId: ctx.session.user.id,
+            userName: ctx.session.user.name ?? undefined,
+            userMessage: lastUserMessage,
+            aiResponse: safeResponse,
+            agentId,
+            agentName: agentId,
+            model: used.modelId ?? 'mastra-agent',
+            conversationId: input.threadId ?? undefined,
+            projectId: input.resourceId ?? undefined,
+            workspaceId: input.workspaceId ?? undefined,
+            responseTime: Date.now() - startTime,
+            tokenUsage,
+            toolsUsed,
+            toolCalls: loggedToolCalls.length > 0 ? loggedToolCalls : undefined,
+          })
+          .catch((err: unknown) => {
+            console.error('[mastra/callAgent] Failed to save AI history:', err);
+            return undefined;
+          });
+        // Metered to the workspace the caller is a member of (checked above),
+        // or to their Personal workspace when the call names none.
+        const userId = ctx.session.user.id;
+        runAfterResponse(async () => {
+          const refId = await logged;
+          const meteredWorkspaceId = await resolveMeteredWorkspaceId(ctx.db, {
+            workspaceId: workspaceContext.workspaceId,
+            userId,
+          });
+          if (!meteredWorkspaceId) return;
+          await recordTurnUsage(ctx.db, { workspaceId: meteredWorkspaceId, source: 'DIRECT', ...used, refId });
         });
 
         return {
@@ -695,6 +720,78 @@ export const mastraRouter = createTRPCRouter({
         const { text: safeText } = sanitizeAIOutput(text);
         return { response: safeText, agentName: agentId };
       }
+    }),
+
+  /**
+   * The workspace's own Anthropic API key, for the Mastra server and nobody
+   * else (bring-your-own-key). Mastra asks once per workspace and caches the
+   * answer briefly; the key never travels in a request context.
+   *
+   * Two checks, both required:
+   *  - the caller is the Mastra server: it presents `MASTRA_SERVER_API_KEY`
+   *    on the `x-mastra-server-key` header. The agent JWT alone is not enough,
+   *    since that token is also handed to the agent's tools.
+   *  - the user the JWT is for belongs to the workspace, so a workspace id
+   *    forwarded from an unsigned request context cannot fetch another
+   *    workspace's key.
+   *
+   * Answers `{ key: null }` when the workspace has no working key, when the
+   * user is not a member, and on an install that does not meter: Mastra then
+   * uses the hosted key, and the answer does not reveal which case it was.
+   * A mutation so that it is POST-only and never cached.
+   */
+  getModelKey: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (!isMastraServerRequest(ctx.headers)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the Mastra server may read a model key" });
+      }
+      if (!isMeteringOn(resolveBillingMode(process.env))) return { key: null };
+
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!membership) return { key: null };
+
+      return { key: await getWorkingModelKey(ctx.db, input.workspaceId) };
+    }),
+
+  /**
+   * Mastra's report that Anthropic refused the workspace's own key on a turn
+   * (a 401, a 403 or a billing error). The key is marked as failing, so later
+   * turns run on the hosted key and count against the allowance again, and
+   * the workspace's owners and admins are told once, with a link to replace
+   * it. Further reports for a key already marked do nothing.
+   *
+   * Same two checks as `getModelKey`: the Mastra server's key, and a turn
+   * user who belongs to the workspace. Nothing is revealed to anyone else.
+   */
+  reportModelKeyFailure: protectedProcedure
+    .input(z.object({ workspaceId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      if (!isMastraServerRequest(ctx.headers)) {
+        throw new TRPCError({ code: "FORBIDDEN", message: "Only the Mastra server may report on a model key" });
+      }
+      if (!isMeteringOn(resolveBillingMode(process.env))) return { marked: false };
+
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!membership) return { marked: false };
+
+      const failing = await markModelKeyFailing(ctx.db, input.workspaceId);
+      if (!failing) return { marked: false };
+
+      // Nobody "did" this, so there is no actor to leave out: an owner whose
+      // own chat turn hit the dead key is exactly who needs to hear.
+      await emitNotification({
+        db: ctx.db,
+        actorUserId: null,
+        category: NOTIFICATION_CATEGORIES.BILLING,
+        subject: {
+          workspaceId: input.workspaceId,
+          event: "model_key_failing",
+          keyLast4: failing.last4,
+          occurredAt: failing.checkedAt,
+        },
+      });
+      return { marked: true };
     }),
 
   // API Key Generation for Mastra Agents and Webhooks (32 characters)
@@ -1570,6 +1667,10 @@ export const mastraRouter = createTRPCRouter({
       meetingType: z.string().optional(),
       limit: z.number().optional().default(5),
       includeTranscript: z.boolean().optional().default(true),
+      // One specific Meeting, e.g. the one open on /recording/<id>. Without
+      // it the agent can only take the latest few and hope the right one is
+      // among them.
+      transcriptionId: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1620,6 +1721,15 @@ export const mastraRouter = createTRPCRouter({
           summary: true,
         },
       });
+
+      // A Meeting asked for by id that isn't there is an answer the agent
+      // must hear ("not found"), not an empty list it reads as "no meetings".
+      if (input.transcriptionId && transcriptions.length === 0) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Meeting not found or access denied',
+        });
+      }
 
       // Filter by participants if specified
       if (input.participants && input.participants.length > 0) {
@@ -1672,6 +1782,8 @@ export const mastraRouter = createTRPCRouter({
       }).optional(),
       topK: z.number().optional().default(5),
       sourceTypes: z.array(z.enum(['transcription', 'resource', 'document', 'page'])).optional(),
+      // Search inside one Meeting (the one open on /recording/<id>).
+      transcriptionId: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1696,76 +1808,35 @@ export const mastraRouter = createTRPCRouter({
         });
       }
 
-      try {
-        // Use KnowledgeService for vector search.
-        // We pass userId for further-narrowing — this matches the previous
-        // behaviour for this user-facing knowledge-base search where users only
-        // expect to see their own indexed content. The cross-user agent path
-        // (knowledgeChunkRouter.semanticSearch) deliberately omits userId.
-        const knowledgeService = getKnowledgeService(ctx.db);
-
-        const searchResults = await knowledgeService.search(input.query, {
-          workspaceId: input.workspaceId,
-          userId,
-          // Own chunks are own pages/meetings/resources today; keep access
-          // explicit anyway.
-          pageViewerId: userId,
-          transcriptionViewerId: userId,
-          resourceViewerId: userId,
-          projectId: input.projectId,
-          sourceTypes: input.sourceTypes,
-          limit: input.topK,
-        });
-
-        // Transform results to expected format
-        const results = searchResults.map(result => ({
-          content: result.content,
-          sourceType: result.sourceType,
-          sourceId: result.sourceId,
-          sourceTitle: result.sourceTitle ?? "",
-          meetingTitle: result.sourceType === 'transcription' ? result.sourceTitle ?? "" : undefined,
-          meetingDate: result.sourceMeta?.meetingDate?.toISOString(),
-          url: result.sourceMeta?.url,
-          contentType: result.sourceMeta?.contentType,
-          relevanceScore: result.similarity,
-          contextType: determineContextType(result.content),
-          chunkIndex: result.chunkIndex,
-        }));
-
-        // SECURITY: Also return provenance-wrapped format for safe AI context injection
-        const { KnowledgeService } = await import("~/server/services/KnowledgeService");
-        const aiContext = KnowledgeService.formatForAIContext(searchResults);
-
-        return { results, aiContext };
-      } catch (error) {
-        console.error('Error in queryMeetingContext:', error);
-
-        // Fallback to keyword search if vector search fails (e.g., no embeddings yet)
-        console.log('[queryMeetingContext] Falling back to keyword search');
-
-        const whereClause: Record<string, unknown> = {
-          userId: userId,
+      // Keyword search over transcript text. Used when vector search throws
+      // (no embeddings provider, a failed query) and when a search inside one
+      // Meeting finds no chunks: that Meeting may simply not be embedded, or
+      // have no workspace, and "no excerpts" would read as "never said".
+      const keywordSearch = async () => {
+        // Meetings the caller can VIEW, the same rule as the vector path and
+        // getMeetingTranscriptions. Scoping this to `userId` (the owner) hid
+        // every Meeting imported by an agent or a teammate, which is exactly
+        // the Meeting someone has open when they ask about it.
+        //
+        // Workspace: this workspace, plus sessions with none (Personal, or not
+        // yet backfilled), whose chunks the workspace-scoped vector search
+        // cannot return at all.
+        const whereClause: Prisma.TranscriptionSessionWhereInput = {
+          AND: [
+            buildTranscriptionAccessWhere(userId),
+            { OR: [{ workspaceId: input.workspaceId }, { workspaceId: null }] },
+            ...(input.transcriptionId ? [{ id: input.transcriptionId }] : []),
+            ...(input.projectId ? [{ projectId: input.projectId }] : []),
+            ...(input.dateRange
+              ? [{
+                  createdAt: {
+                    gte: new Date(input.dateRange.start),
+                    lte: new Date(input.dateRange.end),
+                  },
+                }]
+              : []),
+          ],
         };
-
-        if (input.projectId) {
-          whereClause.projectId = input.projectId;
-        }
-
-        // Mirror the vector-search nullable-tolerant filter: include sessions in this
-        // workspace as well as legacy sessions where workspaceId hasn't been backfilled.
-        if (input.workspaceId) {
-          whereClause.OR = [
-            { workspaceId: input.workspaceId },
-            { workspaceId: null },
-          ];
-        }
-
-        if (input.dateRange) {
-          whereClause.createdAt = {
-            gte: new Date(input.dateRange.start),
-            lte: new Date(input.dateRange.end),
-          };
-        }
 
         const transcriptions = await ctx.db.transcriptionSession.findMany({
           where: whereClause,
@@ -1777,12 +1848,14 @@ export const mastraRouter = createTRPCRouter({
           .map(t => {
             const transcript = (t.transcription ?? "").toLowerCase();
             const query = input.query.toLowerCase();
-            const queryWords = query.split(' ');
+            // Plain substring counts: the words are the person's own text, so
+            // building a RegExp from them threw on "c++" or "(draft".
+            const queryWords = query.split(/\s+/).filter(Boolean);
+            if (queryWords.length === 0) return null;
 
             let relevanceScore = 0;
             queryWords.forEach(word => {
-              const matches = (transcript.match(new RegExp(word, 'g')) ?? []).length;
-              relevanceScore += matches;
+              relevanceScore += transcript.split(word).length - 1;
             });
 
             if (relevanceScore === 0) return null;
@@ -1808,6 +1881,62 @@ export const mastraRouter = createTRPCRouter({
           .slice(0, input.topK);
 
         return { results };
+      };
+
+      try {
+        // Use KnowledgeService for vector search.
+        // We pass userId for further-narrowing — this user-facing
+        // knowledge-base search shows people their own indexed pages,
+        // resources and documents. The cross-user agent path
+        // (knowledgeChunkRouter.semanticSearch) deliberately omits userId.
+        //
+        // Meetings are the exception: a Meeting imported by an agent or a
+        // teammate carries the importer's userId on its chunks, so "own chunks"
+        // hid Meetings the caller can open on the Meetings page. Their chunks
+        // are governed by `transcriptionViewerId` alone.
+        const knowledgeService = getKnowledgeService(ctx.db);
+
+        const searchResults = await knowledgeService.search(input.query, {
+          workspaceId: input.workspaceId,
+          userId,
+          userIdExemptSourceTypes: ['transcription'],
+          pageViewerId: userId,
+          transcriptionViewerId: userId,
+          resourceViewerId: userId,
+          projectId: input.projectId,
+          sourceTypes: input.transcriptionId ? ['transcription'] : input.sourceTypes,
+          sourceId: input.transcriptionId,
+          limit: input.topK,
+        });
+
+        // Transform results to expected format
+        const results = searchResults.map(result => ({
+          content: result.content,
+          sourceType: result.sourceType,
+          sourceId: result.sourceId,
+          sourceTitle: result.sourceTitle ?? "",
+          meetingTitle: result.sourceType === 'transcription' ? result.sourceTitle ?? "" : undefined,
+          meetingDate: result.sourceMeta?.meetingDate?.toISOString(),
+          url: result.sourceMeta?.url,
+          contentType: result.sourceMeta?.contentType,
+          relevanceScore: result.similarity,
+          contextType: determineContextType(result.content),
+          chunkIndex: result.chunkIndex,
+        }));
+
+        // SECURITY: Also return provenance-wrapped format for safe AI context injection
+        const { KnowledgeService } = await import("~/server/services/KnowledgeService");
+        const aiContext = KnowledgeService.formatForAIContext(searchResults);
+
+        if (input.transcriptionId && results.length === 0) {
+          return await keywordSearch();
+        }
+
+        return { results, aiContext };
+      } catch (error) {
+        console.error('Error in queryMeetingContext:', error);
+        console.log('[queryMeetingContext] Falling back to keyword search');
+        return keywordSearch();
       }
     }),
 
@@ -2348,30 +2477,16 @@ export const mastraRouter = createTRPCRouter({
     }))
     .mutation(async ({ ctx, input }) => {
       // Resolve the target workspace. When the caller forwards the active chat
-      // workspace, honor it after verifying membership; otherwise fall back to
-      // the user's first workspace for backward compatibility with callers that
-      // don't yet send it.
-      let workspaceId: string;
-      if (input.workspaceId) {
-        const membership = await getWorkspaceMembership(
-          ctx.db,
-          ctx.session.user.id,
-          input.workspaceId,
-        );
-        if (!membership) {
-          return { created: false, updated: false, error: "Workspace not found or access denied" };
-        }
-        workspaceId = membership.workspaceId;
-      } else {
-        const workspace = await ctx.db.workspaceUser.findFirst({
-          where: { userId: ctx.session.user.id },
-          select: { workspaceId: true },
-        });
-
-        if (!workspace) {
-          return { created: false, updated: false, error: "No workspace found" };
-        }
-        workspaceId = workspace.workspaceId;
+      // workspace, honor it after verifying the user may write there; otherwise
+      // fall back to the first workspace they can write in, for callers that
+      // don't yet send it. A viewer is refused (FORBIDDEN).
+      const workspaceId = await resolveWritableWorkspace(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!workspaceId) {
+        return {
+          created: false,
+          updated: false,
+          error: input.workspaceId ? "Workspace not found or access denied" : "No workspace found",
+        };
       }
 
       // Generate emailHash for deduplication
@@ -2501,8 +2616,26 @@ export const mastraRouter = createTRPCRouter({
         displayName: z.string().optional(),
       })).optional(),
       provider: z.enum(['google', 'microsoft']).default('google'),
+      // A repeating event: iCalendar RRULE lines. One event that repeats, not
+      // one event per day, so the person can move or stop the whole series.
+      recurrence: z.array(z.string().regex(/^RRULE:[A-Z0-9=;,:+-]+$/)).max(2).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Dropping the rule would create a single event and report a series.
+      if (input.recurrence?.length && input.provider !== 'google') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Repeating events are only supported for Google Calendar for now',
+        });
+      }
+      // A repeating event with no zone is expanded in UTC and drifts by an
+      // hour at every daylight-saving change.
+      if (input.recurrence?.length && !input.start.timeZone) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'A repeating event needs start.timeZone',
+        });
+      }
       const service = getCalendarService(input.provider);
 
       const createdEvent = await service.createEvent(
@@ -2514,6 +2647,7 @@ export const mastraRouter = createTRPCRouter({
           end: input.end,
           location: input.location,
           attendees: input.attendees,
+          ...(input.recurrence?.length ? { recurrence: input.recurrence } : {}),
         }
       );
 
@@ -2725,30 +2859,15 @@ export const mastraRouter = createTRPCRouter({
     }))
     .mutation(async ({ ctx, input }) => {
       // Resolve the target workspace. When the caller forwards the active chat
-      // workspace, honor it after verifying membership; otherwise fall back to
-      // the user's first workspace for backward compatibility with callers that
-      // don't yet send it.
-      let workspaceId: string;
-      if (input.workspaceId) {
-        const membership = await getWorkspaceMembership(
-          ctx.db,
-          ctx.session.user.id,
-          input.workspaceId,
-        );
-        if (!membership) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "Workspace not found or access denied" });
-        }
-        workspaceId = membership.workspaceId;
-      } else {
-        const workspaceUser = await ctx.db.workspaceUser.findFirst({
-          where: { userId: ctx.session.user.id },
-          select: { workspaceId: true },
+      // workspace, honor it after verifying the user may write there; otherwise
+      // fall back to the first workspace they can write in, for callers that
+      // don't yet send it. A viewer is refused (FORBIDDEN).
+      const workspaceId = await resolveWritableWorkspace(ctx.db, ctx.session.user.id, input.workspaceId);
+      if (!workspaceId) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: input.workspaceId ? "Workspace not found or access denied" : "No workspace found",
         });
-
-        if (!workspaceUser) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "No workspace found" });
-        }
-        workspaceId = workspaceUser.workspaceId;
       }
 
       // Validate organizationId belongs to same workspace
@@ -2826,6 +2945,8 @@ export const mastraRouter = createTRPCRouter({
       if (!existing) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Contact not found or inaccessible" });
       }
+      // A member of the contact's workspace who only views it cannot change it.
+      await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, existing.workspaceId);
 
       // Encrypt PII fields
       const dbUpdate: any = {};
@@ -2886,6 +3007,8 @@ export const mastraRouter = createTRPCRouter({
       if (!contact) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Contact not found or inaccessible" });
       }
+      // Logging an interaction writes to the workspace's CRM: not for a viewer.
+      await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, contact.workspaceId);
 
       // Create interaction and update contact's last interaction in a transaction
       const [interaction] = await ctx.db.$transaction([
@@ -2989,19 +3112,17 @@ export const mastraRouter = createTRPCRouter({
       size: z.enum(["1-10", "11-50", "51-200", "201-500", "501-1000", "1000+"]).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      const workspaceUser = await ctx.db.workspaceUser.findFirst({
-        where: { userId: ctx.session.user.id },
-        select: { workspaceId: true },
-      });
-
-      if (!workspaceUser) {
+      // The tool forwards no workspace: the first one the user can write in.
+      // A workspace they only view never qualifies.
+      const workspaceId = await resolveWritableWorkspace(ctx.db, ctx.session.user.id);
+      if (!workspaceId) {
         throw new TRPCError({ code: "NOT_FOUND", message: "No workspace found" });
       }
 
       const organization = await ctx.db.crmOrganization.create({
         data: {
           ...input,
-          workspaceId: workspaceUser.workspaceId,
+          workspaceId,
           createdById: ctx.session.user.id,
         },
       });
@@ -3399,6 +3520,8 @@ export const mastraRouter = createTRPCRouter({
           message: "Objective not found or access denied",
         });
       }
+      // Owning the objective is not enough in a workspace the user only views.
+      await assertCanEditGoal(ctx.db, userId, existing);
 
       const goal = await ctx.db.goal.update({
         where: { id },
@@ -3438,6 +3561,7 @@ export const mastraRouter = createTRPCRouter({
           message: "Objective not found or access denied",
         });
       }
+      await assertCanEditGoal(ctx.db, userId, existing);
 
       // Delete associated key results first (cascade)
       const deletedKRs = await ctx.db.keyResult.deleteMany({
@@ -3476,6 +3600,7 @@ export const mastraRouter = createTRPCRouter({
           message: "Objective not found or access denied",
         });
       }
+      await assertCanEditGoal(ctx.db, userId, goal);
 
       const keyResult = await ctx.db.keyResult.create({
         data: {
@@ -3490,7 +3615,11 @@ export const mastraRouter = createTRPCRouter({
           goalId: input.goalId,
           userId,
           driUserId: userId,
-          workspaceId: input.workspaceId ?? null,
+          // A key result lives in its objective's workspace, as `okr.create`
+          // enforces. The tool's `workspaceId` used to be written as given,
+          // unchecked, so a key result could be filed into any workspace by
+          // id; it is now ignored in favour of the objective's.
+          workspaceId: goal.workspaceId,
         },
         include: {
           goal: { select: { id: true, title: true } },
@@ -3525,6 +3654,8 @@ export const mastraRouter = createTRPCRouter({
       unitLabel: z.string().optional(),
       status: z.enum(["not-started", "on-track", "at-risk", "off-track", "achieved"]).optional(),
       confidence: z.number().min(0).max(100).optional(),
+      // Move the key result to another quarter, half or year.
+      period: okrPeriodSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -3540,10 +3671,14 @@ export const mastraRouter = createTRPCRouter({
           message: "Key result not found or access denied",
         });
       }
+      await assertCanEditKeyResult(ctx.db, userId, existing);
 
       const keyResult = await ctx.db.keyResult.update({
         where: { id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...periodChangeData(existing.period, updateData.period),
+        },
         include: {
           goal: { select: { id: true, title: true } },
         },
@@ -3557,6 +3692,7 @@ export const mastraRouter = createTRPCRouter({
           currentValue: keyResult.currentValue,
           status: keyResult.status,
           confidence: keyResult.confidence,
+          period: keyResult.period,
           goal: keyResult.goal,
         },
       };
@@ -3579,6 +3715,7 @@ export const mastraRouter = createTRPCRouter({
           message: "Key result not found or access denied",
         });
       }
+      await assertCanEditKeyResult(ctx.db, userId, existing);
 
       await ctx.db.keyResult.delete({ where: { id: input.id } });
       return { success: true };
@@ -3603,6 +3740,7 @@ export const mastraRouter = createTRPCRouter({
           message: "Key result not found or access denied",
         });
       }
+      await assertCanEditKeyResult(ctx.db, userId, keyResult);
 
       // Auto-calculate status based on progress
       const range = keyResult.targetValue - keyResult.startValue;
@@ -3816,13 +3954,10 @@ export const mastraRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
-      // Verify user belongs to this workspace
-      const membership = await ctx.db.workspaceUser.findFirst({
-        where: { workspaceId: input.workspaceId, userId },
-      });
-      if (!membership) {
-        throw new TRPCError({ code: "FORBIDDEN", message: "You do not have access to this workspace" });
-      }
+      // Creating goals, projects and actions is a write: membership alone let
+      // a `viewer` through. (The per-goal check in `createGoal` refused them
+      // one by one, as `failed` rows, while this call still succeeded.)
+      await assertWorkspaceWriteRole(ctx.db, userId, input.workspaceId);
 
       const created: { type: string; name: string; id: string | number }[] = [];
       const failed: { type: string; name: string; error: string }[] = [];
@@ -3922,6 +4057,14 @@ export const mastraRouter = createTRPCRouter({
 
       console.log(`🏗️ [tRPC createProject] RECEIVED: name="${input.name}", status=${input.status}, priority=${input.priority}, startDate=${input.startDate ?? "none"}, endDate=${input.endDate ?? "none"}, userId=${userId}`);
 
+      // Same rule as the human `project.create`: a project filed into a
+      // workspace needs a write role there. Nothing checked the workspace
+      // before, so a non-member or a `viewer` could create one in it. A
+      // project with no workspace stays the user's own.
+      if (input.workspaceId) {
+        await assertWorkspaceWriteRole(ctx.db, userId, input.workspaceId);
+      }
+
       // Generate a unique slug
       const baseSlug = slugify(input.name);
       let slug = baseSlug;
@@ -3963,9 +4106,11 @@ export const mastraRouter = createTRPCRouter({
     }),
 
   // Update an existing project's core fields on behalf of the agent. Only the
-  // provided fields change. Access is gated by the same project-access path the
-  // human `project.updateDates` / `mastra.updateAction` use (ADR-0016 — reuse
+  // provided fields change. Access is the project EDIT rule, as on the human
+  // `project.update` and on `mastra.updateProjectStatus` (ADR-0016 — reuse
   // the human authorization path, the agent JWT never enters the LLM context).
+  // View access was the gate, which admitted a workspace `viewer` and, on a
+  // public project, anyone.
   // Dates arrive as ISO strings (the `dueDate` convention) and are parsed here.
   updateProject: protectedProcedure
     .input(z.object({
@@ -3991,10 +4136,10 @@ export const mastraRouter = createTRPCRouter({
       }
 
       const access = await getProjectAccess(ctx.db, userId, input.projectId);
-      if (!hasProjectAccess(access)) {
+      if (!canEditProject(access)) {
         throw new TRPCError({
           code: 'FORBIDDEN',
-          message: 'You do not have access to this project',
+          message: 'You do not have edit access to this project',
         });
       }
 
@@ -4143,6 +4288,7 @@ export const mastraRouter = createTRPCRouter({
       if (!goal) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Objective not found or access denied' });
       }
+      await assertCanEditGoal(ctx.db, userId, goal);
 
       const project = await ctx.db.project.findFirst({
         where: { id: input.projectId, createdById: userId },
@@ -4174,6 +4320,7 @@ export const mastraRouter = createTRPCRouter({
       if (!goal) {
         throw new TRPCError({ code: 'NOT_FOUND', message: 'Objective not found or access denied' });
       }
+      await assertCanEditGoal(ctx.db, userId, goal);
 
       await ctx.db.goal.update({
         where: { id: input.goalId },
@@ -4192,20 +4339,15 @@ export const mastraRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
-      // Authorize the KR by ownership OR workspace membership (mirrors okr.linkProject),
-      // so the assistant can link a KR shared within the caller's workspace.
+      // Authorize the KR as okr.linkProject does: a write role in its
+      // workspace, so the assistant can link a KR shared within it.
       const keyResult = await ctx.db.keyResult.findFirst({
         where: { id: input.keyResultId },
         select: { id: true, userId: true, workspaceId: true },
       });
-      if (
-        !keyResult ||
-        (keyResult.userId !== userId &&
-          !(keyResult.workspaceId &&
-            (await getWorkspaceMembership(ctx.db, userId, keyResult.workspaceId))))
-      ) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Key result not found or access denied' });
-      }
+      await assertCanEditKeyResult(ctx.db, userId, keyResult, {
+        notFound: 'Key result not found or access denied',
+      });
 
       // Verify the caller can edit the project being linked.
       const projectAccess = await getProjectAccess(ctx.db, userId, input.projectId);
@@ -4244,14 +4386,11 @@ export const mastraRouter = createTRPCRouter({
         where: { id: input.keyResultId },
         select: { id: true, userId: true, workspaceId: true },
       });
-      if (
-        !keyResult ||
-        (keyResult.userId !== userId &&
-          !(keyResult.workspaceId &&
-            (await getWorkspaceMembership(ctx.db, userId, keyResult.workspaceId))))
-      ) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: 'Key result not found or access denied' });
-      }
+      // Removing the link is a write to the key result: "owner or any member"
+      // let a `viewer` do it.
+      await assertCanEditKeyResult(ctx.db, userId, keyResult, {
+        notFound: 'Key result not found or access denied',
+      });
 
       await ctx.db.keyResultProject.deleteMany({
         where: {
@@ -4420,11 +4559,14 @@ export const mastraRouter = createTRPCRouter({
       priority: z.number().int().min(0).max(4).optional(),
       points: z.number().optional(),
       assigneeId: z.string().optional(),
+      // Label ids, slugs or names (see listLabels). Unknown ones are skipped
+      // and reported in `warnings`; they are never created.
+      labels: ticketLabelRefsSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
 
-      console.log(`🎫 [tRPC createTicket] RECEIVED: productId=${input.productId}, title="${input.title}", type=${input.type ?? 'FEATURE'}, status=${input.status ?? 'BACKLOG'}, userId=${userId}`);
+      console.log(`🎫 [tRPC createTicket] RECEIVED: productId=${input.productId}, title="${input.title}", type=${input.type ?? 'FEATURE'}, status=${input.status ?? 'BACKLOG'}, labels=${input.labels?.length ?? 0}, userId=${userId}`);
 
       // Verifies the product exists and the user can write to its workspace.
       const product = await loadProductWithAccess(ctx.db, userId, input.productId, "edit");
@@ -4446,6 +4588,22 @@ export const mastraRouter = createTRPCRouter({
 
       console.log(`✅ [tRPC createTicket] CREATED: id=${ticket.id}, number=${ticket.number}, shortId=${ticket.shortId ?? 'none'}`);
 
+      await notifyTicketAssigned(ctx.db, {
+        ticketId: ticket.id,
+        assigneeId: input.assigneeId,
+        previousAssigneeId: null,
+        actorUserId: userId,
+      });
+
+      const { labels, warnings } = input.labels?.length
+        ? await applyTicketLabels(ctx.db, {
+            userId,
+            ticketId: ticket.id,
+            workspaceId: product.workspaceId,
+            change: { add: input.labels },
+          })
+        : { labels: [], warnings: [] };
+
       return {
         ticket: {
           id: ticket.id,
@@ -4457,6 +4615,160 @@ export const mastraRouter = createTRPCRouter({
           priority: ticket.priority,
           productId: ticket.productId,
         },
+        labels,
+        warnings,
+      };
+    }),
+
+  // Update one ticket, by id or by product + ticket number (list-tickets
+  // returns numbers, not ids). Field edits go through the product plugin's
+  // `ticket.update`, so completedAt, the Markdown→bodyDoc sync, activity and
+  // the Notion push behave exactly as they do in the UI. Labels: `labels`
+  // replaces the set, `addLabels` / `removeLabels` edit it; all take ids,
+  // slugs or names.
+  updateTicket: protectedProcedure
+    .input(z.object({
+      // Non-empty: an empty id must be a BAD_REQUEST, never "no id" (which
+      // would fall through to the number lookup with no filter).
+      ticketId: z.string().trim().min(1).optional(),
+      productId: z.string().trim().min(1).optional(),
+      ticketNumber: z.number().int().positive().optional(),
+      title: z.string().min(1).max(300).optional(),
+      body: z.string().optional(),
+      type: z.enum(['BUG', 'FEATURE', 'CHORE', 'IMPROVEMENT', 'SPIKE', 'RESEARCH']).optional(),
+      status: z.enum([
+        'BACKLOG', 'NEEDS_REFINEMENT', 'READY_TO_PLAN', 'COMMITTED',
+        'IN_PROGRESS', 'BLOCKED', 'QA', 'DONE', 'DEPLOYED', 'ARCHIVED',
+      ]).optional(),
+      priority: z.number().int().min(0).max(4).nullable().optional(),
+      points: z.number().nullable().optional(),
+      assigneeId: z.string().nullable().optional(),
+      labels: ticketLabelRefsSchema.optional(),
+      addLabels: ticketLabelRefsSchema.optional(),
+      removeLabels: ticketLabelRefsSchema.optional(),
+    }).refine(
+      (i) => i.ticketId !== undefined || (i.productId !== undefined && i.ticketNumber !== undefined),
+      { message: "Pass ticketId, or productId with ticketNumber" },
+    ))
+    .mutation(async ({ ctx, input }) => {
+      const userId = ctx.session.user.id;
+      const {
+        ticketId, productId, ticketNumber,
+        labels: setLabels, addLabels, removeLabels,
+        ...fields
+      } = input;
+
+      // One answer for "doesn't exist" and "exists where you can't see it",
+      // so this can't be used to probe tickets in other workspaces. Someone
+      // who can see the product but not edit it gets FORBIDDEN below instead.
+      const ticketNotFound = () => new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
+      const canSeeProduct = async (id: string): Promise<boolean> => {
+        try {
+          await loadProductWithAccess(ctx.db, userId, id, "view");
+          return true;
+        } catch (error) {
+          if (error instanceof TRPCError && (error.code === "FORBIDDEN" || error.code === "NOT_FOUND")) {
+            return false;
+          }
+          throw error;
+        }
+      };
+
+      let found: { id: string; productId: string } | null;
+      if (ticketId !== undefined) {
+        found = await ctx.db.ticket.findUnique({ where: { id: ticketId }, select: { id: true, productId: true } });
+        if (!found || !(await canSeeProduct(found.productId))) throw ticketNotFound();
+      } else {
+        // The refinement guarantees both are set on this branch.
+        if (productId === undefined || ticketNumber === undefined) throw ticketNotFound();
+        if (!(await canSeeProduct(productId))) throw ticketNotFound();
+        found = await ctx.db.ticket.findFirst({
+          where: { productId, number: ticketNumber },
+          select: { id: true, productId: true },
+        });
+        if (!found) throw ticketNotFound();
+      }
+
+      console.log(`🎫 [tRPC updateTicket] RECEIVED: ticketId=${found.id}, fields=${Object.keys(fields).join(",") || "none"}, labels=${setLabels ? "set" : ""}${addLabels ? "+add" : ""}${removeLabels ? "+remove" : ""}, userId=${userId}`);
+
+      // Edit access up front, so a labels-only call is gated the same as a
+      // field edit (ticket.update checks again for the fields).
+      const product = await loadProductWithAccess(ctx.db, userId, found.productId, "edit");
+
+      const hasFieldEdit = Object.values(fields).some((v) => v !== undefined);
+      if (hasFieldEdit) {
+        await ticketRouter.createCaller(ctx).update({ id: found.id, ...fields });
+      }
+
+      const { labels, warnings } = await applyTicketLabels(ctx.db, {
+        userId,
+        ticketId: found.id,
+        workspaceId: product.workspaceId,
+        change: { set: setLabels, add: addLabels, remove: removeLabels },
+      });
+
+      const ticket = await ctx.db.ticket.findUnique({
+        where: { id: found.id },
+        select: {
+          id: true, number: true, shortId: true, title: true, type: true,
+          status: true, priority: true, points: true, assigneeId: true, productId: true,
+        },
+      });
+      if (!ticket) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Ticket not found" });
+      }
+
+      console.log(`✅ [tRPC updateTicket] UPDATED: id=${ticket.id}, labels=${labels.map((l) => l.slug).join(",") || "none"}, warnings=${warnings.length}`);
+
+      return { ticket, labels, warnings };
+    }),
+
+  // The labels an agent may put on tickets in one workspace (global tags plus
+  // the workspace's own), so it can pick from real labels instead of
+  // guessing names. Pass productId or workspaceId. Mutation for transport
+  // only (authenticatedTrpcCall always POSTs), like listProducts.
+  listLabels: protectedProcedure
+    .input(z.object({
+      // Blank ids are refused here: an empty productId would otherwise fall
+      // through to the workspace branch with no workspaceId at all.
+      productId: z.string().trim().min(1).optional(),
+      workspaceId: z.string().trim().min(1).optional(),
+    }).refine(
+      (i) => i.productId !== undefined || i.workspaceId !== undefined,
+      { message: "Pass productId or workspaceId" },
+    ))
+    .mutation(async ({ ctx, input }) => {
+      const userId = ctx.session.user.id;
+      const { productId, workspaceId: inputWorkspaceId } = input;
+      let workspaceId: string;
+      if (productId !== undefined) {
+        workspaceId = (await loadProductWithAccess(ctx.db, userId, productId, "view")).workspaceId;
+      } else if (inputWorkspaceId !== undefined) {
+        workspaceId = inputWorkspaceId;
+        await assertWorkspaceAccess(ctx.db, userId, workspaceId, "view");
+      } else {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Pass productId or workspaceId" });
+      }
+
+      const tags = await ctx.db.tag.findMany({
+        where: { OR: [{ workspaceId }, { workspaceId: null }] },
+        select: {
+          id: true, name: true, slug: true, description: true,
+          category: true, workspaceId: true,
+        },
+        orderBy: [{ workspaceId: { sort: "asc", nulls: "last" } }, { name: "asc" }],
+      });
+
+      return {
+        workspaceId,
+        labels: tags.map((t) => ({
+          id: t.id,
+          name: t.name,
+          slug: t.slug,
+          description: t.description,
+          category: t.category,
+          scope: t.workspaceId ? ("workspace" as const) : ("global" as const),
+        })),
       };
     }),
 
@@ -4875,10 +5187,11 @@ export const mastraRouter = createTRPCRouter({
     }),
 
   // Create dependency edges between tickets in one product, by ticket number
-  // ("#12 depends on #7"). Enforces the same rules as the plugin's
-  // ticket.addDependency — same product, no self-deps, no cycles (shared
-  // wouldCreateCycle) — and reports per-edge outcomes so an agent can relay
-  // exactly what was linked and what was rejected.
+  // ("#12 depends on #7"). Numbers are per-product, so this tool only links
+  // within one product; cross-product edges (ADR-0002) go through the plugin's
+  // ticket.addDependency by id. Shares its rules otherwise — no self-deps, no
+  // cycles (shared wouldCreateCycle) — and reports per-edge outcomes so an
+  // agent can relay exactly what was linked and what was rejected.
   addTicketDependencies: protectedProcedure
     .input(
       z.object({

@@ -18,6 +18,7 @@ import { createHash } from "crypto";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { encryptString } from "../../src/server/utils/encryption";
 import { createAssistantPrincipal } from "../../src/server/services/assistant/principal";
+import { memberGrant } from "../../src/server/services/externalAgentAccess";
 
 export const FIXTURE = {
   userEmail: "dev-fixture@exponential.test",
@@ -112,6 +113,7 @@ export const FIXTURE = {
 export interface SeededFixture {
   userId: string;
   workspaceSlug: string;
+  workspaceName: string;
   /** A second workspace the fixture user owns, for cross-workspace cases. */
   otherWorkspaceSlug: string;
   otherWorkspaceName: string;
@@ -129,6 +131,8 @@ export interface SeededFixture {
   featureTicketCount: number;
   /** Total tickets seeded, including the scope-only one the accordion hides. */
   totalTicketCount: number;
+  /** The one seeded ticket carrying a fun shortId, for the short-ID search spec. */
+  shortIdTicket: { shortId: string; title: string; number: number };
   /** App-relative URL of the OKR dashboard holding the seeded objective. */
   okrUrl: string;
   /** App-relative URL of the seeded project's Goals tab (the goal hierarchy). */
@@ -209,13 +213,18 @@ interface TicketSpec {
   assign: boolean;
   /** Attach to the scope INSTEAD of the feature (the excluded case). */
   scopeOnly?: boolean;
+  /**
+   * A fun shortId, though the product shows Linear-style ids: searching for
+   * one must still find the ticket (snappy.thunder).
+   */
+  shortId?: string;
 }
 
 const TICKETS: TicketSpec[] = [
   { number: 1, title: "Render ticket rows in the accordion", status: "DONE", priority: 1, assign: true },
   { number: 2, title: "Wire blocked indicator through ticket.list", status: "IN_PROGRESS", priority: 0, assign: true },
   { number: 3, title: "Empty state copy for ticketless features", status: "BACKLOG", priority: 3, assign: false },
-  { number: 4, title: "Peek drawer keyboard navigation", status: "QA", priority: 2, assign: true },
+  { number: 4, title: "Peek drawer keyboard navigation", status: "QA", priority: 2, assign: true, shortId: "zesty.quasar" },
   { number: 5, title: "Ticket row hover affordances", status: "BACKLOG", priority: null, assign: false },
   { number: 6, title: "Scope-only ticket (must NOT appear in the feature accordion)", status: "BACKLOG", priority: null, assign: false, scopeOnly: true },
 ];
@@ -441,6 +450,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
         assigneeId: spec.assign ? user.id : null,
         featureId: spec.scopeOnly ? null : feature.id,
         scopeId: spec.scopeOnly ? scope.id : null,
+        shortId: spec.shortId ?? null,
       },
       create: {
         productId: product.id,
@@ -453,6 +463,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
         scopeId: spec.scopeOnly ? scope.id : null,
         createdById: user.id,
         assigneeId: spec.assign ? user.id : null,
+        shortId: spec.shortId ?? null,
       },
     });
     byNumber.set(spec.number, ticket.id);
@@ -528,33 +539,45 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
   // Each Assistant owns an External agent whose shadow user is a workspace
   // member (ADR-0067) — created through the same service `assistant.create`
   // uses, so the fixture can never drift from the product path.
+  // One Assistant per person (ADR-0072), a member of the fixture workspace
+  // (where it works is its principal's membership, not a column). An existing
+  // one is reused and re-joined, so a re-seed never creates a second.
   async function ensureAssistant(ownerId: string, name: string) {
     const existing = await db.assistant.findFirst({
-      where: { workspaceId: workspace.id, createdById: ownerId, name },
-      select: { id: true },
+      where: { createdById: ownerId, retiredAt: null },
+      select: { id: true, externalAgent: { select: { shadowUserId: true } } },
     });
-    if (existing) return existing;
+    if (existing) {
+      await db.assistant.update({ where: { id: existing.id }, data: { name } });
+      await memberGrant(db, existing.externalAgent.shadowUserId, workspace.id);
+      return { id: existing.id };
+    }
     return db.$transaction(async (tx) => {
-      const { externalAgentId } = await createAssistantPrincipal(tx, {
-        name,
-        ownerId,
-        workspaceId: workspace.id,
-      });
+      const { externalAgentId, shadowUserId } = await createAssistantPrincipal(tx, { name, ownerId });
+      await memberGrant(tx, shadowUserId, workspace.id);
       return tx.assistant.create({
         data: {
           name,
           emoji: "✨",
           personality: `${name} is warm, direct and allergic to filler.`,
-          workspaceId: workspace.id,
           createdById: ownerId,
-          isDefault: true,
           externalAgentId,
         },
         select: { id: true },
       });
     });
   }
-  await ensureAssistant(user.id, FIXTURE.assistantName);
+  const fixtureAssistant = await ensureAssistant(user.id, FIXTURE.assistantName);
+  // Not a member of the second workspace on any run, so the Members page there
+  // offers "Add my Assistant" (Agent PRD V2) and the spec that clicks it starts
+  // from the same state every time.
+  const fixtureAssistantPrincipal = await db.assistant.findUniqueOrThrow({
+    where: { id: fixtureAssistant.id },
+    select: { externalAgent: { select: { shadowUserId: true } } },
+  });
+  await db.workspaceUser.deleteMany({
+    where: { userId: fixtureAssistantPrincipal.externalAgent.shadowUserId, workspaceId: otherWorkspace.id },
+  });
   const colleagueAssistant = await ensureAssistant(colleague.id, FIXTURE.colleagueAssistantName);
   // The agent's own description (on its ExternalAgent row, not per workspace)
   // is what the workspace Edit Role modal shows for an agent member.
@@ -567,7 +590,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
   // any Position a spec created is removed, so the settings spec can create
   // one and assign a holder on every run.
   const ariaAssistant = await db.assistant.findFirstOrThrow({
-    where: { workspaceId: workspace.id, createdById: user.id, name: FIXTURE.assistantName },
+    where: { createdById: user.id, retiredAt: null },
     select: { externalAgent: { select: { shadowUserId: true } } },
   });
   const ariaMembership = await db.workspaceUser.findUniqueOrThrow({
@@ -1294,6 +1317,7 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
       offProjectParent: offProjectParentGoal.id,
       detachedChild: detachedChildGoal.id,
     },
+    workspaceName: FIXTURE.workspaceName,
     userId: user.id,
     workspaceSlug: FIXTURE.workspaceSlug,
     otherWorkspaceSlug: FIXTURE.otherWorkspaceSlug,
@@ -1306,6 +1330,10 @@ export async function seedDevFixture(db: PrismaClient): Promise<SeededFixture> {
     peekUrl: `${base}/features?peek=${feature.id}`,
     featureTicketCount: TICKETS.filter((t) => !t.scopeOnly).length,
     totalTicketCount: TICKETS.length,
+    shortIdTicket: (() => {
+      const spec = TICKETS.find((t) => t.shortId)!;
+      return { shortId: spec.shortId!, title: spec.title, number: spec.number };
+    })(),
     okrUrl: `/w/${FIXTURE.workspaceSlug}/goals?view=okrs&year=${FIXTURE.okrPeriod.split("-")[1]}&period=Annual`,
   };
 }

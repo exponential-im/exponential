@@ -305,6 +305,40 @@ describe("workspace.updateMemberRole", () => {
     },
   );
 
+  it("demoting a person to viewer removes their Assistant from the workspace (Agent PRD V2, D7 regression)", async () => {
+    setTarget(false);
+    db.externalAgent.findMany.mockResolvedValue([{ shadowUserId: "shadow-assistant" }] as never);
+    db.workspaceUser.deleteMany.mockResolvedValue({ count: 1 } as never);
+    db.projectMember.deleteMany.mockResolvedValue({ count: 0 } as never);
+    db.actionAssignee.deleteMany.mockResolvedValue({ count: 1 });
+
+    await caller(db).workspace.updateMemberRole({
+      workspaceId: WORKSPACE_ID,
+      userId: TARGET_ID,
+      role: "viewer",
+    });
+
+    expect(db.externalAgent.findMany).toHaveBeenCalledWith({
+      where: { ownerId: TARGET_ID },
+      select: { shadowUserId: true },
+    });
+    expect(db.workspaceUser.deleteMany).toHaveBeenCalledWith({
+      where: { workspaceId: WORKSPACE_ID, userId: { in: ["shadow-assistant"] } },
+    });
+    // A viewer may read what their Assistant filed for them, not edit it, so
+    // the assignment that would let them is withdrawn.
+    expect(db.actionAssignee.deleteMany).toHaveBeenCalledWith({
+      where: {
+        userId: TARGET_ID,
+        action: {
+          createdById: { in: ["shadow-assistant"] },
+          projectId: null,
+          workspaceId: WORKSPACE_ID,
+        },
+      },
+    });
+  });
+
   it("refuses a caller who is not the owner before looking at the target", async () => {
     db.workspaceUser.findUnique.mockResolvedValue({
       userId: USER_ID,

@@ -57,6 +57,13 @@ export const env = createEnv({
     // Bearer secret the cron routes require (Vercel Cron, or the self-host
     // scheduler). The routes fail closed without it.
     CRON_SECRET: z.string().optional(),
+    // Whether this install meters and limits Assistant use
+    // (src/server/services/billing/config.ts). Unset means "off": no usage
+    // ledger, no Billing tab, no limits, which is how a self-hosted install runs.
+    // Strict on purpose: a misspelt value should fail the deploy, not quietly
+    // leave metering off. The resolver accepts the same three words and
+    // nothing else, for the builds that skip this validation.
+    BILLING_MODE: z.enum(["off", "meter", "enforce"]).optional(),
     MICROSOFT_ENTRA_ID_CLIENT_ID: z.string().optional(),
     MICROSOFT_ENTRA_ID_CLIENT_SECRET: z.string().optional(),
     MICROSOFT_ENTRA_ID_TENANT_ID: z.string().optional(),
@@ -94,6 +101,21 @@ export const env = createEnv({
     // Method through agentGuidance.method while it is still a draft
     // (content/docs/method/_release.json). Default: "exponential".
     METHOD_PREVIEW_WORKSPACE_SLUGS: z.string().optional(),
+    // Comma-separated browser origins, besides the app's own, that may call
+    // the hosted MCP endpoint (/api/mcp, src/server/mcp/origin.ts). Optional:
+    // clients without a browser send no Origin and are unaffected.
+    MCP_ALLOWED_ORIGINS: z.string().optional(),
+    // OAuth sign-in for MCP clients (hosted MCP Agent PRD, D9;
+    // src/server/mcp/oauth). "off" (or unset): the metadata documents and
+    // OAuth routes 404 and only keys authenticate /api/mcp. "admin": published,
+    // but only app admins can approve a connection. "on": open to everyone.
+    MCP_OAUTH_MODE: z.enum(["off", "admin", "on"]).optional(),
+    // PostHog product analytics, captured server-side at the tRPC layer
+    // (src/server/analytics/posthog.ts). Optional: falls back to
+    // NEXT_PUBLIC_POSTHOG_KEY, and with neither set analytics is disabled.
+    // The key is a project API key (write-only); host defaults to the EU cloud.
+    POSTHOG_KEY: z.string().optional(),
+    POSTHOG_HOST: z.string().url().optional(),
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
@@ -116,6 +138,12 @@ export const env = createEnv({
     // applicationServerKey for pushManager.subscribe(). Optional: push
     // notifications degrade gracefully when unset.
     NEXT_PUBLIC_VAPID_PUBLIC_KEY: z.string().optional(),
+    // PostHog project API key (public by design). Turns on server-side tRPC
+    // events and masked browser session replay (SessionReplay.tsx); also the
+    // server-side key unless POSTHOG_KEY overrides it. Unset = disabled.
+    NEXT_PUBLIC_POSTHOG_KEY: z.string().optional(),
+    // Browser ingest host for session replay. Defaults to PostHog EU cloud.
+    NEXT_PUBLIC_POSTHOG_HOST: z.string().url().optional(),
   },
 
   /**
@@ -135,6 +163,7 @@ export const env = createEnv({
     EMAIL_FROM: process.env.EMAIL_FROM,
     AUTH_LOG_SIGN_IN_CODES: process.env.AUTH_LOG_SIGN_IN_CODES,
     CRON_SECRET: process.env.CRON_SECRET,
+    BILLING_MODE: process.env.BILLING_MODE,
     MICROSOFT_ENTRA_ID_CLIENT_ID: process.env.MICROSOFT_ENTRA_ID_CLIENT_ID,
     MICROSOFT_ENTRA_ID_CLIENT_SECRET: process.env.MICROSOFT_ENTRA_ID_CLIENT_SECRET,
     MICROSOFT_ENTRA_ID_TENANT_ID: process.env.MICROSOFT_ENTRA_ID_TENANT_ID,
@@ -145,9 +174,15 @@ export const env = createEnv({
     UPSTASH_REDIS_REST_URL: process.env.UPSTASH_REDIS_REST_URL,
     UPSTASH_REDIS_REST_TOKEN: process.env.UPSTASH_REDIS_REST_TOKEN,
     METHOD_PREVIEW_WORKSPACE_SLUGS: process.env.METHOD_PREVIEW_WORKSPACE_SLUGS,
+    MCP_ALLOWED_ORIGINS: process.env.MCP_ALLOWED_ORIGINS,
+    MCP_OAUTH_MODE: process.env.MCP_OAUTH_MODE,
+    POSTHOG_KEY: process.env.POSTHOG_KEY,
+    POSTHOG_HOST: process.env.POSTHOG_HOST,
     NODE_ENV: process.env.NODE_ENV,
     NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN,
     NEXT_PUBLIC_VAPID_PUBLIC_KEY: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY,
+    NEXT_PUBLIC_POSTHOG_KEY: process.env.NEXT_PUBLIC_POSTHOG_KEY,
+    NEXT_PUBLIC_POSTHOG_HOST: process.env.NEXT_PUBLIC_POSTHOG_HOST,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially

@@ -10,7 +10,7 @@ import {
   ensurePageAccess,
   type PageForAccess,
 } from "~/server/services/pages/access";
-import { sendPageMentionNotifications } from "~/server/services/notifications/EmailNotificationService";
+import { emitPageCommentMention } from "~/server/services/notifications/emit/mentionAdapters";
 import { writePageBodyIfVersion } from "~/server/services/pages/page-links";
 import {
   getKnowledgePageAccess,
@@ -24,6 +24,7 @@ import {
   NOT_ANCHORED,
   type CommentQuote,
 } from "~/server/services/prd/anchor-comment";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 
 const authorSelect = {
   id: true,
@@ -117,11 +118,15 @@ async function createQuotedThread(
   }
   const comment = created.row ?? (await createRow(db));
 
-  void sendPageMentionNotifications(db, {
-    pageId,
-    commentContent: body,
-    commentAuthorId: userId,
-  });
+  emitAfterResponse("pageComment.mention", () =>
+    emitPageCommentMention(db, {
+      pageId,
+      commentId: comment.id,
+      commentContent: body,
+      commentAuthorId: userId,
+    }),
+    { pageId, commentId: comment.id },
+  );
 
   return { ...comment, anchor };
 }
@@ -219,12 +224,16 @@ export const pageCommentRouter = createTRPCRouter({
         include: { createdBy: { select: authorSelect } },
       });
 
-      // Fire-and-forget: notify mentioned workspace members.
-      void sendPageMentionNotifications(ctx.db, {
-        pageId: input.pageId,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-      });
+      // Fire-and-forget: notify mentioned members who can view the page.
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: input.pageId,
+          commentId: comment.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { pageId: input.pageId, commentId: comment.id },
+      );
 
       // Viewers may comment but not edit the body, so only an editor's
       // thread writes its mark into the doc.
@@ -292,11 +301,15 @@ export const pageCommentRouter = createTRPCRouter({
         include: { createdBy: { select: authorSelect } },
       });
 
-      void sendPageMentionNotifications(ctx.db, {
-        pageId: parent.pageId,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-      });
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: parent.pageId,
+          commentId: comment.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+        }),
+        { pageId: parent.pageId, commentId: comment.id },
+      );
 
       return comment;
     }),
@@ -360,12 +373,16 @@ export const pageCommentRouter = createTRPCRouter({
 
       // Fire-and-forget: notify mentions added by the edit. Passing the old
       // body means already-notified users aren't pinged again.
-      void sendPageMentionNotifications(ctx.db, {
-        pageId: existing.pageId,
-        commentContent: input.body,
-        commentAuthorId: ctx.session.user.id,
-        previousContent: existing.body,
-      });
+      emitAfterResponse("pageComment.mention", () =>
+        emitPageCommentMention(ctx.db, {
+          pageId: existing.pageId,
+          commentId: updated.id,
+          commentContent: input.body,
+          commentAuthorId: ctx.session.user.id,
+          previousContent: existing.body,
+        }),
+        { pageId: existing.pageId, commentId: updated.id },
+      );
 
       return updated;
     }),

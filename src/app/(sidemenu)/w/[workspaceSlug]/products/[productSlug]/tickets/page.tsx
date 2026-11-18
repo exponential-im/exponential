@@ -54,8 +54,15 @@ import { PeekDrawer } from "~/app/_components/product/peek/PeekDrawer";
 import { TicketPeek } from "~/app/_components/product/peek/TicketPeek";
 import { CreateTicketModal } from "~/app/_components/product/CreateTicketModal";
 import { EditTicketModal } from "~/app/_components/product/EditTicketModal";
-import { generateLinearId } from "~/lib/fun-ids";
+import {
+  generateLinearId,
+  isTicketIdMatch,
+  parseTicketIdQuery,
+  shortIdMatchesQuery,
+} from "~/lib/fun-ids";
 import { TicketKanbanBoard } from "~/app/_components/product/TicketKanbanBoard";
+import { invalidateTicketLists } from "~/app/_components/product/invalidateTicketLists";
+import { useTicketSummaryCache } from "~/app/_components/product/useTicketSummaryCache";
 import { useViewPrefs } from "~/hooks/useViewPrefs";
 import { useTicketViewUrl } from "~/hooks/useTicketViewUrl";
 import { PriorityIcon, PRIORITY_LABELS as PRIORITY_LABEL_MAP } from "~/app/_components/product/PriorityIcon";
@@ -250,7 +257,9 @@ export default function TicketsBacklogPage() {
   const [prefEntity, setPrefEntity] = useState<"tickets" | "epics">("tickets");
   const [prefGroupBy, setPrefGroupBy] = useState<GroupByField>("none");
   const [prefFilters, setPrefFilters] = useState<TicketFilters>(EMPTY_TICKET_FILTERS);
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Completed starts collapsed: its tickets load when it is opened (see
+  // needCompleted below).
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(["__completed"]));
   const [prefNestDependencies, setPrefNestDependencies] = useState(false);
   // Tickets whose nested dependencies are folded away (by id, so a ticket
   // that appears under several parents folds everywhere at once).
@@ -282,6 +291,21 @@ export default function TicketsBacklogPage() {
   const groupBy = (urlView?.groupBy as GroupByField | undefined) ?? prefGroupBy;
   const filters = urlView?.filters ?? prefFilters;
   const nestDependencies = urlView?.nestDependencies ?? prefNestDependencies;
+
+  // A link to completed statuses only (?status=DONE) asks for nothing but
+  // Completed rows, so it opens that section.
+  const urlStatuses = urlView?.filters.status ?? [];
+  const urlStatusIsCompleted =
+    urlStatuses.length > 0 && urlStatuses.every((st) => COMPLETED_STATUSES.has(st));
+  useEffect(() => {
+    if (!urlStatusIsCompleted) return;
+    setCollapsed((prev) => {
+      if (!prev.has("__completed")) return prev;
+      const next = new Set(prev);
+      next.delete("__completed");
+      return next;
+    });
+  }, [urlStatusIsCompleted]);
 
   /**
    * Change part of the view. Inside a URL-carried view the change rewrites
@@ -395,17 +419,60 @@ export default function TicketsBacklogPage() {
     { enabled: !!workspaceId && !!productSlug },
   );
 
-  // Kept as one memoised object because the bulk-update optimistic patch
-  // must read/write the cache under the exact same query input.
-  const listInput = useMemo(
-    () => ({ productId: product?.id ?? "" }),
-    [product?.id],
-  );
+  // Completed tickets (Done / Deployed / Archived) are most of a mature
+  // product's backlog and sit in a collapsed section, so they load only when
+  // something shows them or filters them: the section opened, the board (it
+  // has Done and Deployed columns), a search, or a Filter facet. A status
+  // facet that names no completed status rules them all out instead.
+  // Opening the Filter popover loads them too: its options are derived from
+  // the loaded rows, so values found only on completed tickets would be
+  // missing otherwise.
+  const [filterPopoverOpened, setFilterPopoverOpened] = useState(false);
+  const statusFilterExcludesCompleted =
+    filters.status.length > 0 &&
+    !filters.status.some((st) => COMPLETED_STATUSES.has(st));
+  const clientFilterActive =
+    search.trim() !== "" || countActiveTicketFilters(filters) > 0;
+  const needCompleted =
+    entity === "tickets" &&
+    !statusFilterExcludesCompleted &&
+    (view === "board" || !collapsed.has("__completed") || clientFilterActive ||
+      filterPopoverOpened);
 
-  const { data: tickets, isLoading } = api.product.ticket.listSummaries.useQuery(
-    listInput,
+  const productId = product?.id ?? "";
+  const { data: activeList, isLoading } = api.product.ticket.listSummaries.useQuery(
+    { productId, completed: "exclude" },
     { enabled: !!product?.id },
   );
+  const { data: completedList } = api.product.ticket.listSummaries.useQuery(
+    { productId, completed: "only" },
+    { enabled: !!product?.id && needCompleted },
+  );
+  const { data: completedCount, isLoading: completedCountLoading } =
+    api.product.ticket.countCompleted.useQuery({ productId }, { enabled: !!product?.id });
+  // Once loaded, completed tickets stay merged in even if the section closes
+  // again (a disabled query keeps its cached data).
+  const completedLoaded = !!completedList;
+
+  // One list for everything below. A ticket can briefly sit in both while
+  // the two refetch after a status change; the active copy wins.
+  const tickets = useMemo(() => {
+    if (!activeList) return undefined;
+    if (!completedList) return activeList;
+    const byId = new Map(completedList.map((t) => [t.id, t]));
+    for (const t of activeList) byId.set(t.id, t);
+    return [...byId.values()];
+  }, [activeList, completedList]);
+
+  // Optimistic edits patch the row in every cached list holding it (active,
+  // Completed, a Feature's list) and hand back a snapshot to restore.
+  const summaries = useTicketSummaryCache();
+  type TicketRow = NonNullable<typeof activeList>[number];
+  const patchTicketLists = async (ids: string[], patch: (t: TicketRow) => TicketRow) => {
+    const snap = await summaries.snapshot(...ids);
+    for (const id of ids) summaries.patch(id, patch);
+    return snap;
+  };
 
   const { data: features } = api.product.feature.list.useQuery(
     { productId: product?.id ?? "" },
@@ -428,25 +495,17 @@ export default function TicketsBacklogPage() {
   // Optimistic so the pill shows the new value at once; rolled back on error.
   const updateTicket = api.product.ticket.update.useMutation({
     onMutate: async (vars) => {
-      await utils.product.ticket.listSummaries.cancel(listInput);
-      const prev = utils.product.ticket.listSummaries.getData(listInput);
-      if (prev) {
-        utils.product.ticket.listSummaries.setData(
-          listInput,
-          prev.map((t) => {
-            if (t.id !== vars.id) return t;
-            const next = { ...t };
-            if (vars.status !== undefined) next.status = vars.status;
-            if (vars.type !== undefined) next.type = vars.type;
-            if (vars.priority !== undefined) next.priority = vars.priority;
-            return next;
-          }),
-        );
-      }
+      const prev = await patchTicketLists([vars.id], (t) => {
+        const next = { ...t };
+        if (vars.status !== undefined) next.status = vars.status;
+        if (vars.type !== undefined) next.type = vars.type;
+        if (vars.priority !== undefined) next.priority = vars.priority;
+        return next;
+      });
       return { prev };
     },
     onError: (_err, _vars, mctx) => {
-      if (mctx?.prev) utils.product.ticket.listSummaries.setData(listInput, mctx.prev);
+      summaries.restore(mctx?.prev);
       notifications.show({
         title: "Update failed",
         message: "Your change was not saved. Please try again.",
@@ -455,7 +514,7 @@ export default function TicketsBacklogPage() {
     },
     onSettled: async () => {
       if (product?.id) {
-        await utils.product.ticket.listSummaries.invalidate({ productId: product.id });
+        await invalidateTicketLists(utils, { productId: product.id });
       }
     },
   });
@@ -492,50 +551,41 @@ export default function TicketsBacklogPage() {
   const bulkUpdate = api.product.ticket.bulkUpdate.useMutation({
     // Optimistic: patch the cached list immediately, roll back on error.
     onMutate: async (vars) => {
-      await utils.product.ticket.listSummaries.cancel(listInput);
-      const prev = utils.product.ticket.listSummaries.getData(listInput);
-      if (prev) {
-        const idSet = new Set(vars.ids);
-        utils.product.ticket.listSummaries.setData(
-          listInput,
-          prev.map((t) => {
-            if (!idSet.has(t.id)) return t;
-            const next = { ...t };
-            if (vars.status !== undefined) next.status = vars.status;
-            if (vars.type !== undefined) next.type = vars.type;
-            if (vars.priority !== undefined) next.priority = vars.priority;
-            if (vars.assigneeId !== undefined) {
-              const m = members.find((x) => x.id === vars.assigneeId);
-              next.assignee =
-                vars.assigneeId && m
-                  ? { id: m.id, name: m.name, image: null }
-                  : null;
-            }
-            if (vars.epicId !== undefined) {
-              const e = (epics ?? []).find((x) => x.id === vars.epicId);
-              next.epic = vars.epicId && e ? { id: e.id, name: e.name } : null;
-            }
-            if (vars.cycleId !== undefined) {
-              const c = (cycles ?? []).find((x) => x.id === vars.cycleId);
-              next.cycle =
-                vars.cycleId && c
-                  ? {
-                      id: c.id,
-                      name: c.name,
-                      status: c.status,
-                      startDate: c.startDate,
-                      endDate: c.endDate,
-                    }
-                  : null;
-            }
-            return next;
-          }),
-        );
-      }
+      const prev = await patchTicketLists(vars.ids, (t) => {
+        const next = { ...t };
+        if (vars.status !== undefined) next.status = vars.status;
+        if (vars.type !== undefined) next.type = vars.type;
+        if (vars.priority !== undefined) next.priority = vars.priority;
+        if (vars.assigneeId !== undefined) {
+          const m = members.find((x) => x.id === vars.assigneeId);
+          next.assignee =
+            vars.assigneeId && m
+              ? { id: m.id, name: m.name, image: null }
+              : null;
+        }
+        if (vars.epicId !== undefined) {
+          const e = (epics ?? []).find((x) => x.id === vars.epicId);
+          next.epic = vars.epicId && e ? { id: e.id, name: e.name } : null;
+        }
+        if (vars.cycleId !== undefined) {
+          const c = (cycles ?? []).find((x) => x.id === vars.cycleId);
+          next.cycle =
+            vars.cycleId && c
+              ? {
+                  id: c.id,
+                  name: c.name,
+                  status: c.status,
+                  startDate: c.startDate,
+                  endDate: c.endDate,
+                }
+              : null;
+        }
+        return next;
+      });
       return { prev };
     },
     onError: (_err, _vars, mctx) => {
-      if (mctx?.prev) utils.product.ticket.listSummaries.setData(listInput, mctx.prev);
+      summaries.restore(mctx?.prev);
       notifications.show({
         title: "Bulk update failed",
         message: "Your changes were not saved. Please try again.",
@@ -544,7 +594,7 @@ export default function TicketsBacklogPage() {
     },
     onSettled: async () => {
       if (product?.id) {
-        await utils.product.ticket.listSummaries.invalidate({ productId: product.id });
+        await invalidateTicketLists(utils, { productId: product.id });
       }
     },
   });
@@ -559,7 +609,7 @@ export default function TicketsBacklogPage() {
         message: `Deleted ${res.count} ticket${res.count === 1 ? "" : "s"}`,
       });
       if (product?.id) {
-        await utils.product.ticket.listSummaries.invalidate({ productId: product.id });
+        await invalidateTicketLists(utils, { productId: product.id });
       }
     },
     onError: () => {
@@ -642,7 +692,20 @@ export default function TicketsBacklogPage() {
   // ── Filters ──
   // Facet options are derived from the loaded tickets, so only values actually
   // present in the product are offered.
-  const facetOptions = useMemo(() => deriveTicketFacetOptions(tickets ?? []), [tickets]);
+  // Until the Completed rows load, the completed statuses are offered anyway,
+  // since picking one is what loads them.
+  const facetOptions = useMemo(() => {
+    const options = deriveTicketFacetOptions(tickets ?? []);
+    if (completedLoaded || (completedCount ?? 0) === 0) return options;
+    const offered = new Set(options.status.map((o) => o.value));
+    const status = [
+      ...options.status,
+      ...[...COMPLETED_STATUSES]
+        .filter((st) => !offered.has(st))
+        .map((st) => ({ value: st, label: STATUS_LABELS[st as TicketStatus] ?? st })),
+    ].sort((a, b) => (STATUS_ORDER[a.value] ?? 99) - (STATUS_ORDER[b.value] ?? 99));
+    return { ...options, status };
+  }, [tickets, completedLoaded, completedCount]);
 
   const activeFilterCount = countActiveTicketFilters(filters);
 
@@ -658,23 +721,32 @@ export default function TicketsBacklogPage() {
   const sorted = useMemo(() => {
     if (!tickets) return [];
     const q = search.toLowerCase().trim();
+    // A query that names a ticket (`snappy.thunder`, `42`, `#42`, `EXP-42`)
+    // finds it even when the id is not displayed, and sorts it first.
+    const idQuery = parseTicketIdQuery(q);
+    const isNamed = (t: (typeof tickets)[number]) =>
+      !!q && isTicketIdMatch(t, idQuery, product?.name);
     const matchesFilters = (t: (typeof tickets)[number]) => matchesTicketFilters(t, filters);
     const matchesSearch = (t: (typeof tickets)[number]) =>
       !q ||
+      isNamed(t) ||
       t.title.toLowerCase().includes(q) ||
+      shortIdMatchesQuery(t.shortId, q) ||
       t.type.toLowerCase().includes(q) ||
       (t.assignee?.name ?? "").toLowerCase().includes(q);
 
     const list = tickets.filter((t) => matchesFilters(t) && matchesSearch(t));
-    list.sort((a, b) =>
-      cmp(
-        sortValue(a as unknown as Record<string, unknown>, sortField),
-        sortValue(b as unknown as Record<string, unknown>, sortField),
-        sortDir,
-      ),
+    list.sort(
+      (a, b) =>
+        Number(isNamed(b)) - Number(isNamed(a)) ||
+        cmp(
+          sortValue(a as unknown as Record<string, unknown>, sortField),
+          sortValue(b as unknown as Record<string, unknown>, sortField),
+          sortDir,
+        ),
     );
     return list;
-  }, [tickets, search, sortField, sortDir, filters]);
+  }, [tickets, search, sortField, sortDir, filters, product?.name]);
 
   // Split completed tickets from active
   const { active: activeTickets, completed: completedTickets } = useMemo(() => {
@@ -689,6 +761,24 @@ export default function TicketsBacklogPage() {
     }
     return { active, completed };
   }, [sorted]);
+
+  // The Completed header's count. While the rows are wanted, count them
+  // (search and facets apply to them); otherwise the server's count is exact,
+  // because no client-side filter is applied. Rows cached
+  // from an earlier visit don't count: a disabled query isn't refetched when
+  // a mutation invalidates it, so they can be stale.
+  const completedTotal = needCompleted && completedLoaded
+    ? completedTickets.length
+    : statusFilterExcludesCompleted
+      ? 0
+      : (completedCount ?? 0);
+  // The section is open (or the board is showing) but its rows are in flight.
+  const completedRowsPending = needCompleted && !completedLoaded;
+  // A search or facet is waiting on the first Completed rows: the server's
+  // count is the unfiltered total, so the header shows no number until the
+  // rows land and can be filtered.
+  const completedBadge: number | null =
+    completedRowsPending && clientFilterActive ? null : completedTotal;
 
   // Group active tickets (pure grouping core lives in ./ticketGrouping)
   const groups = useMemo(
@@ -953,7 +1043,7 @@ export default function TicketsBacklogPage() {
     );
   };
 
-  const renderListGroupRow = (key: string, label: string, ids: string[]) => (
+  const renderListGroupRow = (key: string, label: string, ids: string[], count: number | null = ids.length) => (
     <div
       key={`group-${key}`}
       className={`${table.listGroupRow} group/row`}
@@ -962,7 +1052,7 @@ export default function TicketsBacklogPage() {
       <div className={table.groupLabel}>
         {renderGroupChevron(ids, key)}
         {label}
-        <Badge size="xs" variant="light">{ids.length}</Badge>
+        <Badge size="xs" variant="light">{count ?? "…"}</Badge>
       </div>
     </div>
   );
@@ -1099,13 +1189,13 @@ export default function TicketsBacklogPage() {
   };
 
   // Group-header row (Group by buckets and the Completed section).
-  const renderGroupRow = (key: string, label: string, ids: string[]) => (
+  const renderGroupRow = (key: string, label: string, ids: string[], count: number | null = ids.length) => (
     <tr key={`group-${key}`} className={`${table.groupRow} group/row`} onClick={() => toggleCollapsed(key)}>
       <td colSpan={colCount}>
         <div className={table.groupLabel}>
           {renderGroupChevron(ids, key)}
           {label}
-          <Badge size="xs" variant="light">{ids.length}</Badge>
+          <Badge size="xs" variant="light">{count ?? "…"}</Badge>
         </div>
       </td>
     </tr>
@@ -1163,6 +1253,7 @@ export default function TicketsBacklogPage() {
                 activeCount={activeFilterCount}
                 onToggle={toggleFilter}
                 onClear={clearFilters}
+                onOpen={() => setFilterPopoverOpened(true)}
               />
             )}
 
@@ -1295,11 +1386,12 @@ export default function TicketsBacklogPage() {
         ) : (
           <EpicsList epics={epics ?? []} search={search} basePath={epicsBasePath} view={view === "list" ? "list" : "table"} />
         )
-      ) : (isLoading || sessionPending || awaitingPrefs) ? (
+      ) : (isLoading || sessionPending || awaitingPrefs || completedCountLoading ||
+          (view === "board" && completedRowsPending)) ? (
         <Stack gap="xs" className="px-8 py-4">
           {[1, 2, 3, 4].map((i) => <Skeleton key={i} height={36} />)}
         </Stack>
-      ) : (activeTickets.length > 0 || completedTickets.length > 0) ? (
+      ) : (activeTickets.length > 0 || completedTotal > 0) ? (
         view === "board" ? (
           <div className="px-8 py-4">
             <TicketKanbanBoard
@@ -1324,10 +1416,17 @@ export default function TicketsBacklogPage() {
                 </React.Fragment>
               )
             ))}
-            {completedTickets.length > 0 && (
+            {completedTotal > 0 && (
               <>
-                {renderListGroupRow("__completed", "Completed", completedTickets.map((t) => t.id))}
-                {!collapsed.has("__completed") && renderRows(completedTickets, renderListItem)}
+                {renderListGroupRow("__completed", "Completed", completedTickets.map((t) => t.id), completedBadge)}
+                {!collapsed.has("__completed") &&
+                  (completedRowsPending ? (
+                    <div className="px-8 py-2" aria-busy="true">
+                      <Skeleton height={28} />
+                    </div>
+                  ) : (
+                    renderRows(completedTickets, renderListItem)
+                  ))}
               </>
             )}
           </div>
@@ -1370,10 +1469,19 @@ export default function TicketsBacklogPage() {
               ))}
 
               {/* Completed section */}
-              {completedTickets.length > 0 && (
+              {completedTotal > 0 && (
                 <>
-                  {renderGroupRow("__completed", "Completed", completedTickets.map((t) => t.id))}
-                  {!collapsed.has("__completed") && renderRows(completedTickets, renderRow)}
+                  {renderGroupRow("__completed", "Completed", completedTickets.map((t) => t.id), completedBadge)}
+                  {!collapsed.has("__completed") &&
+                    (completedRowsPending ? (
+                      <tr aria-busy="true">
+                        <td colSpan={colCount}>
+                          <Skeleton height={28} />
+                        </td>
+                      </tr>
+                    ) : (
+                      renderRows(completedTickets, renderRow)
+                    ))}
                 </>
               )}
             </tbody>

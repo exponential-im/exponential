@@ -12,7 +12,6 @@ import {
   Button,
   Collapse,
   Container,
-  Title,
   Loader,
   Center,
   UnstyledButton,
@@ -40,7 +39,6 @@ import type {
   GitHubRelease,
 } from "~/server/services/githubService";
 import { ReleaseBody } from "./ReleaseBody";
-import { PRODUCT_NAME } from "~/lib/brand";
 import {
   parseCommitMessage,
   summarizeByCategory,
@@ -171,14 +169,14 @@ export function ProductTimelineClient() {
     api.github.listCommits.useQuery({
       page,
       perPage: 100,
-      owner: "positonic",
+      owner: "exponential-im",
       repo: "exponential",
       branch: "main",
     }),
   );
 
   const releasesQuery = api.github.listReleases.useQuery({
-    owner: "positonic",
+    owner: "exponential-im",
     repo: "exponential",
     perPage: 30,
   });
@@ -230,7 +228,7 @@ export function ProductTimelineClient() {
     if (!commitsFailure) return;
     reportHandledError(new Error(commitsFailure), {
       area: "product-timeline-commits",
-      context: { repo: "positonic/exponential", branch: "main" },
+      context: { repo: "exponential-im/exponential", branch: "main" },
     });
   }, [commitsFailure]);
 
@@ -238,7 +236,7 @@ export function ProductTimelineClient() {
     if (!releasesErrorMessage) return;
     reportHandledError(new Error(releasesErrorMessage), {
       area: "product-timeline-releases",
-      context: { repo: "positonic/exponential" },
+      context: { repo: "exponential-im/exponential" },
     });
   }, [releasesErrorMessage]);
 
@@ -280,11 +278,7 @@ export function ProductTimelineClient() {
   // empty timeline that reads as "we shipped nothing".
   if (commitsUnavailable) {
     return (
-      <Container size="md" py="xl">
-        <Title order={1}>Product Timeline</Title>
-        <Text c="dimmed" mb="xl">
-          Every change we make to {PRODUCT_NAME}, straight from our git history.
-        </Text>
+      <Container size="md" pb="xl">
         <Alert
           variant="light"
           color="red"
@@ -316,11 +310,12 @@ export function ProductTimelineClient() {
   }
 
   return (
-    <Container size="md" py="xl">
-      <Group justify="space-between" align="flex-start" mb="xs">
-        <Title order={1}>Product Timeline</Title>
+    <Container size="md" pb="xl">
+      {/* The page's H1 and intro render on the server (page.tsx), so
+          crawlers see them before this client fetch finishes. */}
+      <Group justify="flex-end" mb="xl">
         <Anchor
-          href="https://github.com/positonic/exponential/releases/new"
+          href="https://github.com/exponential-im/exponential/releases/new"
           target="_blank"
           rel="noopener noreferrer"
           style={{ textDecoration: "none" }}
@@ -334,9 +329,6 @@ export function ProductTimelineClient() {
           </Button>
         </Anchor>
       </Group>
-      <Text c="dimmed" mb="xl">
-        Every change we make to {PRODUCT_NAME}, straight from our git history.
-      </Text>
 
       {/* Partial failure: we have commits to show, but a later page or the
           release list didn't load. Say what's missing instead of quietly

@@ -161,10 +161,24 @@ describe("DatabaseTable — editing", () => {
   it("+ New appends a row and opens its title for editing", async () => {
     const onCreateRow = vi.fn().mockResolvedValue("row-2");
     const { onCreateRow: created } = renderEditable({ onCreateRow });
-    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    fireEvent.click(screen.getByRole("button", { name: "New page" }));
     expect(created).toHaveBeenCalledTimes(1);
     // The new row (mocked as row-2, which is rendered) gets its title cell open.
     expect(await screen.findByRole("textbox", { name: "Name" })).toBeTruthy();
+  });
+
+  it("the toolbar's New opens the new row's title once, and never for a row the view hides", () => {
+    const props = { database, columns: [TITLE, SCORE, STATUS, DONE], editable: true, onWriteCell: vi.fn() };
+    const shown = render(<DatabaseTable {...props} rows={rows} editTitleOf="row-2" />);
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy();
+    shown.unmount();
+
+    // A row the saved view filters out is not waited for: when it shows up
+    // later, its title stays closed.
+    const hidden = render(<DatabaseTable {...props} rows={rows.slice(0, 1)} editTitleOf="row-2" />);
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+    hidden.rerender(<DatabaseTable {...props} rows={rows} editTitleOf="row-2" />);
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
   });
 
   it("a relation cell shows each target as a pill, linked when it has a href", () => {
@@ -221,7 +235,7 @@ describe("DatabaseTable — editing", () => {
 
   it("read-only tables have no + New line and no focusable cells", () => {
     const { container } = render(<DatabaseTable database={database} rows={rows} columns={[TITLE, STATUS]} />);
-    expect(screen.queryByRole("button", { name: "+ New" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New page" })).toBeNull();
     expect(container.querySelector("td[tabindex]")).toBeNull();
   });
 });

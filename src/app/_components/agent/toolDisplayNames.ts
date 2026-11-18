@@ -31,6 +31,16 @@ const pickFirstString =
 // date ranges): the row shows the verb alone.
 const noArg = (): undefined => undefined;
 
+// The agent's own plumbing: finding which tools it has. It means nothing to
+// the person, so the tool card never shows it (ticket 982). Matched on the
+// humanized name too, so a provider renaming the key ("tool_search",
+// "toolSearchBm25") stays hidden.
+const HIDDEN_TOOLS = new Set(['toolSearch', 'tool_search', 'tool-search']);
+
+export function isHiddenTool(name: string): boolean {
+  return HIDDEN_TOOLS.has(name) || /^tool search\b/i.test(humanizeToolName(name));
+}
+
 export const TOOL_DISPLAY: Record<string, ToolDisplay> = {
   createProjectTool: {
     verb: 'Create project',
@@ -94,6 +104,20 @@ export const TOOL_DISPLAY: Record<string, ToolDisplay> = {
     pluralPast: 'Created {n} tickets',
     progress: 'Creating tickets… {n}/{total}',
     pickArg: pickFirstString('title'),
+  },
+  updateTicketTool: {
+    verb: 'Update ticket',
+    pastTense: 'Updated ticket',
+    pluralPast: 'Updated {n} tickets',
+    progress: 'Updating tickets… {n}/{total}',
+    pickArg: pickFirstString('title'),
+  },
+  listLabelsTool: {
+    verb: 'List labels',
+    pastTense: 'Listed labels',
+    pluralPast: 'Listed labels ×{n}',
+    progress: 'Listing labels… {n}/{total}',
+    pickArg: noArg,
   },
   bulkCreateTicketsTool: {
     verb: 'Create tickets',

@@ -53,6 +53,7 @@ import { habitRouter } from "./routers/habit";
 import { workspaceRouter } from "./routers/workspace";
 import { personRouter } from "./routers/person";
 import { externalAgentRouter } from "./routers/externalAgent";
+import { oauthConnectionRouter } from "./routers/oauthConnection";
 import { positionRouter } from "./routers/position";
 import { resourceRouter } from "./routers/resource";
 import { knowledgeChunkRouter } from "./routers/knowledgeChunk";
@@ -81,9 +82,9 @@ import { workflowPipelineRouter } from "./routers/workflowPipeline";
 import { pipelineRouter } from "./routers/pipeline";
 import { contentRouter } from "./routers/content";
 import { sprintAnalyticsRouter } from "./routers/sprintAnalytics";
+import { githubIdentityRouter } from "./routers/githubIdentity";
 import { briefingRouter } from "./routers/briefing";
 import { pmSchedulerRouter } from "./routers/pmScheduler";
-import { bountyRouter } from "./routers/bounty";
 import { bugReportRouter } from "./routers/bugReport";
 import { actionCommentRouter } from "./routers/actionComment";
 import { blogCommentRouter } from "./routers/blogComment";
@@ -98,6 +99,7 @@ import { productPluginRouter } from "~/plugins/product/server/routers";
 import { favoriteRouter } from "~/server/api/routers/favorite";
 import { authRouter } from "./routers/auth";
 import { aiRouter } from "./routers/ai";
+import { billingRouter } from "./routers/billing";
 import { documentRouter } from "./routers/document";
 import { voiceRouter } from "./routers/voice";
 import { pageRouter } from "./routers/page";
@@ -148,6 +150,7 @@ export const appRouter = createTRPCRouter({
   matrixServer: matrixServerRouter,
   matrixRoom: matrixRoomRouter,
   externalAgent: externalAgentRouter,
+  oauthConnection: oauthConnectionRouter,
   position: positionRouter,
   notification: notificationRouter,
   inbox: inboxRouter,
@@ -192,9 +195,9 @@ export const appRouter = createTRPCRouter({
   content: contentRouter,
   pipeline: pipelineRouter,
   sprintAnalytics: sprintAnalyticsRouter,
+  githubIdentity: githubIdentityRouter,
   briefing: briefingRouter,
   pmScheduler: pmSchedulerRouter,
-  bounty: bountyRouter,
   bugReport: bugReportRouter,
   actionComment: actionCommentRouter,
   blogComment: blogCommentRouter,
@@ -204,6 +207,7 @@ export const appRouter = createTRPCRouter({
   crmApi: crmApiRouter,
   auth: authRouter,
   ai: aiRouter,
+  billing: billingRouter,
   document: documentRouter,
   voice: voiceRouter,
   page: pageRouter,

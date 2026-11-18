@@ -89,6 +89,14 @@ model User {
   image                          String?
   /// Opt-in vanity name for the Person page URL (`/people/<handle>`). Humans only, lowercase, unique across the install; freed at once when changed or cleared. Rules: `src/lib/personHandle.ts`.
   handle                         String?                         @unique
+  /// GitHub identity claim (CONTEXT.md): the GitHub login this user proved they
+  /// own via the OAuth round trip on /settings/profile — never free text, never
+  /// derived from a GitHub App install. Attributes GitHubActivity PRs/commits.
+  githubLogin                    String?
+  /// GitHub's numeric user id for the claim: stable across login renames, and
+  /// unique so one GitHub account can back at most one user.
+  githubId                       String?                         @unique
+  githubLinkedAt                 DateTime?
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
   onboardingCompletedAt          DateTime?
   /// Deprecated (unread since the onboarding wizard was retired for the /welcome flow — ADR-0044); dropped in a later migration (V4).
@@ -278,18 +286,12 @@ model User {
   dealsAssigned          Deal[]                  @relation("DealAssignedTo")
   dealActivities         DealActivity[]          @relation("DealActivityUser")
 
-  // Contributor & Wallet fields (bounty board)
-  displayName                    String?
-  bio                            String?
-  contributorSkills              String[]                        @default([])
-  isContributor                  Boolean                         @default(false)
-  wallets                        Wallet[]
-  bountyClaims                   BountyClaim[]
   // Notification override relations
   workspaceNotificationOverrides WorkspaceNotificationOverride[]
 
   // Product Management plugin relations
   productsCreated       Product[]             @relation("ProductCreatedBy")
+  productOwnerships     ProductOwner[]
   featuresCreated       Feature[]             @relation("FeatureCreatedBy")
   featureDraftsCreated  MeetingFeatureDraft[] @relation("MeetingFeatureDraftCreatedBy")
   researchesCreated     Research[]            @relation("ResearchCreatedBy")
@@ -324,6 +326,8 @@ model User {
   isAgent                     Boolean                           @default(false)
   ownedExternalAgents         ExternalAgent[]                   @relation("ExternalAgentOwner")
   externalAgentShadow         ExternalAgent?                    @relation("ExternalAgentShadowUser")
+  /// OAuth connections this person approved for MCP clients (hosted MCP, D7).
+  oauthConnections            OAuthConnection[]
   agentRunsRequested          AgentRun[]                        @relation("AgentRunRequestedBy")
   agentRunsReviewed           AgentRun[]                        @relation("AgentRunReviewedBy")
   // Ceremonies (ADR-0059)
@@ -383,6 +387,8 @@ model ExternalAgent {
   assistant   Assistant?
   /// Agent runs this principal performed (ADR-0067).
   agentRuns   AgentRun[]
+  /// OAuth connections that act as this agent (hosted MCP, D7).
+  oauthConnections OAuthConnection[]
 
   @@index([ownerId])
 }
@@ -491,6 +497,90 @@ model ExternalAgentKey {
 }
 
 // ============================================
+// OAuth for MCP clients (hosted MCP Agent PRD, D7)
+// ============================================
+// The app is its own OAuth authorization server for /api/mcp. A connection is
+// one person's grant to one client and acts as one External agent, so every
+// access path and the delegation invariant (ADR-0049) apply to it unchanged.
+// Every secret (code, access token, refresh token) is stored only as a hash.
+
+/// An MCP client known to this install.
+model OAuthClient {
+  /// The client_id for registered clients.
+  id           String    @id @default(cuid())
+  /// "registered" (RFC 7591) or "metadata" (client ID metadata document).
+  kind         String
+  /// For "metadata" clients: the document URL, which is the client_id.
+  metadataUrl  String?   @unique
+  name         String
+  redirectUris String[]
+  /// When the metadata document was last fetched; refetched after 24 hours.
+  fetchedAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  connections OAuthConnection[]
+}
+
+/// One person's grant to one client. Owns the tokens; points at the agent.
+model OAuthConnection {
+  id             String    @id @default(cuid())
+  ownerId        String
+  clientId       String
+  /// Stable identity of the client for this owner (D10). Reconnects match on it.
+  clientKey      String
+  clientName     String
+  agentId        String
+  /// The resource (audience) this connection's tokens are bound to.
+  resource       String
+  lastUsedAt     DateTime?
+  disconnectedAt DateTime?
+  createdAt      DateTime  @default(now())
+
+  owner  User                     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  client OAuthClient              @relation(fields: [clientId], references: [id])
+  agent  ExternalAgent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  codes  OAuthAuthorizationCode[]
+  tokens OAuthToken[]
+
+  @@unique([ownerId, clientKey])
+  @@index([clientId])
+  @@index([agentId])
+}
+
+/// A one-time authorization code, valid for five minutes.
+model OAuthAuthorizationCode {
+  id            String    @id @default(cuid())
+  connectionId  String
+  codeHash      String    @unique
+  /// The PKCE challenge; S256 only.
+  codeChallenge String
+  redirectUri   String
+  expiresAt     DateTime
+  usedAt        DateTime?
+
+  connection OAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+}
+
+/// One access/refresh pair. A redeemed row is kept until its refresh expiry
+/// so a replayed refresh token can be recognised.
+model OAuthToken {
+  id               String    @id @default(cuid())
+  connectionId     String
+  accessTokenHash  String    @unique
+  refreshTokenHash String    @unique
+  accessExpiresAt  DateTime
+  refreshExpiresAt DateTime
+  rotatedAt        DateTime?
+  createdAt        DateTime  @default(now())
+
+  connection OAuthConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+}
+
+// ============================================
 // Workspace Models
 // ============================================
 
@@ -516,7 +606,6 @@ model Workspace {
   effortUnit               EffortUnit @default(STORY_POINTS)
   enableAdvancedActions    Boolean    @default(false)
   enableDetailedActions    Boolean    @default(false)
-  enableBounties           Boolean    @default(false)
   enableDailyPlanBanner    Boolean    @default(true)
   enableWeeklyReviewBanner Boolean    @default(true)
   enableEmailNotifications Boolean    @default(true)
@@ -583,8 +672,6 @@ model Workspace {
   dailyScores             DailyScore[]
   streaks                 ProductivityStreak[]
   leaderboardEntries      LeaderboardEntry[]
-  // AI Assistant customization
-  assistants              Assistant[]
   // Positions: who does what (ADR-0068)
   positions               Position[]
   // Workflow Pipeline relations
@@ -607,6 +694,7 @@ model Workspace {
   slackConfig             SlackChannelConfig?
   // Product Management plugin relations
   products                Product[]
+  cycleBriefs             CycleBrief[]
   ticketTemplates         TicketTemplate[]
   retrospectives          Retrospective[]
 
@@ -1101,6 +1189,8 @@ model List {
   // PM Agent sprint tracking
   snapshots      SprintSnapshot[]
   metrics        SprintMetrics?
+  // Its public Cycle brief (ADR-0085), one per cycle
+  cycleBrief     CycleBrief?
 
   @@unique([workspaceId, slug])
   @@index([workspaceId])
@@ -1247,17 +1337,6 @@ model Action {
   comments             ActionComment[]
   timeEntries          TimeEntry[]
 
-  // Bounty fields
-  isBounty           Boolean       @default(false)
-  bountyAmount       Decimal?
-  bountyToken        String? // e.g. "USDC", "ETH"
-  bountyStatus       BountyStatus?
-  bountyDifficulty   String? // "beginner", "intermediate", "advanced"
-  bountySkills       String[]      @default([])
-  bountyDeadline     DateTime?
-  bountyMaxClaimants Int           @default(1)
-  bountyExternalUrl  String?
-  bountyClaims       BountyClaim[]
 
   decisionLinks DecisionLink[]
 
@@ -1275,8 +1354,6 @@ model Action {
   @@index([etaStatus])
   @@index([epicId])
   @@index([ticketId])
-  @@index([isBounty])
-  @@index([bountyStatus])
   @@index([sourceType, sourceId])
   @@index([occurrenceId])
 }
@@ -1366,45 +1443,6 @@ model TimeResolutionRule {
   @@index([userId])
 }
 
-model BountyClaim {
-  id              String      @id @default(cuid())
-  actionId        String
-  claimantId      String
-  status          ClaimStatus @default(ACTIVE)
-  submissionUrl   String?
-  submissionNotes String?
-  reviewNotes     String?
-  claimedAt       DateTime    @default(now())
-  submittedAt     DateTime?
-  reviewedAt      DateTime?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
-
-  action   Action @relation(fields: [actionId], references: [id], onDelete: Cascade)
-  claimant User   @relation(fields: [claimantId], references: [id])
-
-  @@unique([actionId, claimantId])
-  @@index([actionId])
-  @@index([claimantId])
-  @@index([status])
-}
-
-model Wallet {
-  id        String   @id @default(cuid())
-  userId    String
-  address   String   @unique
-  chain     String? // e.g. "ethereum", "solana", "polygon"
-  label     String? // user-defined label, e.g. "Hardware wallet"
-  isPrimary Boolean  @default(false)
-  verified  Boolean  @default(false)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
-
-  @@index([userId])
-}
-
 model ActionAssignee {
   id       String @id @default(cuid())
   actionId String
@@ -1468,7 +1506,6 @@ model Project {
   isPublic              Boolean                    @default(false)
   isRestricted          Boolean                    @default(false)
   enableDetailedActions Boolean? // null = inherit from workspace
-  enableBounties        Boolean? // null = inherit from workspace
   type                  String                     @default("standard") // "standard" | "pipeline"
   actions               Action[]
   aiInteractionHistory  AiInteractionHistory[]
@@ -1622,6 +1659,7 @@ model Goal {
   projects          Project[]                   @relation("GoalProjects")
   habits            Habit[] // Habits linked to this goal
   keyResults        KeyResult[] // OKR key results for this goal (objective)
+  cycleOutcomes     CycleOutcome[] // Cycle brief outcomes that roll up to this objective
   comments          GoalComment[] // Discussion comments on this objective
   updates           GoalUpdate[] // Structured status updates with health
   recommendations   WheelOfLifeRecommendation[]
@@ -1879,6 +1917,7 @@ model TranscriptionSession {
   matrixPosts       MatrixPostLog[]
   occurrence        CeremonyOccurrence?               @relation(fields: [occurrenceId], references: [id], onDelete: SetNull)
   decisions         Decision[]
+  discardedActionDrafts DiscardedActionDraft[]
 
   @@index([sessionId])
   @@index([workspaceId])
@@ -2198,6 +2237,11 @@ model AiInteractionHistory {
   ipAddress          String?
   anthropicRequestId String?
   promptVersion      String?
+  // The Mastra run that produced this turn: the key its logs are grepped by
+  // (see agentErrorTraceContext). Null on rows older than the column.
+  mastraRunId        String?
+  // PageContext.pageType the chat was opened on ("meeting", "goal", ...).
+  pageContextType    String?
   createdAt          DateTime   @default(now())
   project            Project?   @relation(fields: [projectId], references: [id])
   user               User?      @relation(fields: [systemUserId], references: [id])
@@ -3302,22 +3346,6 @@ enum EffortUnit {
   HOURS
 }
 
-enum BountyStatus {
-  OPEN
-  IN_PROGRESS
-  IN_REVIEW
-  COMPLETED
-  CANCELLED
-}
-
-enum ClaimStatus {
-  ACTIVE
-  SUBMITTED
-  APPROVED
-  REJECTED
-  WITHDRAWN
-}
-
 // Team Weekly Planning Models
 model WeeklyOutcome {
   id            String    @id @default(cuid())
@@ -3540,9 +3568,22 @@ model Resource {
   // Core content
   title       String
   description String?
-  url         String? // Source URL for web pages/bookmarks
+  /// The address the Resource was last saved from, tracking parameters
+  /// removed: what its link opens. The latest save wins.
+  url         String?
+  /// What the page is matched by, never shown or linked: the URL it declares
+  /// for itself when that can be trusted, else `url`, normalised
+  /// (`pageIdentity` in src/lib/resources/identity.ts). Null only when there
+  /// is no `url`. One owner may hold two rows with one identity: rows that
+  /// pre-date the column were never merged.
+  identity    String?
   rawContent  String? // Original HTML/content
   content     String? // Cleaned/processed text
+  /// Page text: the visible text of a page that has no Article body (a
+  /// listing, a search, a dashboard), as it read on the day it was saved.
+  /// Indexed for search and never rendered by a reader, which is why it is
+  /// not in `content`. Null whenever the Resource has a body.
+  pageText    String?
   contentType String  @default("web_page") // "web_page" | "document" | "pdf" | "bookmark" | "note"
   mimeType    String? // e.g., "text/html", "application/pdf"
 
@@ -3590,6 +3631,7 @@ model Resource {
   @@index([workspaceId])
   @@index([contentType])
   @@index([url])
+  @@index([userId, identity])
 }
 
 model KnowledgeChunk {
@@ -4771,16 +4813,17 @@ model RecurringTask {
 // AI Assistant Customization
 // ============================================
 
+/// A person's own agent: one per person, the same in every workspace it works
+/// in (ADR-0072). It belongs to no workspace; where it works is its principal's
+/// `WorkspaceUser` memberships.
 model Assistant {
   id           String   @id @default(cuid())
-  workspaceId  String
   createdById  String
   name         String // User-chosen assistant name ("Aria", "Max", etc.)
   emoji        String? // Visual symbol
   personality  String   @db.Text // Free-text soul/persona (like Clawd's SOUL.md)
   instructions String?  @db.Text // Operating instructions
   userContext  String?  @db.Text // About the user/team
-  isDefault    Boolean  @default(false)
   /// The Assistant's principal — an owned ExternalAgent with a shadow user and a
   /// workspace membership, which is what makes it an assignee (ADR-0067).
   /// Required: the migration backfills every existing row before setting NOT NULL.
@@ -4794,12 +4837,10 @@ model Assistant {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  workspace     Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy     User           @relation("AssistantCreatedBy", fields: [createdById], references: [id])
   externalAgent ExternalAgent  @relation(fields: [externalAgentId], references: [id], onDelete: Cascade)
   contentDrafts ContentDraft[]
 
-  @@index([workspaceId])
   @@index([createdById])
 }
 
@@ -5267,6 +5308,8 @@ model Product {
   epics             Epic[]
   repositories      WorkspaceRepository[]
   cycles            List[]                @relation("ProductCycles")
+  owners            ProductOwner[]
+  cycleBriefs       CycleBrief[]
   ceremonies        Ceremony[]
   decisions         Decision[]
   overviewSummary   ProductOverviewSummary?
@@ -5370,6 +5413,7 @@ model Feature {
   userStories         UserStory[]
   requirements        Requirement[]
   insights            FeatureInsight[]
+  cycleOutcomes       CycleOutcomeFeature[]
   tickets             Ticket[]
   tags                FeatureTag[]
   comments            FeatureComment[]
@@ -5667,6 +5711,7 @@ model Insight {
   duplicateOf Insight?         @relation("InsightDuplicateOf", fields: [duplicateOfId], references: [id], onDelete: SetNull)
   duplicates  Insight[]        @relation("InsightDuplicateOf")
   features    FeatureInsight[]
+  cycleBriefExclusions CycleBriefExclusion[]
   tags        InsightTag[]
   comments    InsightComment[]
 
@@ -6012,6 +6057,26 @@ model TranscriptionSessionParticipant {
   @@index([userId])
   @@index([contactId])
   @@index([email])
+}
+
+/// A draft action the extractor proposed and a reviewer discarded. The Action
+/// row itself is deleted (a draft was never a real action); this is what is
+/// kept, so the same task is not drafted again from the meeting and the
+/// extraction eval has the reviewer's "no" to learn from.
+model DiscardedActionDraft {
+  id                     String   @id @default(cuid())
+  transcriptionSessionId String
+  name                   String
+  description            String?  @db.Text
+  /// A code from `~/lib/draft-reject-reasons`, or null when none was given.
+  reason                 String?
+  /// The reviewer. Not a relation: this is a log, and outlives the account.
+  discardedById          String
+  createdAt              DateTime @default(now())
+
+  transcriptionSession TranscriptionSession @relation(fields: [transcriptionSessionId], references: [id], onDelete: Cascade)
+
+  @@index([transcriptionSessionId])
 }
 
 model PreMeetingBrief {
@@ -6437,6 +6502,9 @@ model Decision {
   status                 DecisionStatus      @default(PROPOSED)
   /// Drafts are invisible everywhere except the source meeting's draft views.
   reviewState            DecisionReviewState @default(CONFIRMED)
+  /// Why a reviewer rejected the draft, as a code from `~/lib/draft-reject-reasons`.
+  /// Null when no reason was given, and on every row that is not REJECTED.
+  rejectionReason        String?
   source                 DecisionSource      @default(MANUAL)
   decidedAt              DateTime?
   ownerId                String?
@@ -6567,4 +6635,159 @@ model InstanceSettings {
   setupTokenHash      String?
   setupTokenExpiresAt DateTime?
   updatedAt           DateTime  @updatedAt
+}
+
+/// Usage ledger: one row for every Assistant chat turn, agent run, voice turn
+/// or direct Assistant call on an install that meters (`BILLING_MODE` is not
+/// `off`). Append-only; never updated or deleted by the app. No relation to
+/// Workspace on purpose: a ledger outlives the thing it measured.
+model UsageEvent {
+  id          String   @id @default(cuid())
+  workspaceId String
+  /// "CHAT" | "AGENT_RUN" | "VOICE" | "DIRECT"
+  source      String
+  modelId     String?
+  /// Model cost in USD × 1e6, priced by `services/ai/cost.ts`.
+  costMicros  Int
+  /// The turn ran on the workspace's own Anthropic key: recorded, never counted.
+  onOwnKey    Boolean  @default(false)
+  /// AiInteractionHistory.id or AgentRun.id, when there is one.
+  refId       String?
+  createdAt   DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+}
+
+/// A workspace's hosted-key spend for one calendar month (UTC): the O(1)
+/// counter the allowance gate and the usage bar read. Incremented in the same
+/// transaction that inserts the UsageEvent; turns on the workspace's own key
+/// are left out.
+model WorkspaceUsagePeriod {
+  workspaceId String
+  /// First instant of the calendar month, UTC.
+  periodStart DateTime
+  /// USD × 1e6. BigInt: a 32-bit Int tops out near USD 2,147, and while usage
+  /// is only metered nothing stops a workspace passing that in a month.
+  costMicros  BigInt   @default(0)
+
+  @@id([workspaceId, periodStart])
+}
+
+// ---------------------------------------------------------------------------
+// Cycle briefs (ADR-0085): one public, plain-language plan per product Cycle.
+// Each row holds its draft and its signed-off snapshot side by side: sign-off
+// copies draft* to public* in one transaction. Weekly status and close results
+// live outside the snapshot, so they are public at once (D-0097, D-0098).
+// ---------------------------------------------------------------------------
+
+/// A person accountable for what a Product aims for (D-0092). Signs off its
+/// Cycle briefs. Never an agent (User.isAgent), enforced in the router.
+model ProductOwner {
+  productId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([productId, userId])
+  @@index([userId])
+}
+
+/// One per Cycle (D-0088). Only product-scoped SPRINT lists get a brief.
+model CycleBrief {
+  id                String    @id @default(cuid())
+  cycleId           String    @unique
+  productId         String
+  workspaceId       String
+  /// Null = never signed off, so never public.
+  planSignedOffAt   DateTime?
+  planSignedOffById String?
+  /// Set when the cycle moves to COMPLETED; weekly status stops here.
+  closedAt          DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  cycle      List                  @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  product    Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  workspace  Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  outcomes   CycleOutcome[]
+  exclusions CycleBriefExclusion[]
+
+  @@index([productId])
+  @@index([workspaceId])
+}
+
+/// One aim in a brief's plan (D-0089, D-0090).
+model CycleOutcome {
+  id              String    @id @default(cuid())
+  briefId         String
+  position        Int       @default(0)
+  draftText       String
+  draftWhy        String
+  /// At most one Objective, for the team; never shown publicly.
+  goalId          Int?
+  /// Snapshot at sign-off; null = not public yet.
+  publicText      String?
+  publicWhy       String?
+  /// Set when a sign-off changes an outcome that was already public (D-0091).
+  changedAt       DateTime?
+  /// Removal waits for sign-off; removedAt hides it everywhere.
+  removeRequested Boolean   @default(false)
+  removedAt       DateTime?
+  /// on_track | at_risk | done. Set by a person, live, never derived (D-0097).
+  status          String?
+  statusSetAt     DateTime?
+  /// Stored for the team, never rendered publicly.
+  statusSetById   String?
+  /// achieved | partly | missed, set after the cycle closes (D-0098).
+  result          String?
+  resultNote      String?
+  /// The outcome in an earlier brief this was carried over from.
+  carriedFromId   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  brief       CycleBrief            @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  goal        Goal?                 @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  carriedFrom CycleOutcome?         @relation("CycleOutcomeCarryOver", fields: [carriedFromId], references: [id], onDelete: SetNull)
+  carriedTo   CycleOutcome[]        @relation("CycleOutcomeCarryOver")
+  features    CycleOutcomeFeature[]
+
+  @@index([briefId])
+  @@index([goalId])
+  @@index([carriedFromId])
+}
+
+model CycleOutcomeFeature {
+  outcomeId String
+  featureId String
+
+  outcome CycleOutcome @relation(fields: [outcomeId], references: [id], onDelete: Cascade)
+  feature Feature      @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@id([outcomeId, featureId])
+  @@index([featureId])
+}
+
+/// A "Not this cycle" item (D-0095): signed off with the plan.
+model CycleBriefExclusion {
+  id              String    @id @default(cuid())
+  briefId         String
+  position        Int       @default(0)
+  draftText       String
+  draftReason     String
+  insightId       String?
+  publicText      String?
+  publicReason    String?
+  removeRequested Boolean   @default(false)
+  removedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  brief   CycleBrief @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  insight Insight?   @relation(fields: [insightId], references: [id], onDelete: SetNull)
+
+  @@index([briefId])
+  @@index([insightId])
 }

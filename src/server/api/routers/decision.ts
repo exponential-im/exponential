@@ -1,5 +1,6 @@
+import { DECISION_REJECT_REASON_CODES } from "~/lib/draft-reject-reasons";
 import { z } from "zod";
-import { after } from "next/server";
+import { runAfterResponse } from "~/server/utils/runAfterResponse";
 import { TRPCError } from "@trpc/server";
 import type { PrismaClient } from "@prisma/client";
 import {
@@ -205,6 +206,16 @@ async function ensureDecisionAccess(
  *
  * Unresolvable turns are dropped, not fatal: a decision worth logging should
  * not be lost because one quote was wrong.
+ *
+ * A quote whose words are verbatim but whose index is wrong is re-anchored to
+ * the turn that really holds them (the nearest one to the claimed index).
+ * Agents read meetings as flat transcript text — no tool hands them this
+ * parser's turn numbering — so their indices are guesses, and checking the
+ * index alone rejected every quote of real, correctly quoted words ("Every
+ * evidence turn failed transcript verification"). The words are still the
+ * test: re-anchoring only uses the forward match (the turn contains the
+ * whole quote), never the looser reverse one, so a quote found nowhere is
+ * still dropped.
  */
 function validateEvidenceAgainstTranscript(
   evidence: Array<{ turnIndex: number; speaker?: string | null; startTime?: number | null; text: string }>,
@@ -213,22 +224,29 @@ function validateEvidenceAgainstTranscript(
   const kept: DecisionEvidenceTurn[] = [];
   let dropped = 0;
   const seen = new Set<number>();
+  // Normalised once per call, and only if some quote needs re-anchoring:
+  // each re-anchor scans every turn, so per-quote normalisation would be
+  // O(quotes x transcript) regex passes on a long meeting.
+  let normalizedTurns: string[] | undefined;
+  const getNormalizedTurns = () =>
+    (normalizedTurns ??= turns.map((t) => normalizeQuoteText(t.text)));
   for (const turn of evidence) {
-    const actual = turns[turn.turnIndex];
-    if (!actual || seen.has(turn.turnIndex)) {
-      dropped += 1;
-      continue;
-    }
     // The words must be the transcript's, not the model's recollection of
     // them. Compared loosely (case, punctuation and whitespace) so a quote
     // that is genuinely from this turn survives normalisation differences.
-    if (!quoteMatchesTurn(turn.text, actual.text)) {
+    const claimed = turns[turn.turnIndex];
+    const turnIndex =
+      claimed && quoteMatchesTurn(turn.text, claimed.text)
+        ? turn.turnIndex
+        : findTurnContainingQuote(turn.text, getNormalizedTurns, turn.turnIndex);
+    const actual = turnIndex === undefined ? undefined : turns[turnIndex];
+    if (turnIndex === undefined || !actual || seen.has(turnIndex)) {
       dropped += 1;
       continue;
     }
-    seen.add(turn.turnIndex);
+    seen.add(turnIndex);
     kept.push({
-      turnIndex: turn.turnIndex,
+      turnIndex,
       // Attribution comes from the transcript, never from the caller.
       speaker: actual.speaker,
       startTime: actual.startTime,
@@ -238,9 +256,34 @@ function validateEvidenceAgainstTranscript(
   return { kept, dropped };
 }
 
-/** Loose containment: normalised quote must appear in the normalised turn. */
-function quoteMatchesTurn(quote: string, turnText: string): boolean {
-  const normalize = (value: string) =>
+/** Shortest normalised quote that may be re-anchored to another turn. */
+const MIN_REANCHOR_QUOTE_CHARS = 12;
+
+/**
+ * Index of the turn whose text contains the whole quote, nearest to the
+ * index the caller claimed; undefined when no turn does, or the quote is too
+ * short to place unambiguously ("yes", "ok").
+ */
+function findTurnContainingQuote(
+  quote: string,
+  getNormalizedTurns: () => string[],
+  claimedIndex: number,
+): number | undefined {
+  const q = normalizeQuoteText(quote);
+  if (q.length < MIN_REANCHOR_QUOTE_CHARS) return undefined;
+  const normalized = getNormalizedTurns();
+  let best: number | undefined;
+  for (let i = 0; i < normalized.length; i++) {
+    if (!normalized[i]!.includes(q)) continue;
+    if (best === undefined || Math.abs(i - claimedIndex) < Math.abs(best - claimedIndex)) {
+      best = i;
+    }
+  }
+  return best;
+}
+
+function normalizeQuoteText(value: string): string {
+  return (
     value
       .toLowerCase()
       // Apostrophes vanish rather than splitting a word, so "Let's" and
@@ -248,9 +291,14 @@ function quoteMatchesTurn(quote: string, turnText: string): boolean {
       .replace(/['\u2018\u2019]/g, "")
       .replace(/[^\p{L}\p{N}\s]/gu, " ")
       .replace(/\s+/g, " ")
-      .trim();
-  const q = normalize(quote);
-  const t = normalize(turnText);
+      .trim()
+  );
+}
+
+/** Loose containment: normalised quote must appear in the normalised turn. */
+function quoteMatchesTurn(quote: string, turnText: string): boolean {
+  const q = normalizeQuoteText(quote);
+  const t = normalizeQuoteText(turnText);
   if (q.length === 0) return false;
   if (t.includes(q)) return true;
   // The reverse direction lets a quote spanning several turns cite the first
@@ -306,21 +354,16 @@ async function settleDraftReviewAfter(
 
 /**
  * Deliver whatever the service just enqueued for a decision (ADR-0075), once the
- * response is on its way. `after()` needs a request scope and throws outside one
- * (the `action.assign` precedent); the fallback runs the kick fire-and-forget so a
- * caller without a request scope still delivers. Delivery records its own outcome
- * on each row, so nothing here can fail the mutation.
+ * response is on its way (`runAfterResponse` falls back to a detached run outside
+ * a request scope). Delivery records its own outcome on each row, so nothing here
+ * can fail the mutation.
  */
 function kickDecisionPosts(db: PrismaClient, decisionId: string): void {
-  const run = () =>
+  runAfterResponse(() =>
     kickOutboundPostsForSubject(db, { kind: "decision", subjectId: decisionId }).catch(
       () => undefined,
-    );
-  try {
-    after(run);
-  } catch {
-    void run();
-  }
+    ),
+  );
 }
 
 export const decisionRouter = createTRPCRouter({
@@ -918,12 +961,24 @@ export const decisionRouter = createTRPCRouter({
 
   /** Reject a draft. Confirmed decisions are deprecated, never rejected. */
   rejectDraft: protectedProcedure
-    .input(z.object({ workspaceId: z.string(), decisionId: z.string() }))
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        decisionId: z.string(),
+        /** Why, when the reviewer says (optional). */
+        reason: z.enum(DECISION_REJECT_REASON_CODES).optional(),
+      }),
+    )
     .use(requireWorkspaceMembership("edit"))
     .mutation(async ({ ctx, input }) => {
       const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
       await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "edit");
-      const result = await rejectDraft(ctx.db, { decisionId: subject.id, workspaceId: input.workspaceId, userId: ctx.session.user.id });
+      const result = await rejectDraft(ctx.db, {
+        decisionId: subject.id,
+        workspaceId: input.workspaceId,
+        userId: ctx.session.user.id,
+        reason: input.reason,
+      });
       await settleDraftReviewAfter(ctx.db, subject);
       return result;
     }),
