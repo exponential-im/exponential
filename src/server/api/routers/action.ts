@@ -46,6 +46,7 @@ import {
   actionWriteDeps,
   type ActionSource,
 } from "~/server/services/actions";
+import { resolveCapturePillars } from "~/server/services/pillars/PillarService";
 import { partitionActions } from "~/lib/actions/partition";
 import { deriveActionBlocked, withBlockedState } from "~/lib/actions/blocked";
 import {
@@ -2373,10 +2374,16 @@ export const actionRouter = createTRPCRouter({
         priority: z.enum(PRIORITY_VALUES).default("Quick"),
         source: z.string().default("ios-shortcut"),
         parseNaturalLanguage: z.boolean().default(true),
+        // The workspace to file into when there is no project.
+        workspaceId: z.string().optional(),
+        // Pillars the capture ticked (ADR-0085): active Pillars of one
+        // workspace. With no project or workspace named, they name it.
+        tagIds: z.array(z.string()).max(20).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.userId;
+      const pillarWorkspaceId = await resolveCapturePillars(ctx.db, input.tagIds ?? []);
 
       // Verify user exists
       const user = await ctx.db.user.findUnique({
@@ -2410,6 +2417,9 @@ export const actionRouter = createTRPCRouter({
         {
           name: parsed.name,
           projectId: parsed.projectId ?? undefined,
+          // Ignored when there is a project: the project decides the workspace.
+          workspaceId: input.workspaceId ?? pillarWorkspaceId ?? undefined,
+          ...(input.tagIds?.length && { tagIds: input.tagIds }),
           priority: input.priority,
           status: "ACTIVE",
           scheduledStart: parsed.scheduledStart ?? undefined,

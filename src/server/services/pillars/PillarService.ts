@@ -22,6 +22,7 @@ import {
   buildWorkspaceProjectAccessWhere,
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
+import { suggestPillars } from "~/lib/pillars/suggestPillars";
 
 /** Workspace roles that may promote, demote or archive a Pillar. */
 export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
@@ -161,9 +162,110 @@ export async function listPillars({
       category: PILLAR_CATEGORY,
       ...(includeArchived ? {} : { archivedAt: null }),
     },
-    select: { id: true, name: true, color: true, description: true, archivedAt: true },
+    select: {
+      id: true,
+      name: true,
+      color: true,
+      description: true,
+      archivedAt: true,
+      positions: { select: { positionId: true } },
+    },
     orderBy: { name: "asc" },
   });
+}
+
+/**
+ * Check the Pillars a capture ticked (the Chrome extension, Save link, quick
+ * add) and return the one workspace they belong to. Each must be an active
+ * Pillar, and all of one workspace: a capture files into one workspace.
+ * Membership of that workspace is the caller's own check, since it differs
+ * for agents.
+ */
+export async function resolveCapturePillars(
+  db: PrismaClient,
+  tagIds: readonly string[],
+): Promise<string | null> {
+  const ids = [...new Set(tagIds)];
+  if (ids.length === 0) return null;
+  const tags = await db.tag.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, category: true, workspaceId: true, archivedAt: true },
+  });
+  const workspaceIds = new Set(tags.map((t) => t.workspaceId));
+  const [workspaceId] = workspaceIds;
+  if (
+    tags.length !== ids.length ||
+    workspaceIds.size !== 1 ||
+    !workspaceId ||
+    tags.some((t) => t.category !== PILLAR_CATEGORY || t.archivedAt)
+  ) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Pillars must be active Pillars of one workspace",
+    });
+  }
+  return workspaceId;
+}
+
+/**
+ * Set the Positions shown as accountable for a Pillar (replace-all).
+ * Admin-only, like the rest of a Pillar's settings. Display only: nothing
+ * assigns or routes work through them (ADR-0085).
+ */
+export async function setPillarPositions({
+  db,
+  userId,
+  tagId,
+  positionIds,
+}: {
+  db: PrismaClient;
+  userId: string;
+  tagId: string;
+  positionIds: string[];
+}): Promise<{ positionIds: string[] }> {
+  const tag = await db.tag.findUnique({ where: { id: tagId } });
+  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) throw pillarNotFound();
+  await assertWorkspaceRole(db, userId, tag.workspaceId, PILLAR_ADMIN_ROLES);
+  const ids = [...new Set(positionIds)];
+  if (ids.length > 0) {
+    const found = await db.position.count({
+      where: { id: { in: ids }, workspaceId: tag.workspaceId },
+    });
+    if (found !== ids.length) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Every Position must belong to the Pillar's workspace",
+      });
+    }
+  }
+  await db.$transaction([
+    db.pillarPosition.deleteMany({ where: { tagId, positionId: { notIn: ids } } }),
+    db.pillarPosition.createMany({
+      data: ids.map((positionId) => ({ tagId, positionId })),
+      skipDuplicates: true,
+    }),
+  ]);
+  return { positionIds: ids };
+}
+
+/**
+ * Pillars to pre-tick for a capture's text, best first (ADR-0085, V3): the
+ * workspace's active Pillars matched by keyword against their names and
+ * descriptions. Suggestions only; nothing is filed.
+ */
+export async function suggestPillarsFor({
+  db,
+  userId,
+  workspaceId,
+  text,
+}: {
+  db: PrismaClient;
+  userId: string;
+  workspaceId: string;
+  text: string;
+}): Promise<string[]> {
+  const pillars = await listPillars({ db, userId, workspaceId });
+  return suggestPillars(pillars, text);
 }
 
 /** Slug rule shared with `tag.create`. */
@@ -294,6 +396,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
   } satisfies Prisma.ActionWhereInput;
 
   const [
+    positions,
     goals,
     projects,
     epics,
@@ -301,8 +404,26 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     looseTickets,
     inheritedActions,
     inheritedTickets,
+    recurring,
     resources,
   ] = await Promise.all([
+    // Who is accountable: Positions and their holders, readable by any member.
+    db.pillarPosition.findMany({
+      where: { tagId },
+      select: {
+        position: {
+          select: {
+            id: true,
+            title: true,
+            remit: true,
+            holders: {
+              select: { workspaceUser: { select: { user: { select: userSelect } } } },
+            },
+          },
+        },
+      },
+      orderBy: { position: { title: "asc" } },
+    }),
     // Objectives in a workspace are readable by every member of it.
     db.goal.findMany({
       where: {
@@ -401,6 +522,27 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       select: { ...ticketSelect, epic: { select: { id: true, name: true } } },
       orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     }),
+    // Recurring duties still running: no end date, or one still ahead. Seen
+    // like an Action: through the project, or by their creator.
+    db.recurringTask.findMany({
+      where: {
+        AND: [
+          { workspaceId, pillarTags: carriesTag },
+          { OR: [{ endDate: null }, { endDate: { gte: new Date() } }] },
+          { OR: [{ createdById: userId }, { project: projectAccess }] },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        repeatPattern: true,
+        repeatDays: true,
+        repeatInterval: true,
+        project: { select: { id: true, name: true, slug: true } },
+        createdBy: { select: userSelect },
+      },
+      orderBy: { name: "asc" },
+    }),
     db.resource.findMany({
       where: {
         AND: [resourceAccess, { workspaceId, archivedAt: null }, { pillarTags: carriesTag }],
@@ -426,6 +568,12 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       archivedAt: pillar.archivedAt,
       workspaceId,
     },
+    positions: positions.map(({ position: { holders, ...position } }) => ({
+      ...position,
+      holders: holders.map((h) => h.workspaceUser.user),
+    })),
+    // A Pillar nobody is accountable for is flagged on its page.
+    hasNoPosition: positions.length === 0,
     goals,
     projects,
     epics,
@@ -434,6 +582,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       tickets: sortUnassignedFirst(looseTickets, (t) => t.assignee !== null),
     } satisfies PillarLooseWork,
     inheritedWork: { actions: inheritedActions, tickets: inheritedTickets },
+    recurring,
     resources,
   };
 }

@@ -1,5 +1,6 @@
 'use client';
 
+import { CapturePlacement, type CapturePlacementValue } from '~/app/_components/pillars/CapturePlacement';
 import {
   Container,
   Title,
@@ -126,6 +127,8 @@ function RowSkeletons() {
   );
 }
 
+
+const EMPTY_PLACEMENT: CapturePlacementValue = { tagIds: [], projectId: null };
 interface KnowledgeBaseContentProps {
   workspaceId?: string;
   isLoading?: boolean;
@@ -142,6 +145,8 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
   const [readingView, setReadingView] = useState<'unread' | 'read'>('unread');
   const [isSavingLink, setIsSavingLink] = useState(false);
   const [linkDraft, setLinkDraft] = useState('');
+  // Where Save link files: Workspace (the current one), then Pillars, then an optional Project.
+  const [linkPlacement, setLinkPlacement] = useState<CapturePlacementValue>(EMPTY_PLACEMENT);
 
   // Form state for new resource
   const [newResource, setNewResource] = useState({
@@ -225,6 +230,7 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
     onSuccess: () => {
       refetchAllResources();
       setLinkDraft('');
+      setLinkPlacement(EMPTY_PLACEMENT);
       setIsSavingLink(false);
       setReadingView('unread');
     },
@@ -264,6 +270,10 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
   const handleSaveLink = () => {
     const draft = classifyQuickSave(linkDraft);
     if (!draft || saveLinkMutation.isPending) return;
+    const placementInput = {
+      ...(linkPlacement.tagIds.length > 0 && { tagIds: linkPlacement.tagIds }),
+      ...(linkPlacement.projectId && { projectId: linkPlacement.projectId }),
+    };
     if (draft.kind === 'link') {
       // A bare link has no body, so there is nothing to embed: the Reading
       // list is findable by title and URL, never by semantic search, until a
@@ -275,6 +285,7 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
         readStatus: 'to_read',
         generateEmbeddings: false,
         workspaceId,
+        ...placementInput,
       });
       return;
     }
@@ -287,6 +298,7 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
       readStatus: 'to_read',
       generateEmbeddings: true,
       workspaceId,
+      ...placementInput,
     });
   };
 
@@ -489,6 +501,17 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
               </ActionIcon>
             }
           />
+          {workspaceId && (
+            <Box mt={6}>
+              <CapturePlacement
+                workspaceId={workspaceId}
+                value={linkPlacement}
+                onChange={setLinkPlacement}
+                suggestFrom={linkDraft}
+                disabled={saveLinkMutation.isPending}
+              />
+            </Box>
+          )}
         </Box>
       )}
 

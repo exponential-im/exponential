@@ -22,11 +22,14 @@ import {
   IconStack2,
   IconTarget,
   IconTicket,
+  IconRepeat,
+  IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
 import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
+import { describeRecurrence } from "./recurrence";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
@@ -87,7 +90,18 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
     );
   }
 
-  const { pillar, goals, projects, epics, looseWork, inheritedWork, resources } = data;
+  const {
+    pillar,
+    positions,
+    hasNoPosition,
+    goals,
+    projects,
+    epics,
+    looseWork,
+    inheritedWork,
+    recurring,
+    resources,
+  } = data;
   const looseCount = looseWork.actions.length + looseWork.tickets.length;
   const inheritedCount = inheritedWork.actions.length + inheritedWork.tickets.length;
   const doneHint = includeCompleted ? "" : "open ";
@@ -129,6 +143,51 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
       </header>
 
       <div className="flex flex-col gap-8">
+        <PageSection label="Accountable" icon={<IconUserCheck size={14} />} count={positions.length}>
+          {hasNoPosition ? (
+            <Panel padding="sm" className="flex items-center gap-2">
+              <Pill tone="warning">No one accountable</Pill>
+              <Text size="sm" className="text-text-secondary">
+                No Position is accountable for this Pillar yet, so nobody knows who to ask.{" "}
+                <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+                  Add one in workspace settings
+                </Link>
+                .
+              </Text>
+            </Panel>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {positions.map((position) => (
+                <Panel key={position.id} padding="sm">
+                  <Group justify="space-between" wrap="nowrap" mb={4}>
+                    <Text fw={600} size="sm" className="truncate text-text-primary">
+                      {position.title}
+                    </Text>
+                    {position.holders.length === 0 ? (
+                      <Pill size="xs" tone="warning">
+                        Vacant
+                      </Pill>
+                    ) : (
+                      <Avatar.Group spacing="xs">
+                        {position.holders.slice(0, 4).map((holder) => (
+                          <Tooltip key={holder.id} label={holder.name ?? "Someone"}>
+                            <Avatar src={holder.image} size={22} radius="xl" alt={holder.name ?? ""}>
+                              {holder.name?.charAt(0) ?? "?"}
+                            </Avatar>
+                          </Tooltip>
+                        ))}
+                      </Avatar.Group>
+                    )}
+                  </Group>
+                  <Text size="xs" className="text-text-muted">
+                    {position.holders.map((h) => h.name ?? "Someone").join(", ") || "Nobody holds it"}
+                  </Text>
+                </Panel>
+              ))}
+            </div>
+          )}
+        </PageSection>
+
         <PageSection label="Goals" icon={<IconTarget size={14} />} count={goals.length}>
           {goals.length === 0 ? (
             <EmptyState compact message={`No ${doneHint}goal is filed under this Pillar.`} />
@@ -257,6 +316,34 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
             </Panel>
           </PageSection>
         )}
+
+        <PageSection label="Recurring duties" icon={<IconRepeat size={14} />} count={recurring.length}>
+          {recurring.length === 0 ? (
+            <EmptyState compact message="No recurring duty is filed under this Pillar." />
+          ) : (
+            <Panel padding="sm">
+              <WorkList>
+                {recurring.map((task) => (
+                  <li key={task.id} className="flex items-center gap-2 py-1">
+                    <span className="inline-flex shrink-0 text-text-muted">
+                      <IconRepeat size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-text-primary">{task.name}</span>
+                    {task.project && (
+                      <Link
+                        href={`/w/${workspaceSlug}/projects/${task.project.slug}-${task.project.id}`}
+                        className="shrink-0 text-xs text-text-muted hover:underline"
+                      >
+                        in {task.project.name}
+                      </Link>
+                    )}
+                    <MetaText>{describeRecurrence(task)}</MetaText>
+                  </li>
+                ))}
+              </WorkList>
+            </Panel>
+          )}
+        </PageSection>
 
         <PageSection label="Resources" icon={<IconBookmark size={14} />} count={resources.length}>
           {resources.length === 0 ? (

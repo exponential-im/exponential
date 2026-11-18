@@ -378,3 +378,45 @@ describe("tag.setEntityTags on a goal and a resource", () => {
     ).toBe("BAD_REQUEST");
   });
 });
+
+describe("tag.setEntityTags on a recurring task", () => {
+  const pillar = { id: "tag-devops", category: "pillar", workspaceId, archivedAt: null };
+
+  it("lets its creator file a project-less recurring task under a Pillar", async () => {
+    stubRole(dbMock, "member");
+    dbMock.recurringTask.findUnique.mockResolvedValue({
+      workspaceId,
+      createdById: callerId,
+      projectId: null,
+      pillarTags: [],
+    } as never);
+    dbMock.tag.findMany.mockResolvedValue([pillar] as never);
+    dbMock.recurringTaskTag.findMany.mockResolvedValue([] as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setEntityTags({ entityType: "recurringTask", entityId: "rt-1", tagIds: ["tag-devops"] });
+
+    expect(dbMock.recurringTaskTag.createMany).toHaveBeenCalledWith({
+      data: [{ recurringTaskId: "rt-1", tagId: "tag-devops" }],
+      skipDuplicates: true,
+    });
+  });
+
+  it("hides someone else's project-less recurring task", async () => {
+    stubRole(dbMock, "owner");
+    dbMock.recurringTask.findUnique.mockResolvedValue({
+      workspaceId,
+      createdById: "someone-else",
+      projectId: null,
+      pillarTags: [],
+    } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(
+        caller.tag.setEntityTags({ entityType: "recurringTask", entityId: "rt-1", tagIds: ["tag-devops"] }),
+      ),
+    ).toBe("NOT_FOUND");
+    expect(dbMock.recurringTaskTag.createMany).not.toHaveBeenCalled();
+  });
+});

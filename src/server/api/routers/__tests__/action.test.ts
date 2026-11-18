@@ -2220,6 +2220,44 @@ describe("action router (mocked)", () => {
       expect(data).not.toHaveProperty("kanbanStatus");
     });
 
+    it("files a project-less capture into its Pillars' workspace, carrying them (inner.tiger)", async () => {
+      stubUser();
+      dbMock.tag.findMany
+        // resolveCapturePillars
+        .mockResolvedValueOnce([
+          { id: "devops", category: "pillar", workspaceId: "ws-1", archivedAt: null },
+        ] as never)
+        // createAction's containment check
+        .mockResolvedValueOnce([{ id: "devops" }] as never);
+      dbMock.tag.count.mockResolvedValue(0);
+      // A write role in the Pillars' workspace.
+      dbMock.workspaceUser.findUnique.mockResolvedValue({ role: "member", workspaceId: "ws-1" } as never);
+      const row = { id: "a1", name: "Rotate keys", project: null, assignees: [], tags: [] };
+      dbMock.action.create.mockResolvedValue(row as never);
+      dbMock.action.findUniqueOrThrow.mockResolvedValue(row as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.quickCreate({ name: "Rotate keys", tagIds: ["devops"], parseNaturalLanguage: false });
+
+      expect(dbMock.action.create.mock.calls[0]![0]!.data).toMatchObject({ workspaceId: "ws-1" });
+      expect(dbMock.actionTag.createMany).toHaveBeenCalledWith({
+        data: [{ actionId: "a1", tagId: "devops" }],
+      });
+    });
+
+    it("refuses a capture whose Pillars are not active Pillars of one workspace", async () => {
+      stubUser();
+      dbMock.tag.findMany.mockResolvedValue([
+        { id: "bug", category: null, workspaceId: "ws-1", archivedAt: null },
+      ] as never);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await expect(
+        caller.action.quickCreate({ name: "x", tagIds: ["bug"] }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      expect(dbMock.action.create).not.toHaveBeenCalled();
+    });
+
     it("names an unknown source from the principal rather than storing it", async () => {
       // A session caller sending a value outside the closed set (say a
       // stale client) is the UI; the input shape is not narrowed, the
