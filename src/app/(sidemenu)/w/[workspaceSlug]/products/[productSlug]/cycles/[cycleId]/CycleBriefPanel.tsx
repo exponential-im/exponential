@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Button, Group, MultiSelect, Select, Stack, Text, Textarea } from "@mantine/core";
+import { Button, Group, MultiSelect, Select, Stack, Text, TextInput } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconExternalLink, IconPlus } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
@@ -18,6 +18,8 @@ import {
 
 import { SignOffReviewModal } from "./SignOffReviewModal";
 import { NotThisCycleSection } from "./NotThisCycleSection";
+import { ProseField } from "./ProseField";
+import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { CarryOverSection } from "./CarryOverSection";
 
 const PENDING_LABEL = {
@@ -55,15 +57,14 @@ function ResultEditor({
           if (isOutcomeResult(value)) onSave(value, draftNote.trim() || null);
         }}
       />
-      <Textarea
-        size="xs"
-        label="Note (optional, public)"
-        className="flex-1"
-        autosize
-        minRows={1}
-        value={draftNote}
-        onChange={(e) => setDraftNote(e.currentTarget.value)}
-      />
+      <div className="flex-1">
+        <ProseField
+          label="Note (optional, public)"
+          placeholder="What happened, in a line or two"
+          value={draftNote}
+          onChange={setDraftNote}
+        />
+      </div>
       <Button
         size="xs"
         variant="light"
@@ -115,22 +116,19 @@ function OutcomeForm({
   const canSave = text.trim().length > 0 && why.trim().length > 0;
   return (
     <Stack gap="xs">
-      <Textarea
+      <TextInput
         label="Outcome"
         description="One aim, in plain language a user would understand"
         placeholder="The Sudan team uses the app every week"
         value={text}
         onChange={(e) => setText(e.currentTarget.value)}
-        autosize
-        minRows={1}
       />
-      <Textarea
+      <ProseField
         label="Why"
         description="Required: why this matters to the people reading the brief"
+        placeholder="Why this matters to readers"
         value={why}
-        onChange={(e) => setWhy(e.currentTarget.value)}
-        autosize
-        minRows={1}
+        onChange={setWhy}
       />
       <Group grow align="flex-start">
         <MultiSelect
@@ -314,9 +312,10 @@ export function CycleBriefPanel({
                   <Text size="sm" className="font-medium text-text-primary">
                     {outcome.draftText}
                   </Text>
-                  <Text size="xs" className="mt-1 text-text-secondary">
-                    Why: {outcome.draftWhy}
+                  <Text size="xs" className="mt-1 text-text-muted">
+                    Why
                   </Text>
+                  <MarkdownRenderer content={outcome.draftWhy} variant="compact" />
                   {outcome.carriedFrom && (
                     <Text size="xs" className="mt-1 text-text-muted">
                       Carried over from {outcome.carriedFrom.brief.cycle.name}

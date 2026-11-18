@@ -1,10 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Button, Group, Select, Stack, Text, Textarea } from "@mantine/core";
+import { Button, Group, Select, Stack, Text, TextInput } from "@mantine/core";
 import { IconPlus } from "@tabler/icons-react";
 import { Panel, Pill, SectionHeader } from "~/app/_components/ui";
 import type { PendingChange } from "~/server/services/cycleBriefs/changes";
+import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { ProseField } from "./ProseField";
 
 export interface ExclusionRow {
   id: string;
@@ -47,21 +49,18 @@ function ExclusionForm({
   const [insightId, setInsightId] = useState(initial.insightId);
   return (
     <Stack gap="xs">
-      <Textarea
+      <TextInput
         label="Not this cycle"
         placeholder="Arabic translation of the dashboard"
         value={text}
         onChange={(e) => setText(e.currentTarget.value)}
-        autosize
-        minRows={1}
       />
-      <Textarea
+      <ProseField
         label="Reason"
         description="Required: why it is not happening this cycle"
+        placeholder="Why it is not happening this cycle"
         value={reason}
-        onChange={(e) => setReason(e.currentTarget.value)}
-        autosize
-        minRows={1}
+        onChange={setReason}
       />
       <Select
         size="xs"
@@ -134,9 +133,10 @@ export function NotThisCycleSection({
                   <Text size="sm" className="font-medium text-text-primary">
                     {row.draftText}
                   </Text>
-                  <Text size="xs" className="mt-1 text-text-secondary">
-                    Reason: {row.draftReason}
+                  <Text size="xs" className="mt-1 text-text-muted">
+                    Reason
                   </Text>
+                  <MarkdownRenderer content={row.draftReason} variant="compact" />
                   {row.insight && (
                     <Text size="xs" className="mt-1 text-text-muted">
                       Answers: {row.insight.title}

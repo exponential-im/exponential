@@ -73,7 +73,7 @@ test("a signed-off brief goes public with its live status; a rewording waits for
   await page.getByRole("button", { name: "Start the brief" }).click({ timeout: FIRST_PAINT_TIMEOUT });
   await page.getByRole("button", { name: "Add outcome" }).click();
   await page.getByLabel("Outcome", { exact: true }).fill("The pilot team uses the app every week");
-  await page.getByLabel("Why", { exact: true }).fill("Their usage decides where we go next");
+  await page.getByPlaceholder("Why this matters to readers").fill("Their usage decides where we go next");
   await page.getByRole("button", { name: "Add outcome" }).click();
   await expect(page.getByText("The pilot team uses the app every week")).toBeVisible();
 

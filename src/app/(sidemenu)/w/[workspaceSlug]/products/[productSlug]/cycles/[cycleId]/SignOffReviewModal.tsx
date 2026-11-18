@@ -3,6 +3,7 @@
 import { Button, Group, Modal, Stack, Text } from "@mantine/core";
 import { Panel, Pill } from "~/app/_components/ui";
 import type { PendingChange } from "~/server/services/cycleBriefs/changes";
+import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 
 export interface ReviewRow {
   id: string;
@@ -29,11 +30,7 @@ function Version({ heading, text, why }: { heading: string; text: string; why: s
       <Text size="sm" className="text-text-primary">
         {text}
       </Text>
-      {why && (
-        <Text size="xs" className="text-text-secondary">
-          Why: {why}
-        </Text>
-      )}
+      {why && <MarkdownRenderer content={why} variant="compact" />}
     </div>
   );
 }

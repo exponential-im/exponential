@@ -7,6 +7,7 @@ import { getPublicBrief, publicBriefPath, publicBriefsPath } from "~/server/serv
 import { BriefShell, formatBriefDate, formatCycleWindow } from "../../../_components/BriefShell";
 import { OutcomeStatusPill } from "../../../_components/OutcomeStatusPill";
 import { OutcomeResultPill } from "../../../_components/OutcomeResultPill";
+import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 
 /** Never cached: a sign-off or a status change must show at once. */
 export const dynamic = "force-dynamic";
@@ -62,15 +63,13 @@ export default async function PublicBriefPage({ params }: Params) {
               {outcome.carriedFromCycle && (
                 <p className="text-xs text-text-muted">Carried over from {outcome.carriedFromCycle}</p>
               )}
-              <p className="mt-1 text-sm text-text-secondary">
-                <span className="text-text-muted">Why: </span>
-                {outcome.why}
-              </p>
+              <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">Why</p>
+              <MarkdownRenderer content={outcome.why} variant="compact" />
               {brief.closed && outcome.resultNote && (
-                <p className="mt-1 text-sm text-text-secondary">
-                  <span className="text-text-muted">Result: </span>
-                  {outcome.resultNote}
-                </p>
+                <>
+                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">Result</p>
+                  <MarkdownRenderer content={outcome.resultNote} variant="compact" />
+                </>
               )}
               {outcome.changedAt && (
                 <p className="mt-1 text-xs text-text-muted">Changed on {formatBriefDate(outcome.changedAt)}</p>
@@ -86,10 +85,8 @@ export default async function PublicBriefPage({ params }: Params) {
               {brief.exclusions.map((item, index) => (
                 <li key={index}>
                   <p className="text-base text-text-primary">{item.text}</p>
-                  <p className="mt-1 text-sm text-text-secondary">
-                    <span className="text-text-muted">Because: </span>
-                    {item.reason}
-                  </p>
+                  <p className="mt-1 text-xs uppercase tracking-wide text-text-muted">Because</p>
+                  <MarkdownRenderer content={item.reason} variant="compact" />
                 </li>
               ))}
             </ul>
