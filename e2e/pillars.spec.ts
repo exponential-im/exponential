@@ -28,6 +28,7 @@ const names = {
   otherEpic: `E2E onboarding revamp ${RUN}`,
   inheritedTicket: `E2E rotate the deploy key ${RUN}`,
   doneAction: `E2E renew the TLS certificate ${RUN}`,
+  taggedProjectAction: `E2E tagged action in the tagged project ${RUN}`,
 };
 
 interface Seeded {
@@ -41,6 +42,7 @@ interface Seeded {
   epicIds: string[];
   extraTicketIds: string[];
   doneActionId: string;
+  taggedProjectActionId: string;
 }
 
 async function trpc(request: APIRequestContext, procedure: string, input: unknown) {
@@ -161,7 +163,20 @@ test.describe("Pillars", () => {
         tags: { create: { tagId: tag.id } },
       },
     });
+    // Carries the Pillar itself, inside the project that will carry it too.
+    const taggedProjectAction = await db.action.create({
+      data: {
+        name: names.taggedProjectAction,
+        projectId: project.id,
+        workspaceId: workspace.id,
+        createdById: fixture.userId,
+        status: "ACTIVE",
+        priority: "Quick",
+        tags: { create: { tagId: tag.id } },
+      },
+    });
     seeded = {
+      taggedProjectActionId: taggedProjectAction.id,
       epicIds: [epic.id, otherEpic.id],
       extraTicketIds: [epicTicket.id, inheritedTicket.id],
       doneActionId: doneAction.id,
@@ -181,6 +196,7 @@ test.describe("Pillars", () => {
       for (const id of seeded.extraTicketIds) await db.ticket.delete({ where: { id } });
       for (const id of seeded.epicIds) await db.epic.delete({ where: { id } });
       await db.action.delete({ where: { id: seeded.doneActionId } });
+      await db.action.delete({ where: { id: seeded.taggedProjectActionId } });
       await db.goal.delete({ where: { id: seeded.goalId } });
       await db.resource.delete({ where: { id: seeded.resourceId } });
       await db.action.delete({ where: { id: seeded.actionId } });
@@ -282,6 +298,12 @@ test.describe("Pillars", () => {
     const inherited = page.getByRole("region", { name: "Filed here from other work" });
     await expect(inherited.getByRole("link", { name: names.inheritedTicket })).toBeVisible();
     await expect(inherited.getByText(`in ${names.otherEpic}`)).toBeVisible();
+    // Work carrying the Pillar inside a project that carries it too is listed
+    // under the project only, never again here.
+    await expect(
+      page.getByRole("region", { name: "Projects" }).getByRole("link", { name: names.taggedProjectAction }),
+    ).toBeVisible();
+    await expect(inherited.getByText(names.taggedProjectAction)).toHaveCount(0);
     // The untagged epic itself is not under the Pillar.
     await expect(epics.getByText(names.otherEpic)).toHaveCount(0);
 
@@ -340,5 +362,16 @@ test.describe("Pillars", () => {
     await expect(page.getByText(names.pillar, { exact: true }).first()).toBeVisible();
     await expect(page.getByText(names.epicTicket).first()).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("ticket-board-by-pillar.png"), fullPage: true });
+  });
+
+  test("a Pillar turned back into a label shows on the project as a plain badge", async ({ page }) => {
+    await trpc(page.request, "tag.setPillar", { tagId: seeded.tagId, isPillar: false });
+
+    await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.projectSlug}-${seeded.projectId}`);
+    await expect(page.getByText(names.pillar, { exact: true }).first()).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    // No link to a Pillar page that no longer exists.
+    await expect(page.getByRole("link", { name: names.pillar })).toHaveCount(0);
   });
 });

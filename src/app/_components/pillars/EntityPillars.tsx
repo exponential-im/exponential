@@ -7,7 +7,7 @@ import { Badge, Button, Chip, Group, Loader, Popover, ScrollArea, Stack, Text } 
 import { IconPencil } from "@tabler/icons-react";
 import { notifications } from "@mantine/notifications";
 import { api } from "~/trpc/react";
-import { PILLAR_CATEGORY } from "~/types/tag";
+import { PILLAR_CATEGORY, isPillarTag } from "~/types/tag";
 import { getTagMantineColor } from "~/utils/tagColors";
 
 /** Entities that take Pillars only (never ordinary labels). */
@@ -93,19 +93,27 @@ export function EntityPillars({
           Not under any Pillar
         </Text>
       )}
-      {currentTags.map((tag) => (
-        <Badge
-          key={tag.id}
-          component={Link}
-          href={`/w/${workspaceSlug}/pillars/${tag.id}`}
-          variant="light"
-          color={getTagMantineColor(tag.color)}
-          leftSection={<PillarIcon size={11} />}
-          className="cursor-pointer"
-        >
-          {tag.name}
-        </Badge>
-      ))}
+      {currentTags.map((tag) =>
+        isPillarTag(tag) ? (
+          <Badge
+            key={tag.id}
+            component={Link}
+            href={`/w/${workspaceSlug}/pillars/${tag.id}`}
+            variant="light"
+            color={getTagMantineColor(tag.color)}
+            leftSection={<PillarIcon size={11} />}
+            className="cursor-pointer"
+          >
+            {tag.name}
+          </Badge>
+        ) : (
+          // Turned back into a label since: no Pillar page to open. It stays
+          // shown, and removable in the editor.
+          <Badge key={tag.id} variant="light" color={getTagMantineColor(tag.color)}>
+            {tag.name}
+          </Badge>
+        ),
+      )}
       {!readOnly && (
       <Popover opened={opened} onChange={setOpened} position="bottom-start" width={300} shadow="md">
         <Popover.Target>
