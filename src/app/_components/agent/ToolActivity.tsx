@@ -5,7 +5,7 @@ import { Collapse, Loader, UnstyledButton } from '@mantine/core';
 import { IconCheck, IconChevronDown, IconChevronRight, IconX, IconAlertTriangle } from '@tabler/icons-react';
 import type { ToolCall } from '~/providers/AgentModalProvider';
 import { TOOL_DISPLAY, humanizeToolName, type ToolDisplay } from './toolDisplayNames';
-import { classifyToolError, toolErrorSentence } from '~/lib/chat/toolErrors';
+import { classifyToolError, isRecoveredToolFailure, toolErrorSentence } from '~/lib/chat/toolErrors';
 
 interface ToolActivityProps {
   calls: ToolCall[];
@@ -197,7 +197,19 @@ const ToolGroupRow = memo(function ToolGroupRow({ group }: { group: ToolGroup })
 });
 
 export const ToolActivity = memo(function ToolActivity({ calls }: ToolActivityProps) {
-  const groups = useMemo(() => groupCalls(calls), [calls]);
+  // A failure the assistant got past in the same turn is noise next to a reply
+  // that says "Done". Hide it from the person; an admin (the only one who
+  // receives raw error text) still sees every call.
+  const visible = useMemo(
+    () =>
+      calls.filter((call, i) => {
+        if (call.errorMsg) return true;
+        const kind = call.errorKind ?? classifyToolError(call.errorMsg);
+        return !isRecoveredToolFailure({ ...call, errorKind: kind }, calls.slice(i + 1));
+      }),
+    [calls],
+  );
+  const groups = useMemo(() => groupCalls(visible), [visible]);
   if (groups.length === 0) return null;
 
   return (
