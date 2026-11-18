@@ -39,7 +39,8 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
 type DraftRunResult =
   | { outcome: 'drafted' }
   | { outcome: 'skipped_edited' }
-  | { outcome: 'skipped_empty' };
+  | { outcome: 'skipped_empty' }
+  | { outcome: 'skipped_shared' };
 
 async function requestDraft(
   cycleId: string,
@@ -115,6 +116,13 @@ export function DraftActions({
         });
         return;
       }
+      if (result.outcome === 'skipped_shared') {
+        notifications.show({
+          message:
+            'This cycle is shared by several products, so it keeps the per-product list instead of a written draft.',
+        });
+        return;
+      }
       await onChanged();
     } catch (error) {
       notifications.show({
@@ -171,6 +179,9 @@ export function DraftActions({
             Discard
           </Button>
           <EditDraftModal
+            // A regenerated or saved draft is a new revision: remount so the
+            // form starts from it, never from the entries it replaced.
+            key={`${String(cycle.draft.generatedAt)}|${String(cycle.draft.updatedAt)}`}
             cycle={cycle}
             draft={cycle.draft}
             opened={isEditing}

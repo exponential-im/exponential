@@ -113,6 +113,28 @@ describe("constrainDraft", () => {
     expect(covered).toBe(total);
   });
 
+  it("counts a key the model repeats inside one entry once", () => {
+    const content = constrainDraft(
+      {
+        entries: [
+          {
+            title: "Memory fix",
+            section: "fixes",
+            summary: ["y"],
+            sourceKeys: ["ticket:oom", "ticket:oom", "ticket:oom"],
+          },
+        ],
+      },
+      changelog,
+      tickets,
+    );
+    const entry = content.sections
+      .flatMap((s) => s.entries)
+      .find((e) => e.title === "Memory fix")!;
+    expect(entry.points).toBe(13);
+    expect(entry.items.filter((i) => i.kind === "ticket")).toHaveLength(1);
+  });
+
   it("produces content that round-trips through parseDraftContent", () => {
     const content = constrainDraft({ entries: [] }, changelog, tickets);
     expect(parseDraftContent(JSON.parse(JSON.stringify(content)))).toEqual(content);

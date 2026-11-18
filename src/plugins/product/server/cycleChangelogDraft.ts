@@ -238,9 +238,14 @@ export function constrainDraft(
     [];
 
   output.entries.forEach((entry, index) => {
-    const keys = entry.sourceKeys.filter((k) => sources.has(k) && !used.has(k));
+    // Claim each key as it is read, so a key the model repeats inside one
+    // entry counts once there too, not only across entries.
+    const keys = entry.sourceKeys.filter((k) => {
+      if (!sources.has(k) || used.has(k)) return false;
+      used.add(k);
+      return true;
+    });
     if (keys.length === 0) return;
-    keys.forEach((k) => used.add(k));
     const picked = keys.map((k) => sources.get(k)!);
     drafted.push({
       key: `draft:${index}`,

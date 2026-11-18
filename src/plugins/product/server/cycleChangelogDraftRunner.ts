@@ -15,7 +15,13 @@ export type DraftRunResult =
   /** A person has edited the stored draft; regenerating needs `overwriteEdited`. */
   | { outcome: "skipped_edited" }
   /** Nothing shipped in the cycle, so there is nothing to write about. */
-  | { outcome: "skipped_empty" };
+  | { outcome: "skipped_empty" }
+  /**
+   * A legacy cycle shared by several products: its change log is read one
+   * product at a time, so a single written draft would show every product the
+   * others' tickets. Those cycles keep the raw per-product view.
+   */
+  | { outcome: "skipped_shared" };
 
 export async function draftCycleChangelog(
   db: PrismaClient,
@@ -36,13 +42,14 @@ export async function draftCycleChangelog(
       startDate: true,
       endDate: true,
       cycleGoal: true,
-      changelogDraft: { select: { source: true } },
+      changelogDraft: { select: { source: true, updatedAt: true } },
     },
   });
   if (cycle.changelogDraft?.source === "edited" && !args.overwriteEdited) {
     return { outcome: "skipped_edited" };
   }
   if (!cycle.startDate || !cycle.endDate) return { outcome: "skipped_empty" };
+  if (await isSharedAcrossProducts(db, cycle)) return { outcome: "skipped_shared" };
 
   const window = {
     id: cycle.id,
@@ -84,11 +91,31 @@ export async function draftCycleChangelog(
     generatedAt: new Date(),
     updatedById: args.userId ?? null,
   };
-  await db.cycleChangelogDraft.upsert({
-    where: { cycleId: cycle.id },
-    create: { cycleId: cycle.id, ...data },
-    update: data,
-  });
+  // The model call takes minutes, so the guard above can be stale by now. The
+  // write lands only on the revision this run started from: a draft someone
+  // saved meanwhile is never overwritten. An explicit overwrite covers the
+  // edited revision the person confirmed, not later edits.
+  const prior = cycle.changelogDraft;
+  if (prior) {
+    const { count } = await db.cycleChangelogDraft.updateMany({
+      where: { cycleId: cycle.id, updatedAt: prior.updatedAt },
+      data,
+    });
+    if (count === 0) return { outcome: "skipped_edited" };
+  } else {
+    const { count } = await db.cycleChangelogDraft.createMany({
+      data: [{ cycleId: cycle.id, ...data }],
+      skipDuplicates: true,
+    });
+    // Another run stored a draft first: replace it only if nobody edited it.
+    if (count === 0) {
+      const replaced = await db.cycleChangelogDraft.updateMany({
+        where: { cycleId: cycle.id, source: { not: "edited" } },
+        data,
+      });
+      if (replaced.count === 0) return { outcome: "skipped_edited" };
+    }
+  }
 
   return {
     outcome: "drafted",
@@ -96,6 +123,22 @@ export async function draftCycleChangelog(
     tokensIn: draft.tokensIn,
     tokensOut: draft.tokensOut,
   };
+}
+
+/**
+ * A cycle with no product of its own, in a workspace with more than one
+ * product. With a single product every ticket in the cycle is that product's,
+ * so one draft is right for it.
+ */
+export async function isSharedAcrossProducts(
+  db: PrismaClient,
+  cycle: { productId: string | null; workspaceId: string | null },
+): Promise<boolean> {
+  if (cycle.productId || !cycle.workspaceId) return false;
+  const products = await db.product.count({
+    where: { workspaceId: cycle.workspaceId },
+  });
+  return products > 1;
 }
 
 /** How long after a cycle ends the cron still drafts it. */
@@ -114,8 +157,25 @@ export async function runDueChangelogDrafts(
   db: PrismaClient,
   now: Date,
 ): Promise<{ cycleId: string; outcome: string; error?: string }[]> {
+  // Shared cycles in multi-product workspaces never get a draft. Leave them
+  // out of the query, or they would fill the candidate limit on every sweep
+  // and starve later cycles.
+  const multiProduct = await db.product.groupBy({
+    by: ["workspaceId"],
+    having: { id: { _count: { gt: 1 } } },
+  });
+  const sharedExcluded =
+    multiProduct.length > 0
+      ? {
+          NOT: {
+            productId: null,
+            workspaceId: { in: multiProduct.map((w) => w.workspaceId) },
+          },
+        }
+      : {};
   const due = await db.list.findMany({
     where: {
+      ...sharedExcluded,
       listType: "SPRINT",
       status: { in: ["ACTIVE", "COMPLETED"] },
       endDate: {

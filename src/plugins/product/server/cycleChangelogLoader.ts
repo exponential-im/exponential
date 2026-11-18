@@ -204,6 +204,7 @@ export async function loadWorkspaceChangelog(
       startDate: true,
       endDate: true,
       cycleGoal: true,
+      productId: true,
       changelogDraft: {
         select: {
           version: true,
@@ -232,7 +233,12 @@ export async function loadWorkspaceChangelog(
     products,
     product,
     hasMore,
-    cycles: cycles.map(({ changelogDraft, ...cycle }) => {
+    cycles: cycles.map(({ changelogDraft: storedDraft, productId, ...cycle }) => {
+      // A legacy cycle shared by several products is drafted across all of
+      // them, so its draft would show this product the others' tickets. Those
+      // cycles keep the raw view, which filters to this product.
+      const changelogDraft =
+        productId === null && products.length > 1 ? null : storedDraft;
       const content = changelogDraft
         ? parseDraftContent(changelogDraft.content)
         : null;
