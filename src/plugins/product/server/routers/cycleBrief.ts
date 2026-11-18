@@ -6,6 +6,7 @@ import { TEXT_LIMITS } from "~/lib/text-limits";
 import { getWorkspaceMembership } from "~/server/services/access";
 import { getPublicBrief } from "~/server/services/cycleBriefs/public";
 import { OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
+import { pendingChange } from "~/server/services/cycleBriefs/changes";
 import { assertWorkspaceAccess, type WorkspaceAccessLevel } from "./product";
 
 /**
@@ -203,6 +204,7 @@ export const cycleBriefRouter = createTRPCRouter({
           ? ctx.db.productOwner.count({ where: { productId: cycle.productId, user: { isAgent: false } } })
           : 0,
       ]);
+      const outcomes = (brief?.outcomes ?? []).map((o) => ({ ...o, pendingChange: pendingChange(o) }));
       return {
         /** Legacy workspace-shared cycles get no brief. */
         canHaveBrief: cycle.productId !== null,
@@ -210,7 +212,9 @@ export const cycleBriefRouter = createTRPCRouter({
         /** No Product owner means nobody can sign off (open decision 2): the UI prompts to set one. */
         hasProductOwner: ownerCount > 0,
         cycleGoal: cycle.cycleGoal,
-        brief,
+        brief: brief ? { ...brief, outcomes } : null,
+        /** Something the next sign-off would change on the public brief. */
+        hasPendingChanges: !brief?.planSignedOffAt || outcomes.some((o) => o.pendingChange !== null),
       };
     }),
 
@@ -278,9 +282,37 @@ export const cycleBriefRouter = createTRPCRouter({
     }),
 
   /**
+   * Ask to remove an outcome (or take the request back with `remove: false`).
+   * One that was never public is deleted at once; a public one stays public
+   * until the Product owner signs off the removal (D-0091).
+   */
+  requestRemoveOutcome: protectedProcedure
+    .input(z.object({ outcomeId: z.string(), remove: z.boolean().default(true) }))
+    .mutation(async ({ ctx, input }) => {
+      const outcome = await loadOutcomeWithAccess(ctx.db, ctx.session.user.id, input.outcomeId, "edit");
+      const row = await ctx.db.cycleOutcome.findUniqueOrThrow({
+        where: { id: outcome.id },
+        select: { publicText: true },
+      });
+      if (input.remove && row.publicText === null) {
+        await ctx.db.cycleOutcome.delete({ where: { id: outcome.id } });
+        return { deleted: true };
+      }
+      await ctx.db.cycleOutcome.update({
+        where: { id: outcome.id },
+        data: { removeRequested: input.remove },
+      });
+      return { deleted: false };
+    }),
+
+  /**
    * The Product owner signs off the plan: every outcome's draft becomes its
    * public snapshot, in one transaction. The first sign-off is the consent to
    * publish (open decision 6); nobody is notified (open decision 1).
+   *
+   * After the first sign-off, an outcome that is added or reworded gets
+   * `changedAt` (shown publicly as "changed on"), and a requested removal
+   * takes effect.
    */
   signOff: protectedProcedure
     .input(z.object({ briefId: z.string() }))
@@ -291,9 +323,17 @@ export const cycleBriefRouter = createTRPCRouter({
 
       const outcomes = await ctx.db.cycleOutcome.findMany({
         where: { briefId: brief.id, removedAt: null },
-        select: { id: true, draftText: true, draftWhy: true },
+        select: {
+          id: true,
+          draftText: true,
+          draftWhy: true,
+          publicText: true,
+          publicWhy: true,
+          removeRequested: true,
+          removedAt: true,
+        },
       });
-      if (outcomes.length === 0) {
+      if (outcomes.every((o) => o.removeRequested)) {
         throw new TRPCError({
           code: "BAD_REQUEST",
           message: "Add at least one outcome before signing off",
@@ -301,13 +341,25 @@ export const cycleBriefRouter = createTRPCRouter({
       }
 
       const now = new Date();
+      const isFirstSignOff = brief.planSignedOffAt === null;
       await ctx.db.$transaction([
-        ...outcomes.map((o) =>
-          ctx.db.cycleOutcome.update({
-            where: { id: o.id },
-            data: { publicText: o.draftText, publicWhy: o.draftWhy },
-          }),
-        ),
+        ...outcomes.flatMap((o) => {
+          const change = pendingChange(o);
+          if (o.removeRequested) {
+            return [ctx.db.cycleOutcome.update({ where: { id: o.id }, data: { removedAt: now } })];
+          }
+          if (change === null) return [];
+          return [
+            ctx.db.cycleOutcome.update({
+              where: { id: o.id },
+              data: {
+                publicText: o.draftText,
+                publicWhy: o.draftWhy,
+                ...(isFirstSignOff ? {} : { changedAt: now }),
+              },
+            }),
+          ];
+        }),
         ctx.db.cycleBrief.update({
           where: { id: brief.id },
           data: {

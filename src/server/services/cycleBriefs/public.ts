@@ -19,6 +19,8 @@ export interface PublicCycleOutcome {
   status: OutcomeStatus | null;
   /** When the status was set: the page shows "as of <date>". */
   statusSetAt: Date | null;
+  /** When a sign-off after the first changed this outcome (D-0091). */
+  changedAt: Date | null;
 }
 
 export interface PublicCycleBrief {
@@ -48,6 +50,7 @@ export interface BriefProjectionInput {
     removedAt: Date | null;
     status: string | null;
     statusSetAt: Date | null;
+    changedAt: Date | null;
   }>;
 }
 
@@ -67,6 +70,7 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
         why: o.publicWhy ?? "",
         status,
         statusSetAt: status ? o.statusSetAt : null,
+        changedAt: o.changedAt,
       };
     });
   return {
@@ -90,6 +94,7 @@ const PROJECTION_SELECT = {
       removedAt: true,
       status: true,
       statusSetAt: true,
+      changedAt: true,
     },
   },
 } as const;

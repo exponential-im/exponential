@@ -3,7 +3,6 @@
 import { useState } from "react";
 import Link from "next/link";
 import { Button, Group, Select, Stack, Text, Textarea } from "@mantine/core";
-import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { IconExternalLink, IconPlus } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
@@ -13,6 +12,14 @@ import {
   OUTCOME_STATUS_LABELS,
   isOutcomeStatus,
 } from "~/server/services/cycleBriefs/types";
+
+import { SignOffReviewModal } from "./SignOffReviewModal";
+
+const PENDING_LABEL = {
+  new: "Not public yet",
+  reworded: "Change waits for sign-off",
+  removed: "Removal waits for sign-off",
+} as const;
 
 const STATUS_OPTIONS = OUTCOME_STATUSES.map((value) => ({ value, label: OUTCOME_STATUS_LABELS[value] }));
 
@@ -90,6 +97,7 @@ export function CycleBriefPanel({
   const { data } = api.product.cycleBrief.getForCycle.useQuery({ cycleId });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
+  const [isReviewing, setIsReviewing] = useState(false);
 
   const invalidate = () => utils.product.cycleBrief.getForCycle.invalidate({ cycleId });
   const onError = (err: { message: string }) =>
@@ -104,11 +112,18 @@ export function CycleBriefPanel({
     },
     onError,
   });
-  const signOff = api.product.cycleBrief.signOff.useMutation({ onSuccess: invalidate, onError });
+  const signOff = api.product.cycleBrief.signOff.useMutation({
+    onSuccess: async () => {
+      setIsReviewing(false);
+      await invalidate();
+    },
+    onError,
+  });
+  const requestRemove = api.product.cycleBrief.requestRemoveOutcome.useMutation({ onSuccess: invalidate, onError });
   const setStatus = api.product.cycleBrief.setStatus.useMutation({ onSuccess: invalidate, onError });
 
   if (!data?.canHaveBrief) return null;
-  const { brief, isProductOwner, hasProductOwner, cycleGoal } = data;
+  const { brief, isProductOwner, hasProductOwner, hasPendingChanges, cycleGoal } = data;
   const ownersHref = `/w/${workspaceSlug}/products/${productSlug}/settings?section=owners`;
   const publicHref = `/briefs/${workspaceSlug}/${productSlug}/${cycleSlug}`;
 
@@ -128,21 +143,6 @@ export function CycleBriefPanel({
   }
 
   const isPublic = brief.planSignedOffAt !== null;
-
-  const onSignOff = () => {
-    modals.openConfirmModal({
-      title: isPublic ? "Sign off changes" : "Sign off and publish",
-      children: (
-        <Text size="sm">
-          {isPublic
-            ? "The outcomes as drafted replace what the public brief shows."
-            : "The outcomes as drafted go public on the product's brief page. Nobody is notified."}
-        </Text>
-      ),
-      labels: { confirm: "Sign off", cancel: "Cancel" },
-      onConfirm: () => signOff.mutate({ briefId: brief.id }),
-    });
-  };
 
   return (
     <Panel padding="md">
@@ -197,10 +197,29 @@ export function CycleBriefPanel({
                     Why: {outcome.draftWhy}
                   </Text>
                 </div>
-                <Button size="compact-xs" variant="subtle" onClick={() => setEditingId(outcome.id)}>
-                  Edit
-                </Button>
+                <Group gap={4} wrap="nowrap">
+                  {outcome.pendingChange !== "removed" && (
+                    <Button size="compact-xs" variant="subtle" onClick={() => setEditingId(outcome.id)}>
+                      Edit
+                    </Button>
+                  )}
+                  <Button
+                    size="compact-xs"
+                    variant="subtle"
+                    color={outcome.pendingChange === "removed" ? undefined : "red"}
+                    onClick={() =>
+                      requestRemove.mutate({ outcomeId: outcome.id, remove: outcome.pendingChange !== "removed" })
+                    }
+                  >
+                    {outcome.pendingChange === "removed" ? "Keep" : "Remove"}
+                  </Button>
+                </Group>
               </Group>
+              {outcome.pendingChange && (
+                <Pill tone={outcome.pendingChange === "removed" ? "danger" : "warning"} size="xs" className="mt-2">
+                  {PENDING_LABEL[outcome.pendingChange]}
+                </Pill>
+              )}
               <Group gap="xs" className="mt-2">
                 <Select
                   size="xs"
@@ -259,11 +278,32 @@ export function CycleBriefPanel({
           </Text>
         )}
         {isProductOwner && (
-          <Button size="xs" onClick={onSignOff} loading={signOff.isPending} disabled={brief.outcomes.length === 0}>
-            {isPublic ? "Sign off changes" : "Sign off and publish"}
+          <Button
+            size="xs"
+            onClick={() => setIsReviewing(true)}
+            disabled={brief.outcomes.length === 0 || !hasPendingChanges}
+          >
+            {isPublic ? "Review and sign off changes" : "Review and publish"}
           </Button>
         )}
       </Group>
+
+      <SignOffReviewModal
+        opened={isReviewing}
+        onClose={() => setIsReviewing(false)}
+        isFirstSignOff={!isPublic}
+        isSigningOff={signOff.isPending}
+        onSignOff={() => signOff.mutate({ briefId: brief.id })}
+        rows={brief.outcomes.map((o, i) => ({
+          id: o.id,
+          label: `Outcome ${i + 1}`,
+          draftText: o.draftText,
+          draftWhy: o.draftWhy,
+          publicText: o.publicText,
+          publicWhy: o.publicWhy,
+          pendingChange: isPublic ? o.pendingChange : o.pendingChange === "removed" ? null : "new",
+        }))}
+      />
     </Panel>
   );
 }

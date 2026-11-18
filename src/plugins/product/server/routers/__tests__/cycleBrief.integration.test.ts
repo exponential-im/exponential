@@ -201,3 +201,76 @@ describe("cycleBrief weekly status", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
+
+describe("cycleBrief changes after sign-off", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  async function signedOffBrief() {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    const a = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Old aim", why: "Old why" });
+    const b = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Second aim", why: "Why two" });
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    const readPublic = () =>
+      createUnauthenticatedCaller().product.cycleBrief.publicGet({
+        workspaceSlug: ws.slug,
+        productSlug: product.slug,
+        cycleSlug: cycle.slug,
+      });
+    return { caller, brief, cycle, a, b, readPublic };
+  }
+
+  it("keeps the signed-off wording public until the next sign-off, which stamps the change date", async () => {
+    const { caller, brief, a, readPublic } = await signedOffBrief();
+    const first = await readPublic();
+    expect(first?.brief.outcomes.every((o) => o.changedAt === null)).toBe(true);
+
+    await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, outcomeId: a.id, text: "New aim", why: "Old why" });
+    const pending = await readPublic();
+    expect(pending?.brief.outcomes.map((o) => o.text)).toEqual(["Old aim", "Second aim"]);
+
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    const after = await readPublic();
+    expect(after?.brief.outcomes[0]).toMatchObject({ text: "New aim", changedAt: expect.any(Date) });
+    expect(after?.brief.outcomes[1]?.changedAt).toBeNull();
+  });
+
+  it("shows an added outcome only after sign-off, with its date", async () => {
+    const { caller, brief, readPublic } = await signedOffBrief();
+    await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Third aim", why: "Why three" });
+    expect((await readPublic())?.brief.outcomes).toHaveLength(2);
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    const after = await readPublic();
+    expect(after?.brief.outcomes).toHaveLength(3);
+    expect(after?.brief.outcomes[2]).toMatchObject({ text: "Third aim", changedAt: expect.any(Date) });
+  });
+
+  it("keeps a removed outcome public until the removal is signed off", async () => {
+    const { caller, brief, cycle, b, readPublic } = await signedOffBrief();
+    await caller.product.cycleBrief.requestRemoveOutcome({ outcomeId: b.id });
+    expect((await readPublic())?.brief.outcomes.map((o) => o.text)).toEqual(["Old aim", "Second aim"]);
+
+    const internal = await caller.product.cycleBrief.getForCycle({ cycleId: cycle.id });
+    expect(internal.brief?.outcomes.find((o) => o.id === b.id)?.pendingChange).toBe("removed");
+    expect(internal.hasPendingChanges).toBe(true);
+
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    expect((await readPublic())?.brief.outcomes.map((o) => o.text)).toEqual(["Old aim"]);
+  });
+
+  it("deletes a never-public outcome at once", async () => {
+    const { caller, brief } = await signedOffBrief();
+    const draft = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Idea", why: "Maybe" });
+    expect(await caller.product.cycleBrief.requestRemoveOutcome({ outcomeId: draft.id })).toEqual({ deleted: true });
+    expect(await db.cycleOutcome.findUnique({ where: { id: draft.id } })).toBeNull();
+  });
+});

@@ -56,6 +56,9 @@ export default async function PublicBriefPage({ params }: Params) {
                 <span className="text-text-muted">Why: </span>
                 {outcome.why}
               </p>
+              {outcome.changedAt && (
+                <p className="mt-1 text-xs text-text-muted">Changed on {formatBriefDate(outcome.changedAt)}</p>
+              )}
             </li>
           ))}
         </ol>

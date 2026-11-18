@@ -21,6 +21,7 @@ function row(overrides: Partial<BriefProjectionInput> = {}): BriefProjectionInpu
     removedAt: null,
     status: "at_risk",
     statusSetAt: new Date("2030-03-09T10:00:00Z"),
+    changedAt: null,
     statusSetById: "user_cuid_secret",
     statusSetBy: { name: SECRET_NAME },
     draftText: SECRET_DRAFT,
@@ -49,6 +50,7 @@ describe("projectPublicBrief", () => {
       why: "Their usage decides the next country",
       status: "at_risk",
       statusSetAt: new Date("2030-03-09T10:00:00Z"),
+      changedAt: null,
     });
   });
 
@@ -73,9 +75,9 @@ describe("projectPublicBrief", () => {
     const brief = projectPublicBrief(
       row({
         outcomes: [
-          { position: 0, publicText: null, publicWhy: null, removedAt: null, status: null, statusSetAt: null },
-          { position: 1, publicText: "Gone", publicWhy: "x", removedAt: new Date(), status: null, statusSetAt: null },
-          { position: 2, publicText: "Kept", publicWhy: "y", removedAt: null, status: null, statusSetAt: null },
+          { position: 0, publicText: null, publicWhy: null, removedAt: null, status: null, statusSetAt: null, changedAt: null },
+          { position: 1, publicText: "Gone", publicWhy: "x", removedAt: new Date(), status: null, statusSetAt: null, changedAt: null },
+          { position: 2, publicText: "Kept", publicWhy: "y", removedAt: null, status: null, statusSetAt: null, changedAt: null },
         ],
       }),
     );
@@ -86,10 +88,10 @@ describe("projectPublicBrief", () => {
     const brief = projectPublicBrief(
       row({
         outcomes: [
-          { position: 0, publicText: "A", publicWhy: "b", removedAt: null, status: "derived_from_tickets", statusSetAt: new Date() },
+          { position: 0, publicText: "A", publicWhy: "b", removedAt: null, status: "derived_from_tickets", statusSetAt: new Date(), changedAt: null },
         ],
       }),
     );
-    expect(brief?.outcomes[0]).toMatchObject({ status: null, statusSetAt: null });
+    expect(brief?.outcomes[0]).toMatchObject({ status: null, statusSetAt: null, changedAt: null });
   });
 });
