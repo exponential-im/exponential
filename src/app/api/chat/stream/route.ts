@@ -35,7 +35,7 @@ import {
 } from "~/server/services/ai/providerError";
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
-import { classifyToolError, isReportableToolError, summarizeToolError } from "~/lib/chat/toolErrors";
+import { classifyToolError, isReportableToolError, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
 import { resolveTimeZone, shouldSaveDetectedZone, timeZonePromptBlock } from "~/lib/chat/timeZoneContext";
 import {
   PER_REQUEST_COST_ALERT_USD,
@@ -185,7 +185,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, timezone: rawTimezone } = (await req.json()) as {
+    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, timezone: rawTimezone, pageContextType: rawPageContextType } = (await req.json()) as {
       messages: CoreMessage[];
       agentId?: string;
       assistantId?: string;
@@ -194,7 +194,14 @@ export async function POST(req: Request) {
       conversationId?: string;
       platform?: string;
       timezone?: string;
+      pageContextType?: string;
     };
+    // Recorded on the interaction row for whoever diagnoses the turn later.
+    // A label, never content: anything that is not a short slug is dropped.
+    const pageContextType =
+      typeof rawPageContextType === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(rawPageContextType)
+        ? rawPageContextType
+        : undefined;
 
     // "web-canvas" stamps Zoe canvas turns (ADR-0040) so engagement volume and
     // judged Thread quality compare canvas vs drawer with no new analytics.
@@ -678,14 +685,22 @@ export async function POST(req: Request) {
     // on EVERY call for EVERY user while the agent narrates around it. The
     // daily digest lists those, but nothing asked anyone to fix them: one ran
     // red for six months. File the Bug on first sight instead.
-    const reportToolFault = (toolName: string, unmaskedError: string) => {
+    // Returns what it classified, for the persisted tool call: the kind, and
+    // for a fault that is filed, the line its ticket is fingerprinted from
+    // (a low rating on this turn links to that ticket, see lowRatingAlert).
+    const reportToolFault = (
+      toolName: string,
+      unmaskedError: string,
+    ): { kind: ToolErrorKind; faultSummary?: string } => {
       // Masked here, at the sink, not left to each caller: this text is
       // persisted on a ticket, and error text routinely echoes inputs.
       const rawError = maskTokenLike(unmaskedError);
       const kind = classifyToolError(rawError);
-      if (!isReportableToolError(kind) || reportedToolFaults.has(toolName)) return;
+      if (!isReportableToolError(kind)) return { kind };
+      const faultSummary = summarizeToolError(toolName, rawError);
+      if (reportedToolFaults.has(toolName)) return { kind, faultSummary };
       reportedToolFaults.add(toolName);
-      reportHandledErrorServer(new Error(summarizeToolError(toolName, rawError)), {
+      reportHandledErrorServer(new Error(faultSummary), {
         area: "agent-tool",
         context: {
           tool: toolName,
@@ -694,7 +709,11 @@ export async function POST(req: Request) {
           rawError: rawError.slice(0, 1500),
         },
       });
+      return { kind, faultSummary };
     };
+    // The Mastra run this turn belongs to, read off the first chunk that
+    // carries one. Persisted so the trace view can hand over a logs command.
+    let mastraRunId: string | undefined;
     let hadAgentError = false;
     // The masked top-level agent error, captured for the durable interaction
     // record (the user only ever sees the generic line). Tool errors flow via
@@ -850,6 +869,9 @@ export async function POST(req: Request) {
             await response.processDataStream({
             onChunk: async (chunk) => {
               chunkCount++;
+              // On a tier retry the later run is the one that answered.
+              const chunkRunId = readString(chunk, 'runId');
+              if (chunkRunId && /^[A-Za-z0-9_-]{1,100}$/.test(chunkRunId)) mastraRunId = chunkRunId;
               if (chunk.type === "text-delta") {
                 textChunkCount++;
                 // Sanitize streaming output to redact leaked secrets
@@ -904,6 +926,7 @@ export async function POST(req: Request) {
                   if (logged) {
                     logged.isError = true;
                     if (errorCode) logged.errorCode = maskTokenLike(errorCode).slice(0, 200);
+                    logged.errorKind = isMastraToolFailure ? 'contract' : classifyToolError(errorCode);
                   }
                   if (firstToolErrorMessages.length < 3) {
                     firstToolErrorMessages.push(
@@ -914,7 +937,8 @@ export async function POST(req: Request) {
                   // An output that fails the tool's own schema is a contract
                   // fault by definition: the tool and the app disagree.
                   if (isMastraToolFailure) {
-                    reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
+                    const fault = reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
+                    if (logged && fault.faultSummary) logged.faultSummary = fault.faultSummary;
                   }
                 }
                 toolFrame({ phase: 'result', id, name });
@@ -929,11 +953,13 @@ export async function POST(req: Request) {
                 hadToolError = true;
                 const idx = loggedToolCallIndexById.get(id);
                 const logged = idx !== undefined ? loggedToolCalls[idx] : undefined;
+                const fault = reportToolFault(name, msg);
                 if (logged) {
                   logged.isError = true;
                   logged.errorCode = msg.slice(0, 200);
+                  logged.errorKind = fault.kind;
+                  if (fault.faultSummary) logged.faultSummary = fault.faultSummary;
                 }
-                reportToolFault(name, msg);
                 // Everyone gets the kind (the client turns it into one plain
                 // sentence). The raw text is a tRPC envelope or a zod issue
                 // list: useful to an admin debugging, noise or worse to
@@ -942,7 +968,7 @@ export async function POST(req: Request) {
                   phase: 'error',
                   id,
                   name,
-                  kind: classifyToolError(msg),
+                  kind: fault.kind,
                   ...(session.user.isAdmin ? { msg } : {}),
                 });
               } else if (chunk.type === "error") {
@@ -1233,6 +1259,8 @@ export async function POST(req: Request) {
               model: responseModelId ?? "mastra-agents",
               messageType: "question",
               promptVersion: composePromptVersion(brainVersion),
+              mastraRunId,
+              pageContextType,
             })
             // If the DB write fails AFTER the race below times out, the
             // rejection would otherwise be unhandled. Swallow + log here.
@@ -1334,6 +1362,8 @@ export async function POST(req: Request) {
                   workspaceId: workspaceId ?? undefined,
                   model: responseModelId ?? "mastra-agents",
                   messageType: "question",
+                  mastraRunId,
+                  pageContextType,
                 })
                 .catch((logErr: unknown) => {
                   console.error("Failed to save failed-turn AI history:", logErr);

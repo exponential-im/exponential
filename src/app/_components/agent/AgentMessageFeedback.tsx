@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, memo } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import {
   Rating,
   Text,
@@ -12,6 +12,13 @@ import {
 } from "@mantine/core";
 import { IconCheck, IconChevronDown, IconChevronUp } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
+import { Panel } from "~/app/_components/ui";
+import { MarkdownInput } from "~/app/_components/shared/MarkdownInput";
+import {
+  isLowRating,
+  LOW_RATING_REASONS,
+  type LowRatingReasonId,
+} from "~/lib/feedback/lowRating";
 
 interface AgentMessageFeedbackProps {
   aiInteractionId: string;
@@ -51,6 +58,10 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
   const [improvementSuggestion, setImprovementSuggestion] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [alreadyRated, setAlreadyRated] = useState(false);
+  // A thumbs-down is sent the moment it is tapped, then the person is asked
+  // why. `lowSent` is "the rating has gone, the why-panel is open".
+  const [lowSent, setLowSent] = useState(false);
+  const [reasons, setReasons] = useState<LowRatingReasonId[]>([]);
 
   useEffect(() => {
     setAlreadyRated(getRatedMessages().has(aiInteractionId));
@@ -63,11 +74,59 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
     },
   });
 
+  // The low-rating path: the rating itself, then each reason tap and the
+  // note, all land on the same row (the server keeps one rating per reply).
+  const submitLow = api.feedback.submitAgentFeedback.useMutation({
+    onSuccess: () => markAsRated(aiInteractionId),
+  });
+  // Sent one at a time, in tap order: each call carries the whole current
+  // state, so a later one landing first would be overwritten by an older one.
+  const lowQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [noteFailed, setNoteFailed] = useState(false);
+  const sendLow = (payload: { rating: number; reasons: LowRatingReasonId[]; comment?: string }) => {
+    const sent = lowQueue.current
+      .catch(() => undefined)
+      .then(() => submitLow.mutateAsync({ aiInteractionId, ...payload }));
+    lowQueue.current = sent;
+    return sent;
+  };
+
   const handleRatingChange = (value: number) => {
     setRating(value);
-    // Auto-expand comment for low ratings
-    if (value <= 2) {
-      setShowComment(true);
+    if (isLowRating(value)) {
+      setShowComment(false);
+      setLowSent(true);
+      // A failure here is retried by the next tap, which resends everything.
+      sendLow({ rating: value, reasons }).catch(() => undefined);
+    } else {
+      // A low rating already went out and was a mis-tap: send the correction,
+      // or the record keeps the low one. It updates the same row, and the
+      // ops post is not repeated or withdrawn.
+      if (lowSent) sendLow({ rating: value, reasons }).catch(() => undefined);
+      setLowSent(false);
+    }
+  };
+
+  const toggleReason = (id: LowRatingReasonId) => {
+    const next = reasons.includes(id) ? reasons.filter((r) => r !== id) : [...reasons, id];
+    setReasons(next);
+    sendLow({ rating, reasons: next }).catch(() => undefined);
+  };
+
+  // Thanks only once everything has been saved: the reply is marked as rated
+  // on this device, so a note lost here could not be sent again later.
+  const finishLow = async () => {
+    const note = comment.trim();
+    setIsFinishing(true);
+    setNoteFailed(false);
+    try {
+      await sendLow({ rating, reasons, ...(note ? { comment: note } : {}) });
+      setSubmitted(true);
+    } catch {
+      setNoteFailed(true);
+    } finally {
+      setIsFinishing(false);
     }
   };
 
@@ -118,7 +177,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
           size="sm"
           fractions={1}
         />
-        {rating > 0 && !showComment && (
+        {rating > 0 && !lowSent && !showComment && (
           <>
             <Button
               size="compact-xs"
@@ -139,7 +198,7 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
             </Button>
           </>
         )}
-        {showComment && (
+        {showComment && !lowSent && (
           <Button
             size="compact-xs"
             variant="subtle"
@@ -152,7 +211,44 @@ export const AgentMessageFeedback = memo(function AgentMessageFeedback({
         )}
       </Group>
 
-      <Collapse in={showComment}>
+      <Collapse in={lowSent}>
+        <Panel padding="sm" className="mt-2 space-y-3">
+          <Text size="xs" className="text-text-secondary">
+            Thanks, that is recorded. What went wrong?
+          </Text>
+          <Group gap="xs">
+            {LOW_RATING_REASONS.map((reason) => (
+              <Button
+                key={reason.id}
+                size="compact-xs"
+                variant={reasons.includes(reason.id) ? "filled" : "default"}
+                aria-pressed={reasons.includes(reason.id)}
+                onClick={() => toggleReason(reason.id)}
+              >
+                {reason.label}
+              </Button>
+            ))}
+          </Group>
+          <MarkdownInput
+            placeholder="Anything else? (optional)"
+            value={comment}
+            onChange={(value) => setComment(value.slice(0, 2000))}
+            minRows={2}
+          />
+          <Group justify="flex-end" gap="sm">
+            {noteFailed && (
+              <Text size="xs" className="text-error-text" role="alert">
+                That did not save. Try again.
+              </Text>
+            )}
+            <Button size="xs" variant="subtle" loading={isFinishing} onClick={() => void finishLow()}>
+              Done
+            </Button>
+          </Group>
+        </Panel>
+      </Collapse>
+
+      <Collapse in={showComment && !lowSent}>
         <Paper className="mt-2 space-y-3 border border-border-primary bg-surface-secondary p-3">
           <Textarea
             placeholder="Any comments about this response? (optional)"

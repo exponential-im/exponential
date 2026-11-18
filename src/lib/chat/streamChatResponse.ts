@@ -20,6 +20,8 @@ export interface ChatStreamPayload {
    * zone saved in their profile. Filled in from the browser when omitted.
    */
   timezone?: string;
+  /** `PageContext.pageType` of the page the chat is on; recorded with the turn. */
+  pageContextType?: string;
 }
 
 export interface ChatStreamUpdate extends ParsedChatStream {

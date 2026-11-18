@@ -1322,6 +1322,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
         // no zone saved in their profile, and then saves it.
         timezone: browserTimeZone(),
         platform: "manychat" as const,
+        pageContextType: pageContext?.pageType,
       };
 
       // Debug: always log what we're sending to Mastra
