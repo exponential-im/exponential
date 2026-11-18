@@ -72,6 +72,22 @@
   line-height: 1.5;
 }
 
+/* The page document caps prose tables at the column width; a database scrolls instead. */
+.block .table {
+  max-width: none;
+  margin: 0;
+}
+
+/*
+ * On the published page the table has no inline width (its static HTML
+ * carries no styles). A fixed-layout table is never narrower than its
+ * columns, so the smallest width makes it exactly their sum, as the editor's
+ * inline width does.
+ */
+.block[data-type='public-database'] .table {
+  width: 1px;
+}
+
 .table th {
   height: 34px;
   padding: 0 8px;
@@ -190,6 +206,7 @@
 }
 
 .pillDot {
+  background-color: var(--db-pill);
   flex-shrink: 0;
   width: 8px;
   height: 8px;
@@ -300,8 +317,17 @@
   text-align: left;
 }
 
-/* A select option, Notion-style: a soft rectangle, dark text on a light tint. */
+/*
+ * A select option, Notion-style: a soft rectangle, the palette's light tint
+ * behind text that is mostly the page's own text colour, so the label stays
+ * readable in both themes. The option's stored colour (a Mantine palette
+ * name) arrives as `data-color`; gray, the default, keeps plain text.
+ */
 .pill {
+  --db-pill: var(--mantine-color-gray-filled);
+  --db-pill-tint: var(--mantine-color-gray-light);
+  background-color: var(--db-pill-tint);
+  color: var(--color-text-primary);
   display: inline-block;
   max-width: 100%;
   padding: 0 6px;
@@ -312,6 +338,70 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.pill[data-color='red'] {
+  --db-pill: var(--mantine-color-red-filled);
+  --db-pill-tint: var(--mantine-color-red-light);
+}
+
+.pill[data-color='pink'] {
+  --db-pill: var(--mantine-color-pink-filled);
+  --db-pill-tint: var(--mantine-color-pink-light);
+}
+
+.pill[data-color='grape'] {
+  --db-pill: var(--mantine-color-grape-filled);
+  --db-pill-tint: var(--mantine-color-grape-light);
+}
+
+.pill[data-color='violet'] {
+  --db-pill: var(--mantine-color-violet-filled);
+  --db-pill-tint: var(--mantine-color-violet-light);
+}
+
+.pill[data-color='indigo'] {
+  --db-pill: var(--mantine-color-indigo-filled);
+  --db-pill-tint: var(--mantine-color-indigo-light);
+}
+
+.pill[data-color='blue'] {
+  --db-pill: var(--mantine-color-blue-filled);
+  --db-pill-tint: var(--mantine-color-blue-light);
+}
+
+.pill[data-color='cyan'] {
+  --db-pill: var(--mantine-color-cyan-filled);
+  --db-pill-tint: var(--mantine-color-cyan-light);
+}
+
+.pill[data-color='teal'] {
+  --db-pill: var(--mantine-color-teal-filled);
+  --db-pill-tint: var(--mantine-color-teal-light);
+}
+
+.pill[data-color='green'] {
+  --db-pill: var(--mantine-color-green-filled);
+  --db-pill-tint: var(--mantine-color-green-light);
+}
+
+.pill[data-color='lime'] {
+  --db-pill: var(--mantine-color-lime-filled);
+  --db-pill-tint: var(--mantine-color-lime-light);
+}
+
+.pill[data-color='yellow'] {
+  --db-pill: var(--mantine-color-yellow-filled);
+  --db-pill-tint: var(--mantine-color-yellow-light);
+}
+
+.pill[data-color='orange'] {
+  --db-pill: var(--mantine-color-orange-filled);
+  --db-pill-tint: var(--mantine-color-orange-light);
+}
+
+.pill[data-color]:not([data-color='gray']) {
+  color: color-mix(in srgb, var(--db-pill) 40%, var(--color-text-primary));
 }
 
 .cellEmpty {
@@ -385,6 +475,16 @@
 .loadMore td {
   padding: 0;
   border-bottom: none;
+}
+
+/* A checkbox on the published page, which has no form controls to draw it. */
+.staticCheck {
+  display: block;
+  color: var(--color-text-muted);
+}
+
+.staticCheck[data-checked='true'] {
+  color: var(--color-brand-primary);
 }
 
 /* ── row page property header ── */

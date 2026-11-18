@@ -7,9 +7,15 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
 
 import { computedValue, displayValue, rowValues } from "~/lib/databases/display";
-import { parseProperties, parseView, visibleProperties } from "~/lib/databases/schema";
+import { columnWidth, isStatusColumn } from "~/lib/databases/presentation";
+import { parseProperties, parseView, visibleProperties, type PropertyDef } from "~/lib/databases/schema";
 import { buildPublicPagePath } from "~/lib/pages/public-url";
-import type { PublicDatabaseMap, PublicDatabaseTable } from "~/lib/pages/public-doc";
+import type {
+  PublicDatabaseCell,
+  PublicDatabaseMap,
+  PublicDatabasePill,
+  PublicDatabaseTable,
+} from "~/lib/pages/public-doc";
 import { compileRowQuery, type RowQueryRecord } from "./query";
 import { loadRowRelations } from "./relations";
 import type { RowRelations } from "~/lib/databases/relations";
@@ -114,21 +120,33 @@ export async function publicDatabaseTables(db: Db, pageId: string): Promise<Publ
 
   for (const { database, properties, view, rows } of prepared) {
     const columns = visibleProperties(properties, view);
-    const titleIndex = columns.findIndex((c) => c.id === database.titlePropertyId || c.type === "title");
+    const isTitle = (def: PropertyDef) => def.id === database.titlePropertyId || def.type === "title";
+    const titleIndex = columns.findIndex(isTitle);
     tables.set(database.id, {
       name: database.name,
-      columns: columns.map((c) => c.name),
+      columns: columns.map((def) => ({
+        name: def.name,
+        type: def.type,
+        width: columnWidth(def, view),
+        ...(isStatusColumn(def) ? { status: true } : {}),
+      })),
       ...(titleIndex >= 0 ? { titleIndex } : {}),
       rows: rows.map((row) => {
         const values = rowValues(row.properties);
         return {
-          cells: columns.map((def) =>
-            def.id === database.titlePropertyId || def.type === "title"
-              ? row.title || "Untitled"
-              : def.type === "relation"
-                ? relationTitles(row.relations[def.id])
-                : displayValue(def, computedValue(def, row) ?? values[def.id], { personName }),
-          ),
+          cells: columns.map((def): PublicDatabaseCell => {
+            if (isTitle(def)) return { text: row.title || "Untitled" };
+            if (def.type === "relation") return { text: relationTitles(row.relations[def.id]) };
+            const value = computedValue(def, row) ?? values[def.id];
+            const text = displayValue(def, value, { personName });
+            if (def.type === "select" || def.type === "multiSelect") {
+              const pills = chosenOptions(def, value);
+              return pills.length > 0 ? { text, pills } : { text };
+            }
+            if (def.type === "checkbox") return { text, checked: value === true };
+            if (def.type === "url" && typeof value === "string") return { text, href: value };
+            return { text };
+          }),
           ...(row.publicId
             ? { href: buildPublicPagePath(row.publicSlug ?? "", row.publicId) }
             : {}),
@@ -172,6 +190,15 @@ export async function publicRowHeader(
           : displayValue(def, computedValue(def, page) ?? values[def.id], { personName }),
     })),
   };
+}
+
+/** The options a select or multi-select value names, in its order; ids with no option are skipped. */
+function chosenOptions(def: PropertyDef, value: unknown): PublicDatabasePill[] {
+  const ids = (Array.isArray(value) ? value : [value]).filter((id): id is string => typeof id === "string");
+  return ids.flatMap((id) => {
+    const option = def.options?.find((o) => o.id === id);
+    return option ? [{ label: option.name, color: option.color }] : [];
+  });
 }
 
 /** Relation targets as plain text for the public render — titles, no links. */
