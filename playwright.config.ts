@@ -33,7 +33,12 @@ const SHARED_VIEW_PREFS_SPECS = [
  * Specs that start their own Mastra stub on E2E_MASTRA_STUB_URL. One port, so
  * they run one file at a time.
  */
-const MASTRA_STUB_SPECS = ["agent-run.spec.ts", "billing-usage.spec.ts", "low-rating-trace.spec.ts"];
+const MASTRA_STUB_SPECS = [
+  "agent-run.spec.ts",
+  "billing-usage.spec.ts",
+  "chat-tool-card.spec.ts",
+  "low-rating-trace.spec.ts",
+];
 
 export default defineConfig({
   testDir: "./e2e",
