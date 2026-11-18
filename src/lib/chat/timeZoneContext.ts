@@ -59,7 +59,7 @@ export function timeZonePromptBlock(resolved: ResolvedTimeZone, now: Date): stri
       `- The coming days (UTC): ${upcomingDays(now, 'UTC')}`,
       "- The user's time zone is NOT known: none is saved in their profile and none was detected.",
       '- Do not assume UTC. Before you propose or create anything at a clock time, ask which time zone they are in (a city is enough). Ask once.',
-      `- When they answer, use that zone for the rest of the conversation and offer to save it to their profile (set-my-time-zone, only after they say yes). They can also set it in ${WHERE_TO_CHANGE}.`,
+      `- When they answer, use that zone for the rest of the conversation and offer to save it to their profile with set-my-time-zone, only after they say yes. Without that tool, tell them to set it in ${WHERE_TO_CHANGE}; never claim you saved it.`,
       ...rules,
     ].join('\n');
   }
@@ -77,7 +77,7 @@ export function timeZonePromptBlock(resolved: ResolvedTimeZone, now: Date): stri
     `- ${origin[resolved.source]}`,
     `- Times the user gives are in ${resolved.zone} unless they name another zone.`,
     `- Asked what time zone you have for them, say ${resolved.zone} and where it came from.`,
-    `- If they say they are somewhere else ("I'm in Lisbon this week"), confirm the new zone with them, then save it with set-my-time-zone. Never change it without a yes.`,
+    `- If they say they are somewhere else ("I'm in Lisbon this week"), confirm the new zone with them, then save it with set-my-time-zone. Never change it without a yes. Without that tool, use the new zone for this conversation and tell them to change it in ${WHERE_TO_CHANGE}; never claim you saved it.`,
     ...rules,
   ].join('\n');
 }
