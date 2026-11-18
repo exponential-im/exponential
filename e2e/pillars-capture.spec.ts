@@ -8,7 +8,7 @@
  * those rows afterwards, by literal ids or by the unique URL/name it used.
  * See dev-docs/AGENT_VISUAL_TESTING.md.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect, type Locator } from "@playwright/test";
 import type { PrismaClient } from "@prisma/client";
 import { loadDevEnvOrThrow } from "../scripts/dev-fixture/env";
 import { loadFixture } from "./fixture-data";
@@ -26,6 +26,13 @@ const names = {
   savedHost: "example.com",
   action: `E2E rotate keys ${RUN}`,
 };
+
+/** Tick a Pillar chip unless it is ticked already (capture may pre-tick it). */
+async function tick(placement: Locator, pillar: string) {
+  const chip = placement.getByRole("checkbox", { name: pillar });
+  if (!(await chip.isChecked())) await placement.locator("label", { hasText: pillar }).click();
+  await expect(chip).toBeChecked();
+}
 
 interface Seeded {
   pillarId: string;
@@ -104,7 +111,7 @@ test.describe("Capture with Pillars", () => {
 
     const placement = page.getByLabel("Where this goes");
     await expect(placement).toBeVisible();
-    await placement.locator("label", { hasText: names.pillar }).click();
+    await tick(placement, names.pillar);
     const input = page.getByPlaceholder("Paste a link, text or markdown and press Enter");
     await input.fill(names.savedUrl);
     await page.screenshot({ path: test.info().outputPath("save-link-with-pillar.png"), fullPage: true });
@@ -167,7 +174,7 @@ test.describe("Capture with Pillars", () => {
     await page.keyboard.type(names.action);
     const placement = dialog.getByLabel("Where this goes");
     await expect(placement).toBeVisible();
-    await placement.locator("label", { hasText: names.pillar }).click();
+    await tick(placement, names.pillar);
     // The footer's own project picker gives way to the capture row.
     await expect(dialog.getByPlaceholder("Select a project (optional)")).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath("create-action-with-pillar.png"), fullPage: true });

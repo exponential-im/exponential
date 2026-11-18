@@ -52,6 +52,7 @@ test.describe("Pillar accountability", () => {
         name: names.pillar,
         slug: `e2e-infra-${RUN}`,
         color: "avatar-blue",
+        description: "Backups, monitoring and on-call for production.",
         category: "pillar",
         workspaceId: workspace.id,
         createdById: fixture.userId,
@@ -155,5 +156,26 @@ test.describe("Pillar accountability", () => {
     await page.reload();
     await expect(page.getByRole("heading", { name: names.oldProject })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     await expect(page.getByRole("note", { name: "This project may be a Pillar" })).toHaveCount(0);
+  });
+
+  test("capture pre-ticks a Pillar whose description matches, and respects an untick", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/knowledge-base`);
+    const save = page.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await save.click();
+    const placement = page.getByLabel("Where this goes");
+    const chip = placement.getByRole("checkbox", { name: names.pillar });
+    await expect(chip).not.toBeChecked();
+
+    const input = page.getByPlaceholder("Paste a link, text or markdown and press Enter");
+    await input.fill("Nightly postgres backups failing in production");
+    await expect(chip).toBeChecked();
+    await page.screenshot({ path: test.info().outputPath("suggested-pillar.png"), fullPage: true });
+
+    // Untick it: more matching text does not tick it again.
+    await placement.locator("label", { hasText: names.pillar }).click();
+    await expect(chip).not.toBeChecked();
+    await input.fill("Nightly postgres backups failing in production, monitoring too");
+    await expect(chip).not.toBeChecked();
   });
 });

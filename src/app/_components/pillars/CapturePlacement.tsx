@@ -1,10 +1,12 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { Chip, Group, Select, Text } from "@mantine/core";
 import { api } from "~/trpc/react";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { PillarIcon } from "./PillarIcon";
 import { pillarsAfterProjectChoice, projectsForPillars } from "./captureRules";
+import { suggestPillars } from "~/lib/pillars/suggestPillars";
 
 export interface CapturePlacementValue {
   /** Ticked Pillars. May also hold ordinary labels (a form that keeps both in
@@ -21,6 +23,12 @@ interface CapturePlacementProps {
   onChange: (value: CapturePlacementValue) => void;
   /** Offer the Project step too (default true). */
   withProject?: boolean;
+  /**
+   * What is being captured (a link, a note, an Action's name). Pillars that
+   * match it are ticked for the person, who can untick them; one they untick
+   * is not ticked again.
+   */
+  suggestFrom?: string;
   disabled?: boolean;
 }
 
@@ -36,6 +44,7 @@ export function CapturePlacement({
   onChange,
   withProject = true,
   disabled = false,
+  suggestFrom,
 }: CapturePlacementProps) {
   const { data: pillars = [] } = api.pillar.list.useQuery(
     { workspaceId },
@@ -56,6 +65,18 @@ export function CapturePlacement({
     ...(chosen && !offeredProjects.includes(chosen) ? [chosen] : []),
   ].map((p) => ({ value: p.id, label: p.name }));
 
+  // Suggested Pillars are ticked once; ones the person unticks stay unticked.
+  const declined = useRef(new Set<string>());
+  const suggested = suggestFrom ? suggestPillars(pillars, suggestFrom) : [];
+  const toTick = suggested.filter((id) => !value.tagIds.includes(id) && !declined.current.has(id));
+  const suggestedKey = toTick.join(",");
+  useEffect(() => {
+    if (toTick.length === 0) return;
+    onChange({ ...value, tagIds: [...value.tagIds, ...toTick] });
+    // Re-run only when the set of Pillars to tick changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [suggestedKey]);
+
   if (pillars.length === 0 && (!withProject || projects.length === 0)) return null;
 
   return (
@@ -71,12 +92,13 @@ export function CapturePlacement({
           <Chip.Group
             multiple
             value={tickedPillars}
-            onChange={(ticked) =>
+            onChange={(ticked) => {
+              for (const id of tickedPillars) if (!ticked.includes(id)) declined.current.add(id);
               onChange({
                 ...value,
                 tagIds: [...value.tagIds.filter((id) => !pillarIds.has(id)), ...ticked],
-              })
-            }
+              });
+            }}
           >
             <Group gap={4}>
               {pillars.map((pillar) => (
@@ -87,6 +109,7 @@ export function CapturePlacement({
                   variant="light"
                   color={getTagMantineColor(pillar.color)}
                   disabled={disabled}
+                  title={suggested.includes(pillar.id) ? "Suggested from what you are saving" : undefined}
                 >
                   {pillar.name}
                 </Chip>

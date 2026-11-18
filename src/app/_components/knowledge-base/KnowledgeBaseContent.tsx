@@ -507,6 +507,7 @@ export function KnowledgeBaseContent({ workspaceId, isLoading: externalLoading }
                 workspaceId={workspaceId}
                 value={linkPlacement}
                 onChange={setLinkPlacement}
+                suggestFrom={linkDraft}
                 disabled={saveLinkMutation.isPending}
               />
             </Box>

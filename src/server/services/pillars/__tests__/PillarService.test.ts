@@ -26,6 +26,7 @@ import {
   setPillar,
   setPillarArchived,
   setPillarPositions,
+  suggestPillarsFor,
 } from "../PillarService";
 
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
@@ -194,6 +195,21 @@ describe("setPillarPositions", () => {
     await expect(
       setPillarPositions({ db, userId: USER, tagId: "tag-devops", positionIds: [] }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+describe("suggestPillarsFor", () => {
+  it("matches the workspace's active Pillars against the text, for a member", async () => {
+    db.tag.findMany.mockResolvedValue([
+      { id: "devops", name: "DevOps", description: "Backups and monitoring for production", color: "c", archivedAt: null, positions: [] },
+      { id: "gtm", name: "Go-to-market", description: "Pricing and launches", color: "c", archivedAt: null, positions: [] },
+    ] as never);
+
+    const ids = await suggestPillarsFor({ db, userId: USER, workspaceId: WS, text: "Nightly backups failed in production" });
+
+    expect(membershipMock).toHaveBeenCalledWith(db, USER, WS);
+    expect(db.tag.findMany.mock.calls[0]![0]!.where).toMatchObject({ archivedAt: null });
+    expect(ids).toEqual(["devops"]);
   });
 });
 

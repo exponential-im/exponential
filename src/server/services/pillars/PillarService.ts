@@ -22,6 +22,7 @@ import {
   buildWorkspaceProjectAccessWhere,
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
+import { suggestPillars } from "~/lib/pillars/suggestPillars";
 
 /** Workspace roles that may promote, demote or archive a Pillar. */
 export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
@@ -245,6 +246,26 @@ export async function setPillarPositions({
     }),
   ]);
   return { positionIds: ids };
+}
+
+/**
+ * Pillars to pre-tick for a capture's text, best first (ADR-0085, V3): the
+ * workspace's active Pillars matched by keyword against their names and
+ * descriptions. Suggestions only; nothing is filed.
+ */
+export async function suggestPillarsFor({
+  db,
+  userId,
+  workspaceId,
+  text,
+}: {
+  db: PrismaClient;
+  userId: string;
+  workspaceId: string;
+  text: string;
+}): Promise<string[]> {
+  const pillars = await listPillars({ db, userId, workspaceId });
+  return suggestPillars(pillars, text);
 }
 
 /** Slug rule shared with `tag.create`. */
