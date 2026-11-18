@@ -1,5 +1,6 @@
 import type { JSONContent } from "@tiptap/core";
 
+import { PILL_COLORS, PROPERTY_TYPES, type PillColor, type PropertyType } from "~/lib/databases/schema";
 import { youTubeVideoFromAttrs } from "~/lib/prd/youtube";
 
 /**
@@ -17,7 +18,7 @@ import { youTubeVideoFromAttrs } from "~/lib/prd/youtube";
  *    public URL (live title); an unpublished/unknown target keeps only the
  *    cached title — the page id and internal workspace path are private and
  *    must not leak into public HTML
- *  - `database` nodes (ADR-0078) become static `table` nodes from the
+ *  - `database` nodes (ADR-0078) become `publicDatabase` nodes carrying the
  *    caller-supplied projection; a database not in the map is dropped
  *
  * Pure and isomorphic — unit-testable without a DOM.
@@ -34,9 +35,36 @@ export interface PublicPageLinkTarget {
 
 export type PublicPageLinkMap = ReadonlyMap<string, PublicPageLinkTarget>;
 
-/** One row of a database as the public render shows it: one text per visible column. */
+/** A column of a database on the public render: its name, type (for the header glyph) and width. */
+export interface PublicDatabaseColumn {
+  name: string;
+  type: PropertyType;
+  /** Pixels; the saved width, else the type's default (`columnWidth`). */
+  width: number;
+  /** A single-select named "Status": its pills are rounded and led by a dot. */
+  status?: boolean;
+}
+
+/** A select option as the public render draws it. */
+export interface PublicDatabasePill {
+  label: string;
+  color: PillColor;
+}
+
+/** One cell: its text, plus what lets the render draw it as the editor does. */
+export interface PublicDatabaseCell {
+  text: string;
+  /** `select` / `multiSelect`: the chosen options, drawn as coloured pills. */
+  pills?: PublicDatabasePill[];
+  /** `checkbox`: whether it is ticked. */
+  checked?: boolean;
+  /** `url`: the link, when it is http(s) or mailto. */
+  href?: string;
+}
+
+/** One row of a database as the public render shows it: one cell per visible column. */
 export interface PublicDatabaseRow {
-  cells: string[];
+  cells: PublicDatabaseCell[];
   /** The row page's public path when it is published; the title cell links there. */
   href?: string;
 }
@@ -44,7 +72,7 @@ export interface PublicDatabaseRow {
 /** A database projected for the public render (ADR-0078): visible columns in view order. */
 export interface PublicDatabaseTable {
   name: string;
-  columns: string[];
+  columns: PublicDatabaseColumn[];
   rows: PublicDatabaseRow[];
   /** Which column is the title — the one that links to the row page. Defaults to 0. */
   titleIndex?: number;
@@ -52,38 +80,53 @@ export interface PublicDatabaseTable {
 
 export type PublicDatabaseMap = ReadonlyMap<string, PublicDatabaseTable>;
 
-function textNode(text: string, href?: string): JSONContent[] {
-  if (!text) return [];
-  return [
-    href && href.startsWith("/")
-      ? { type: "text", text, marks: [{ type: "link", attrs: { href } }] }
-      : { type: "text", text },
-  ];
+const KNOWN_PROPERTY_TYPES: ReadonlySet<string> = new Set(PROPERTY_TYPES);
+const KNOWN_PILL_COLORS: ReadonlySet<string> = new Set(PILL_COLORS);
+const MIN_COLUMN_WIDTH = 40;
+const MAX_COLUMN_WIDTH = 1200;
+const FALLBACK_COLUMN_WIDTH = 180;
+
+function safeWidth(width: unknown): number {
+  return typeof width === "number" && Number.isFinite(width)
+    ? Math.round(Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width)))
+    : FALLBACK_COLUMN_WIDTH;
+}
+
+function safeCell(cell: PublicDatabaseCell | undefined): PublicDatabaseCell {
+  const out: PublicDatabaseCell = { text: typeof cell?.text === "string" ? cell.text : "" };
+  const pills = cell?.pills?.filter(
+    (p) => typeof p.label === "string" && KNOWN_PILL_COLORS.has(p.color),
+  );
+  if (pills?.length) out.pills = pills.map((p) => ({ label: p.label, color: p.color }));
+  if (typeof cell?.checked === "boolean") out.checked = cell.checked;
+  if (typeof cell?.href === "string" && SAFE_LINK_HREF.test(cell.href.trim())) out.href = cell.href.trim();
+  return out;
 }
 
 /**
- * A database block as a static Tiptap `table` (the editor's own table node),
- * so the public page needs no renderer of its own: a header row of the
- * visible properties, one row per Row, the title cell linking to the row's
- * public URL when that row is published.
+ * A database block as a `publicDatabase` node: the projection itself, made
+ * safe to emit. The public render draws it like the editor's table
+ * (`PublicDatabaseNode`); its style attributes are built only from what this
+ * keeps — a palette colour name and a clamped number — and its links only
+ * from an app-relative row path or an http(s)/mailto URL.
  */
-export function publicDatabaseTableNode(table: PublicDatabaseTable): JSONContent {
-  const header = {
-    type: "tableRow",
-    content: table.columns.map((name) => ({
-      type: "tableHeader",
-      content: [{ type: "paragraph", content: textNode(name) }],
-    })),
-  };
-  const titleIndex = table.titleIndex ?? 0;
-  const rows = table.rows.map((row) => ({
-    type: "tableRow",
-    content: row.cells.map((cell, index) => ({
-      type: "tableCell",
-      content: [{ type: "paragraph", content: textNode(cell, index === titleIndex ? row.href : undefined) }],
-    })),
+export function publicDatabaseNode(table: PublicDatabaseTable): JSONContent {
+  const columns = table.columns.map((column) => ({
+    name: typeof column.name === "string" ? column.name : "",
+    type: KNOWN_PROPERTY_TYPES.has(column.type) ? column.type : "text",
+    width: safeWidth(column.width),
+    ...(column.status === true ? { status: true } : {}),
   }));
-  return { type: "table", content: [header, ...rows] };
+  const rows = table.rows.map((row) => ({
+    cells: columns.map((_, index) => safeCell(row.cells[index])),
+    ...(typeof row.href === "string" && row.href.startsWith("/") ? { href: row.href } : {}),
+  }));
+  const titleIndex =
+    typeof table.titleIndex === "number" && table.titleIndex >= 0 && table.titleIndex < columns.length
+      ? table.titleIndex
+      : 0;
+  const safe: PublicDatabaseTable = { name: table.name, columns, rows, titleIndex };
+  return { type: "publicDatabase", attrs: { table: safe } };
 }
 
 function isSafeLinkMark(mark: { attrs?: Record<string, unknown> }): boolean {
@@ -102,7 +145,7 @@ function sanitizeNode(
     // so neither its id nor its name reaches the public HTML.
     const databaseId = node.attrs?.databaseId;
     const table = typeof databaseId === "string" ? databases.get(databaseId) : undefined;
-    return table ? publicDatabaseTableNode(table) : null;
+    return table ? publicDatabaseNode(table) : null;
   }
 
   if (node.type === "pageLink") {

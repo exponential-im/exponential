@@ -4,13 +4,14 @@ import type { JSONContent } from "@tiptap/core";
 
 import {
   collectPageLinkIds,
-  publicDatabaseTableNode,
+  publicDatabaseNode,
   remapPageLinkIds,
   sanitizeDocForPublic,
   type PageLinkRewrite,
   type PublicDatabaseTable,
 } from "../public-doc";
 import { buildPrdExtensions } from "~/lib/prd/extensions";
+import { PublicDatabaseNode } from "~/app/_components/databases/publicDatabaseNode";
 
 function doc(content: JSONContent[]): JSONContent {
   return { type: "doc", content };
@@ -195,33 +196,44 @@ describe("sanitizeDocForPublic", () => {
 describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
   const metrics: PublicDatabaseTable = {
     name: "Metrics",
-    columns: ["Name", "Status"],
+    columns: [
+      { name: "Name", type: "title", width: 280 },
+      { name: "Status", type: "select", width: 180, status: true },
+    ],
     rows: [
-      { cells: ["Alert latency", "Tracked"], href: "/p/alert-latency-abcd1234" },
-      { cells: ["Coverage", ""] },
+      {
+        cells: [{ text: "Alert latency" }, { text: "Tracked", pills: [{ label: "Tracked", color: "green" }] }],
+        href: "/p/alert-latency-abcd1234",
+      },
+      { cells: [{ text: "Coverage" }, { text: "" }] },
     ],
   };
   const databaseNode = { type: "database", attrs: { databaseId: "db1", name: "Metrics" } };
+  const render = (content: JSONContent) => generateHTML(content, [...buildPrdExtensions(), PublicDatabaseNode]);
 
-  it("renders a projected database as a static table, the title linking to the published row", () => {
+  it("renders a projected database like the editor's table, the title linking to the published row", () => {
     const out = sanitizeDocForPublic(doc([databaseNode]), undefined, new Map([["db1", metrics]]));
-    const table = out.content?.[0];
-    expect(table?.type).toBe("table");
-    const [header, first, second] = table!.content!;
-    expect(header!.content!.map((c) => c.type)).toEqual(["tableHeader", "tableHeader"]);
-    expect(JSON.stringify(header)).toContain('"text":"Name"');
-    const titleText = first!.content![0]!.content![0]!.content![0]!;
-    expect(titleText.text).toBe("Alert latency");
-    expect(titleText.marks).toEqual([{ type: "link", attrs: { href: "/p/alert-latency-abcd1234" } }]);
-    // An unpublished row's title is plain text; an empty cell is an empty paragraph.
-    const secondTitle = second!.content![0]!.content![0]!.content![0]!;
-    expect(secondTitle.marks).toBeUndefined();
-    expect(second!.content![1]!.content![0]!.content).toEqual([]);
-    // It is the editor's own table node, so the shared extension set renders it.
-    const html = generateHTML(out, buildPrdExtensions());
-    expect(html).toContain("<table");
-    expect(html).toContain('href="/p/alert-latency-abcd1234"');
+    expect(out.content?.[0]?.type).toBe("publicDatabase");
+    const html = render(out);
+    expect(html).toContain('data-type="public-database"');
+    expect(html).toContain("Metrics");
+    expect(html).toContain("2 rows");
+    // Columns keep their widths, so the table scrolls sideways.
+    expect(html).toContain('<th scope="col" width="280">');
+    expect(html).toContain('<th scope="col" width="180">');
+    // A type glyph in each header; the title links to the published row.
+    expect(html.match(/<th[^>]*>\s*<span[^>]*>\s*<svg/g)).toHaveLength(2);
+    expect(html).toContain('<a href="/p/alert-latency-abcd1234">Alert latency</a>');
+    // A Status option is a tinted pill led by a dot.
+    expect(html).toContain('data-variant="status"');
+    expect(html).toContain('data-color="green"');
     expect(html).not.toContain("db1");
+  });
+
+  it("leaves an unpublished row's title as text and an empty cell empty", () => {
+    const html = render(sanitizeDocForPublic(doc([databaseNode]), undefined, new Map([["db1", metrics]])));
+    expect(html).not.toContain('href="/p/coverage');
+    expect(html).toMatch(/Coverage<\/span>[\s\S]*?<\/td>\s*<td[^>]*><\/td>/);
   });
 
   it("drops a database block the caller did not project, leaving no id or name behind", () => {
@@ -231,21 +243,81 @@ describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
   });
 
   it("links the title column wherever the view put it", () => {
-    const node = publicDatabaseTableNode({
+    const node = publicDatabaseNode({
       name: "Metrics",
-      columns: ["Status", "Name"],
+      columns: [
+        { name: "Status", type: "select", width: 180 },
+        { name: "Name", type: "title", width: 280 },
+      ],
       titleIndex: 1,
-      rows: [{ cells: ["", "Alert latency"], href: "/p/alert-latency-abcd1234" }],
+      rows: [{ cells: [{ text: "" }, { text: "Alert latency" }], href: "/p/alert-latency-abcd1234" }],
     });
-    const cells = node.content![1]!.content!;
-    expect(cells[0]!.content![0]!.content).toEqual([]);
-    expect(cells[1]!.content![0]!.content![0]!.marks).toEqual([{ type: "link", attrs: { href: "/p/alert-latency-abcd1234" } }]);
+    const html = render(doc([node]));
+    expect(html).toMatch(/<td[^>]*><\/td>\s*<td[^>]*>\s*<span[^>]*>\s*<svg[\s\S]*?<a href="\/p\/alert-latency-abcd1234">/);
   });
 
-  it("publicDatabaseTableNode refuses a non-relative href on the title", () => {
-    const node = publicDatabaseTableNode({ ...metrics, rows: [{ cells: ["x", "y"], href: "javascript:alert(1)" }] });
-    const titleText = node.content![1]!.content![0]!.content![0]!.content![0]!;
-    expect(titleText.marks).toBeUndefined();
+  it("refuses unsafe links, unknown colours and unbounded widths", () => {
+    const node = publicDatabaseNode({
+      name: "Metrics",
+      columns: [
+        { name: "Name", type: "title", width: 99999 },
+        { name: "Link", type: "url", width: Number.NaN },
+        { name: "Tag", type: "select", width: 10 },
+      ],
+      rows: [
+        {
+          cells: [
+            { text: "x" },
+            { text: "bad", href: "javascript:alert(1)" },
+            { text: "t", pills: [{ label: "t", color: "red\" onmouseover=\"x" as never }] },
+          ],
+          href: "javascript:alert(1)",
+        },
+      ],
+    });
+    const table = node.attrs!.table as PublicDatabaseTable;
+    expect(table.columns.map((c) => c.width)).toEqual([1200, 180, 40]);
+    expect(table.rows[0]!.href).toBeUndefined();
+    expect(table.rows[0]!.cells[1]!.href).toBeUndefined();
+    expect(table.rows[0]!.cells[2]!.pills).toBeUndefined();
+    const html = render(doc([node]));
+    expect(html).not.toContain("javascript:");
+    expect(html).not.toContain("onmouseover");
+  });
+
+  it("escapes names and values", () => {
+    const html = render(
+      doc([
+        publicDatabaseNode({
+          name: "<script>alert(1)</script>",
+          columns: [{ name: "<b>Name</b>", type: "title", width: 280 }],
+          rows: [{ cells: [{ text: "<img src=x onerror=alert(1)>" }] }],
+        }),
+      ]),
+    );
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<b>");
+  });
+
+  it("draws a checkbox as a ticked or empty box", () => {
+    const html = render(
+      doc([
+        publicDatabaseNode({
+          name: "Done",
+          columns: [
+            { name: "Name", type: "title", width: 280 },
+            { name: "Done", type: "checkbox", width: 100 },
+          ],
+          rows: [
+            { cells: [{ text: "a" }, { text: "Yes", checked: true }] },
+            { cells: [{ text: "b" }, { text: "No", checked: false }] },
+          ],
+        }),
+      ]),
+    );
+    expect(html).toContain('aria-label="Checked"');
+    expect(html).toContain('aria-label="Not checked"');
   });
 });
 
