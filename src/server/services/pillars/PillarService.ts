@@ -276,10 +276,21 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     take: CONTAINER_WORK_LIMIT,
   } satisfies Prisma.Project$actionsArgs;
-  // Work that carries the Pillar itself inside a Project or Epic that does not:
-  // listed on its own so it is not lost.
-  const outsideTaggedContainers = {
-    NOT: [{ project: { pillarTags: carriesTag } }, { epic: { tags: carriesTag } }],
+  // The containers the page lists: the same filters as the projects and epics
+  // sections below. Work inside one of them is shown there.
+  const shownProject: Prisma.ProjectWhereInput = {
+    pillarTags: carriesTag,
+    ...(includeCompleted ? {} : { status: "ACTIVE" }),
+  };
+  const shownEpic: Prisma.EpicWhereInput = {
+    tags: carriesTag,
+    ...(includeCompleted ? {} : { status: { notIn: [...CLOSED_EPIC_STATUSES] } }),
+  };
+  // Work that carries the Pillar itself inside a Project or Epic the page does
+  // not list (untagged, or finished while "Show completed" is off): listed on
+  // its own so it is not lost.
+  const outsideShownContainers = {
+    NOT: [{ project: shownProject }, { epic: shownEpic }],
   } satisfies Prisma.ActionWhereInput;
 
   const [
@@ -313,8 +324,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       where: {
         AND: [
           projectAccess,
-          { pillarTags: carriesTag },
-          includeCompleted ? {} : { status: "ACTIVE" },
+          shownProject,
         ],
       },
       select: {
@@ -330,11 +340,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     }),
     // Epics are workspace content: membership (checked above) reads them.
     db.epic.findMany({
-      where: {
-        workspaceId,
-        tags: carriesTag,
-        ...(includeCompleted ? {} : { status: { notIn: [...CLOSED_EPIC_STATUSES] } }),
-      },
+      where: { workspaceId, ...shownEpic },
       select: {
         id: true,
         name: true,
@@ -371,7 +377,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
           actionStatus,
           { tags: carriesTag },
           { OR: [{ projectId: { not: null } }, { epicId: { not: null } }] },
-          outsideTaggedContainers,
+          outsideShownContainers,
         ],
       },
       select: {
@@ -389,7 +395,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
           { product: { workspaceId } },
           { tags: carriesTag },
           { epicId: { not: null } },
-          { NOT: { epic: { tags: carriesTag } } },
+          { NOT: { epic: shownEpic } },
         ],
       },
       select: { ...ticketSelect, epic: { select: { id: true, name: true } } },

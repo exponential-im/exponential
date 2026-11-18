@@ -233,7 +233,7 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
             count={inheritedCount}
           >
             <Text size="xs" className="mb-2 text-text-muted">
-              These carry this Pillar themselves, inside a project or epic that does not.
+              These carry this Pillar themselves, inside a project or epic not listed above.
             </Text>
             <Panel padding="sm">
               <WorkList>

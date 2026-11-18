@@ -232,7 +232,7 @@ describe("getPillarPage", () => {
     expect(page.projects).toEqual([project]);
     const where = db.project.findMany.mock.calls[0]![0]!.where!;
     expect(where).toEqual({
-      AND: [{ projectAccess: true }, { pillarTags: { some: { tagId: "tag-devops" } } }, { status: "ACTIVE" }],
+      AND: [{ projectAccess: true }, { pillarTags: { some: { tagId: "tag-devops" } }, status: "ACTIVE" }],
     });
   });
 
@@ -325,17 +325,43 @@ describe("getPillarPage", () => {
       expect.arrayContaining([
         { tags: carries },
         { OR: [{ projectId: { not: null } }, { epicId: { not: null } }] },
-        { NOT: [{ project: { pillarTags: carries } }, { epic: { tags: carries } }] },
+        {
+          NOT: [
+            { project: { pillarTags: carries, status: "ACTIVE" } },
+            { epic: { tags: carries, status: { notIn: ["DONE", "CANCELLED"] } } },
+          ],
+        },
       ]),
     );
     expect(db.ticket.findMany.mock.calls[1]![0]!.where!.AND).toEqual(
-      expect.arrayContaining([{ epicId: { not: null } }, { NOT: { epic: { tags: carries } } }]),
+      expect.arrayContaining([
+        { epicId: { not: null } },
+        { NOT: { epic: { tags: carries, status: { notIn: ["DONE", "CANCELLED"] } } } },
+      ]),
     );
+  });
+
+  it("keeps open tagged work visible when its tagged container is finished and hidden", async () => {
+    // The exclusion matches only containers the page lists: a DONE epic is not
+    // listed while show completed is off, so its open tagged ticket must land
+    // with the work filed from elsewhere. With the toggle on, the epic lists it.
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    const hiddenOff = db.ticket.findMany.mock.calls[1]![0]!.where!.AND as unknown[];
+    expect(hiddenOff).toContainEqual({
+      NOT: { epic: { tags: { some: { tagId: "tag-devops" } }, status: { notIn: ["DONE", "CANCELLED"] } } },
+    });
+
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops", includeCompleted: true });
+    const shownOn = db.ticket.findMany.mock.calls[3]![0]!.where!.AND as unknown[];
+    expect(shownOn).toContainEqual({ NOT: { epic: { tags: { some: { tagId: "tag-devops" } } } } });
   });
 
   it("hides finished items unless show completed is on", async () => {
     await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
-    expect(db.project.findMany.mock.calls[0]![0]!.where!.AND).toContainEqual({ status: "ACTIVE" });
+    expect(db.project.findMany.mock.calls[0]![0]!.where!.AND).toContainEqual({
+      pillarTags: { some: { tagId: "tag-devops" } },
+      status: "ACTIVE",
+    });
     expect(db.ticket.findMany.mock.calls[0]![0]!.where!.AND).toContainEqual({
       status: { notIn: ["DONE", "DEPLOYED", "ARCHIVED"] },
     });
@@ -343,7 +369,9 @@ describe("getPillarPage", () => {
     await getPillarPage({ db, userId: USER, tagId: "tag-devops", includeCompleted: true });
 
     // The second call of each: project, goal, epic once per page; tickets twice.
-    expect(db.project.findMany.mock.calls[1]![0]!.where!.AND).not.toContainEqual({ status: "ACTIVE" });
+    expect(db.project.findMany.mock.calls[1]![0]!.where!.AND).toContainEqual({
+      pillarTags: { some: { tagId: "tag-devops" } },
+    });
     expect(db.ticket.findMany.mock.calls[2]![0]!.where!.AND).not.toContainEqual({
       status: { notIn: ["DONE", "DEPLOYED", "ARCHIVED"] },
     });
