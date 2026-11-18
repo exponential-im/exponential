@@ -1111,6 +1111,7 @@ a.wsa-feed__avatar {
   --wsa-digest-accent: var(--accent-meetings);
   position: relative;
   overflow: hidden;
+  border: 1px solid var(--color-border-primary);
   border-left: 3px solid var(--wsa-digest-accent);
   background:
     radial-gradient(140% 200% at -6% -30%, var(--color-brand-subtle), transparent 50%),

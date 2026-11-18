@@ -176,9 +176,9 @@ export function OutputsTab({
             <div className="mp-review__head">To review</div>
             {draftActions.length > 0 && (
               <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card" data-testid="outputs-draft-actions">
-                <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card__label mp-card__label--action">
+                <div className="mp-card__label mp-card__label--action">
                   <IconListCheck size={11} /> Draft actions
-                </Panel>
+                </div>
                 <DraftActionsReviewCard transcriptionId={transcriptionSessionId} />
               </Panel>
             )}
@@ -192,9 +192,9 @@ export function OutputsTab({
 
         <div className="mp-threecard">
           <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card">
-            <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card__label mp-card__label--action">
+            <div className="mp-card__label mp-card__label--action">
               <IconListCheck size={11} /> Actions
-            </Panel>
+            </div>
             {isActionsLoading ? (
               <p className="mp-dec__empty">Loading actions…</p>
             ) : actions.length > 0 ? (
@@ -206,9 +206,9 @@ export function OutputsTab({
             )}
           </Panel>
           <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card">
-            <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card__label mp-card__label--decision">
+            <div className="mp-card__label mp-card__label--decision">
               <IconCheck size={11} /> Decisions
-            </Panel>
+            </div>
             {vm.decisions.length > 0 ? (
               <DecisionList items={vm.decisions} />
             ) : (
@@ -219,9 +219,9 @@ export function OutputsTab({
             )}
           </Panel>
           <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card">
-            <Panel as="div" variant="muted" radius="md" padding="none" className="mp-card__label mp-card__label--question">
+            <div className="mp-card__label mp-card__label--question">
               <IconAlertCircle size={11} /> Open questions
-            </Panel>
+            </div>
             {vm.questions.length > 0 ? (
               <DecisionList items={vm.questions} />
             ) : (
