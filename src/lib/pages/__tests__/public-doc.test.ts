@@ -252,7 +252,7 @@ describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
       titleIndex: 1,
       rows: [{ cells: [{ text: "" }, { text: "Alert latency" }], href: "/p/alert-latency-abcd1234" }],
     });
-    const html = render(doc([node]));
+    const html = render(doc([node!]));
     expect(html).toMatch(/<td[^>]*><\/td>\s*<td[^>]*>\s*<span[^>]*>\s*<svg[\s\S]*?<a href="\/p\/alert-latency-abcd1234">/);
   });
 
@@ -275,14 +275,42 @@ describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
         },
       ],
     });
-    const table = node.attrs!.table as PublicDatabaseTable;
+    const table = node!.attrs!.table as PublicDatabaseTable;
     expect(table.columns.map((c) => c.width)).toEqual([1200, 180, 40]);
     expect(table.rows[0]!.href).toBeUndefined();
     expect(table.rows[0]!.cells[1]!.href).toBeUndefined();
     expect(table.rows[0]!.cells[2]!.pills).toBeUndefined();
-    const html = render(doc([node]));
+    const html = render(doc([node!]));
     expect(html).not.toContain("javascript:");
     expect(html).not.toContain("onmouseover");
+  });
+
+  it("drops a publicDatabase node the author put in the doc, and the renderer re-checks any it is handed", () => {
+    const authored = {
+      type: "publicDatabase",
+      attrs: {
+        table: {
+          name: "Forged",
+          columns: [{ name: "Name", type: "title", width: 280 }],
+          rows: [{ cells: [{ text: "click" }], href: "javascript:alert(document.domain)" }],
+        },
+      },
+    };
+    const out = sanitizeDocForPublic(doc([authored, { type: "paragraph", content: [{ type: "text", text: "after" }] }]));
+    expect(out.content?.map((n) => n.type)).toEqual(["paragraph"]);
+    // Even rendered directly, without the sanitizer, the link is refused.
+    const html = render(doc([authored]));
+    expect(html).toContain("click");
+    expect(html).not.toContain("javascript:");
+    // Junk attrs render nothing rather than throwing.
+    expect(() => render(doc([{ type: "publicDatabase", attrs: { table: { columns: "x" } } }]))).not.toThrow();
+  });
+
+  it("refuses protocol-relative row links", () => {
+    for (const href of ["//evil.example/p/x", "/\\evil.example"]) {
+      const node = publicDatabaseNode({ ...metrics, rows: [{ cells: [{ text: "x" }, { text: "" }], href }] });
+      expect((node!.attrs!.table as PublicDatabaseTable).rows[0]!.href).toBeUndefined();
+    }
   });
 
   it("escapes names and values", () => {
@@ -292,7 +320,7 @@ describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
           name: "<script>alert(1)</script>",
           columns: [{ name: "<b>Name</b>", type: "title", width: 280 }],
           rows: [{ cells: [{ text: "<img src=x onerror=alert(1)>" }] }],
-        }),
+        })!,
       ]),
     );
     expect(html).not.toContain("<script>");
@@ -313,7 +341,7 @@ describe("sanitizeDocForPublic — database blocks (ADR-0078)", () => {
             { cells: [{ text: "a" }, { text: "Yes", checked: true }] },
             { cells: [{ text: "b" }, { text: "No", checked: false }] },
           ],
-        }),
+        })!,
       ]),
     );
     expect(html).toContain('aria-label="Checked"');

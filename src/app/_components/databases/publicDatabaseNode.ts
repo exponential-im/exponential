@@ -1,7 +1,12 @@
 import { Node } from "@tiptap/core";
 import type { DOMOutputSpec } from "@tiptap/pm/model";
 
-import type { PublicDatabaseCell, PublicDatabaseColumn, PublicDatabaseTable } from "~/lib/pages/public-doc";
+import {
+  safePublicDatabaseTable,
+  type PublicDatabaseCell,
+  type PublicDatabaseColumn,
+  type PublicDatabaseTable,
+} from "~/lib/pages/public-doc";
 import styles from "./DatabaseBlock.module.css";
 import { FILE_ICON_PATHS, PROPERTY_TYPE_ICON_PATHS, TABLE_ICON_PATHS } from "./propertyIconPaths";
 
@@ -176,7 +181,8 @@ export const PublicDatabaseNode = Node.create({
   },
 
   renderHTML({ node }) {
-    const table = node.attrs.table as PublicDatabaseTable | null;
+    // Re-made safe here too, so the renderer never trusts the node it is handed.
+    const table = safePublicDatabaseTable(node.attrs.table);
     return table ? publicDatabaseSpec(table) : ["div", {}];
   },
 });

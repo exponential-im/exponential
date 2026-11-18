@@ -19,7 +19,8 @@ import { youTubeVideoFromAttrs } from "~/lib/prd/youtube";
  *    cached title — the page id and internal workspace path are private and
  *    must not leak into public HTML
  *  - `database` nodes (ADR-0078) become `publicDatabase` nodes carrying the
- *    caller-supplied projection; a database not in the map is dropped
+ *    caller-supplied projection; a database not in the map is dropped, and
+ *    a `publicDatabase` node already in the doc (authored, not projected) too
  *
  * Pure and isomorphic — unit-testable without a DOM.
  */
@@ -92,41 +93,67 @@ function safeWidth(width: unknown): number {
     : FALLBACK_COLUMN_WIDTH;
 }
 
-function safeCell(cell: PublicDatabaseCell | undefined): PublicDatabaseCell {
-  const out: PublicDatabaseCell = { text: typeof cell?.text === "string" ? cell.text : "" };
-  const pills = cell?.pills?.filter(
-    (p) => typeof p.label === "string" && KNOWN_PILL_COLORS.has(p.color),
+/** An app-relative path (`/p/…`), never a protocol-relative `//host` or `/\\host`. */
+const APP_RELATIVE_PATH = /^\/(?![/\\])/;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function safeCell(cell: unknown): PublicDatabaseCell {
+  if (!isRecord(cell)) return { text: "" };
+  const out: PublicDatabaseCell = { text: typeof cell.text === "string" ? cell.text : "" };
+  const pills = (Array.isArray(cell.pills) ? cell.pills : []).filter(
+    (p): p is PublicDatabasePill =>
+      isRecord(p) && typeof p.label === "string" && typeof p.color === "string" && KNOWN_PILL_COLORS.has(p.color),
   );
-  if (pills?.length) out.pills = pills.map((p) => ({ label: p.label, color: p.color }));
-  if (typeof cell?.checked === "boolean") out.checked = cell.checked;
-  if (typeof cell?.href === "string" && SAFE_LINK_HREF.test(cell.href.trim())) out.href = cell.href.trim();
+  if (pills.length > 0) out.pills = pills.map((p) => ({ label: p.label, color: p.color }));
+  if (typeof cell.checked === "boolean") out.checked = cell.checked;
+  if (typeof cell.href === "string" && SAFE_LINK_HREF.test(cell.href.trim())) out.href = cell.href.trim();
   return out;
 }
 
 /**
- * A database block as a `publicDatabase` node: the projection itself, made
- * safe to emit. The public render draws it like the editor's table
- * (`PublicDatabaseNode`); its style attributes are built only from what this
- * keeps — a palette colour name and a clamped number — and its links only
- * from an app-relative row path or an http(s)/mailto URL.
+ * A database projection made safe to emit, from any input: text stays text,
+ * links are only an app-relative row path or an http(s)/mailto URL, colours
+ * only palette names, widths clamped numbers. `null` when it is not a table.
+ * The sanitizer runs it on the projection, and the renderer runs it again on
+ * whatever node it is handed.
  */
-export function publicDatabaseNode(table: PublicDatabaseTable): JSONContent {
-  const columns = table.columns.map((column) => ({
-    name: typeof column.name === "string" ? column.name : "",
-    type: KNOWN_PROPERTY_TYPES.has(column.type) ? column.type : "text",
-    width: safeWidth(column.width),
-    ...(column.status === true ? { status: true } : {}),
-  }));
-  const rows = table.rows.map((row) => ({
-    cells: columns.map((_, index) => safeCell(row.cells[index])),
-    ...(typeof row.href === "string" && row.href.startsWith("/") ? { href: row.href } : {}),
-  }));
+export function safePublicDatabaseTable(table: unknown): PublicDatabaseTable | null {
+  if (!isRecord(table) || !Array.isArray(table.columns) || !Array.isArray(table.rows)) return null;
+  const columns: PublicDatabaseColumn[] = table.columns.map((column: unknown) => {
+    const c = isRecord(column) ? column : {};
+    return {
+      name: typeof c.name === "string" ? c.name : "",
+      type: typeof c.type === "string" && KNOWN_PROPERTY_TYPES.has(c.type) ? (c.type as PropertyType) : "text",
+      width: safeWidth(c.width),
+      ...(c.status === true ? { status: true } : {}),
+    };
+  });
+  const rows: PublicDatabaseRow[] = table.rows.map((row: unknown) => {
+    const r = isRecord(row) ? row : {};
+    const cells: unknown[] = Array.isArray(r.cells) ? r.cells : [];
+    return {
+      cells: columns.map((_, index) => safeCell(cells[index])),
+      ...(typeof r.href === "string" && APP_RELATIVE_PATH.test(r.href) ? { href: r.href } : {}),
+    };
+  });
   const titleIndex =
-    typeof table.titleIndex === "number" && table.titleIndex >= 0 && table.titleIndex < columns.length
+    typeof table.titleIndex === "number" && Number.isInteger(table.titleIndex) && table.titleIndex >= 0 && table.titleIndex < columns.length
       ? table.titleIndex
       : 0;
-  const safe: PublicDatabaseTable = { name: table.name, columns, rows, titleIndex };
-  return { type: "publicDatabase", attrs: { table: safe } };
+  return { name: typeof table.name === "string" ? table.name : "", columns, rows, titleIndex };
+}
+
+/**
+ * A database block as a `publicDatabase` node: the projection itself, made
+ * safe to emit (`safePublicDatabaseTable`). The public render draws it like
+ * the editor's table (`PublicDatabaseNode`).
+ */
+export function publicDatabaseNode(table: PublicDatabaseTable): JSONContent | null {
+  const safe = safePublicDatabaseTable(table);
+  return safe ? { type: "publicDatabase", attrs: { table: safe } } : null;
 }
 
 function isSafeLinkMark(mark: { attrs?: Record<string, unknown> }): boolean {
@@ -139,6 +166,10 @@ function sanitizeNode(
   pageLinks: PublicPageLinkMap,
   databases: PublicDatabaseMap,
 ): JSONContent | null {
+  // Only the sanitizer makes these, from the trusted projection below; one
+  // already in the stored doc was authored, so it is dropped unread.
+  if (node.type === "publicDatabase") return null;
+
   if (node.type === "database") {
     // A database the caller projected becomes a static table; one it did not
     // (deleted, or the caller chose not to publish it) is left out entirely,
