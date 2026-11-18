@@ -1,6 +1,7 @@
 import type { PrismaClient } from "@prisma/client";
 import { NOTIFICATION_CATEGORIES } from "./constants";
 import { buildMentionContent } from "./mention";
+import { ticketUrlId } from "~/lib/fun-ids";
 import { buildPageEditorPath } from "~/lib/pages/page-path";
 import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 import { toChatMarkdown } from "~/server/services/workspaceUpdates/render";
@@ -39,8 +40,83 @@ async function resolveActionWorkspace(
  * one meeting (the recipient id follows). Exported so resolving the drafts
  * can find and settle that notification.
  */
+
+/**
+ * A Summary's dedupe key: one per (kind, period), combined with the user by the
+ * (dedupeKey, userId) unique index. Exported so the summaries cron's
+ * shutdown-recap sent check looks up exactly the key the emit writes.
+ */
+export function summaryDedupeKey(kind: string, periodKey: string): string {
+  return `summary:${kind}:${periodKey}`;
+}
+
+/**
+ * A Due-date reminder's dedupe key: one per (action, offset), combined with the
+ * owner by the (dedupeKey, userId) unique index. Exported so the cron can skip
+ * already-sent reminders in one query before emitting.
+ */
+export function dueDateDedupeKey(subject: { actionId: string; offsetMinutes: number }): string {
+  return `due_date:${subject.actionId}:${subject.offsetMinutes}`;
+}
+
 export function draftDecisionsDedupePrefix(sessionId: string): string {
   return `meeting_ready:decisions:${sessionId}:`;
+}
+
+/**
+ * Content for a ticket assignment. Same category, title shape and channels as
+ * an action assignment; the deep link opens the ticket in its product.
+ */
+async function buildTicketAssignmentContent(
+  db: PrismaClient,
+  ticketId: string,
+  actorUserId: string | null,
+  recipientId: string,
+): Promise<NotificationContent | null> {
+  const [ticket, actor] = await Promise.all([
+    db.ticket.findUnique({
+      where: { id: ticketId },
+      select: {
+        id: true,
+        number: true,
+        title: true,
+        product: {
+          select: {
+            slug: true,
+            workspace: { select: { id: true, slug: true, name: true } },
+          },
+        },
+      },
+    }),
+    actorUserId
+      ? db.user.findUnique({
+          where: { id: actorUserId },
+          select: { name: true, email: true },
+        })
+      : Promise.resolve(null),
+  ]);
+  if (!ticket) return null;
+
+  const ws = ticket.product.workspace;
+  const assignerName = actor?.name ?? actor?.email ?? "Someone";
+
+  return {
+    category: NOTIFICATION_CATEGORIES.ASSIGNMENT,
+    title: `${assignerName} assigned you a ticket`,
+    message: ticket.number > 0 ? `#${ticket.number} ${ticket.title}` : ticket.title,
+    deeplink: `/w/${ws.slug}/products/${ticket.product.slug}/tickets/${ticketUrlId(ticket)}`,
+    metadata: {
+      ticketId,
+      workspaceId: ws.id,
+      workspaceSlug: ws.slug,
+      workspaceName: ws.name,
+      assignerName,
+    },
+    workspaceId: ws.id,
+    // Per (ticket, recipient), as for actions: being handed the same ticket a
+    // second time does not notify again.
+    dedupeKey: `assignment:ticket:${ticketId}:${recipientId}`,
+  };
 }
 
 export async function buildContent(
@@ -51,6 +127,14 @@ export async function buildContent(
 
   switch (input.category) {
     case NOTIFICATION_CATEGORIES.ASSIGNMENT: {
+      if (input.subject.ticketId !== undefined) {
+        return buildTicketAssignmentContent(
+          db,
+          input.subject.ticketId,
+          input.actorUserId,
+          recipientId,
+        );
+      }
       const { actionId } = input.subject;
 
       const [action, actor, ws] = await Promise.all([
@@ -207,7 +291,7 @@ export async function buildContent(
         workspaceId,
         // Per (action, offset); combined with the recipient (owner) via the
         // unique (dedupeKey, userId) index → one reminder per action/offset/owner.
-        dedupeKey: `due_date:${actionId}:${offsetMinutes}`,
+        dedupeKey: dueDateDedupeKey({ actionId, offsetMinutes }),
       };
     }
     case NOTIFICATION_CATEGORIES.SUMMARY: {
@@ -228,7 +312,7 @@ export async function buildContent(
           ...(agentContext ? { agentContext } : {}),
         },
         workspaceId: "",
-        dedupeKey: `summary:${input.subject.kind}:${input.subject.periodKey}`,
+        dedupeKey: summaryDedupeKey(input.subject.kind, input.subject.periodKey),
       };
     }
     case NOTIFICATION_CATEGORIES.PAGE_SHARED: {
@@ -434,6 +518,31 @@ export async function buildContent(
         dedupeKey: isDraftVariant
           ? `${draftDecisionsDedupePrefix(sessionId)}${recipientId}`
           : `meeting_ready:${sessionId}:${recipientId}`,
+      };
+    }
+    case NOTIFICATION_CATEGORIES.BILLING: {
+      const { workspaceId, keyLast4, occurredAt } = input.subject;
+      const workspace = await db.workspace.findUnique({
+        where: { id: workspaceId },
+        select: { slug: true, name: true },
+      });
+      if (!workspace) return null;
+      return {
+        category: NOTIFICATION_CATEGORIES.BILLING,
+        title: `The Anthropic key for ${workspace.name} stopped working`,
+        message:
+          `Anthropic is no longer accepting the key ending in ${keyLast4}. ` +
+          `The Assistant in ${workspace.name} is back on the monthly allowance until you replace the key.`,
+        deeplink: `/w/${workspace.slug}/settings?section=billing`,
+        metadata: {
+          event: input.subject.event,
+          keyLast4,
+          workspaceId,
+          workspaceSlug: workspace.slug,
+          workspaceName: workspace.name,
+        },
+        workspaceId,
+        dedupeKey: `billing:${input.subject.event}:${workspaceId}:${occurredAt.toISOString()}:${recipientId}`,
       };
     }
     case NOTIFICATION_CATEGORIES.MENTION:

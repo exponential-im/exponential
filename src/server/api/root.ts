@@ -53,6 +53,7 @@ import { habitRouter } from "./routers/habit";
 import { workspaceRouter } from "./routers/workspace";
 import { personRouter } from "./routers/person";
 import { externalAgentRouter } from "./routers/externalAgent";
+import { oauthConnectionRouter } from "./routers/oauthConnection";
 import { positionRouter } from "./routers/position";
 import { resourceRouter } from "./routers/resource";
 import { knowledgeChunkRouter } from "./routers/knowledgeChunk";
@@ -81,6 +82,7 @@ import { workflowPipelineRouter } from "./routers/workflowPipeline";
 import { pipelineRouter } from "./routers/pipeline";
 import { contentRouter } from "./routers/content";
 import { sprintAnalyticsRouter } from "./routers/sprintAnalytics";
+import { githubIdentityRouter } from "./routers/githubIdentity";
 import { briefingRouter } from "./routers/briefing";
 import { pmSchedulerRouter } from "./routers/pmScheduler";
 import { bugReportRouter } from "./routers/bugReport";
@@ -148,6 +150,7 @@ export const appRouter = createTRPCRouter({
   matrixServer: matrixServerRouter,
   matrixRoom: matrixRoomRouter,
   externalAgent: externalAgentRouter,
+  oauthConnection: oauthConnectionRouter,
   position: positionRouter,
   notification: notificationRouter,
   inbox: inboxRouter,
@@ -192,6 +195,7 @@ export const appRouter = createTRPCRouter({
   content: contentRouter,
   pipeline: pipelineRouter,
   sprintAnalytics: sprintAnalyticsRouter,
+  githubIdentity: githubIdentityRouter,
   briefing: briefingRouter,
   pmScheduler: pmSchedulerRouter,
   bugReport: bugReportRouter,

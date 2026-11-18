@@ -2,8 +2,8 @@
 
 import { useMemo, useState } from "react";
 import { MultiSelect, Select, UnstyledButton } from "@mantine/core";
-import { pillTint } from "~/app/_components/listPage/pillTint";
 import type { PropertyDef, SelectOption } from "~/lib/databases/schema";
+import { isStatusColumn } from "~/lib/databases/presentation";
 import styles from "../DatabaseBlock.module.css";
 
 const CREATE_PREFIX = "__create__:";
@@ -21,9 +21,19 @@ interface SelectCellProps {
   onCreateOption?: (name: string) => Promise<string | null>;
 }
 
-function Pill({ option }: { option: SelectOption }) {
+export { isStatusColumn };
+
+function Pill({ option, status }: { option: SelectOption; status: boolean }) {
   return (
-    <span className={styles.pill} style={pillTint(option.color)}>
+    <span
+      className={styles.pill}
+      data-variant={status ? "status" : undefined}
+      data-color={option.color}
+      title={option.name}
+    >
+      {status ? (
+        <span className={styles.pillDot} aria-hidden />
+      ) : null}
       {option.name}
     </span>
   );
@@ -78,7 +88,7 @@ export function SelectCell({ def, value, editable, onCommit, onCreateOption }: S
         {selected.length === 0 ? (
           <span className={styles.cellEmpty}>—</span>
         ) : (
-          selected.map((o) => <Pill key={o.id} option={o} />)
+          selected.map((o) => <Pill key={o.id} option={o} status={isStatusColumn(def)} />)
         )}
       </UnstyledButton>
     );

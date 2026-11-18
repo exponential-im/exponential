@@ -8,6 +8,7 @@ import { okrReviewSection } from "./okr_review";
 import { blockersSection } from "./blockers";
 import { carriedOverSection } from "./carried_over";
 import { cycleProgressSection } from "./cycle_progress";
+import { cycleBriefSection } from "./cycle_brief";
 import { retroActionsSection } from "./retro_actions";
 import { freeTextSection } from "./free_text";
 import { decisionsPendingSection } from "./decisions_pending";
@@ -30,6 +31,7 @@ const MODULES: SectionModule[] = [
   blockersSection,
   carriedOverSection,
   cycleProgressSection,
+  cycleBriefSection,
   retroActionsSection,
   freeTextSection,
   decisionsPendingSection,

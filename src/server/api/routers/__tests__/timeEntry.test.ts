@@ -827,3 +827,224 @@ describe("action.upsertBySource", () => {
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
   });
 });
+
+describe("timeEntry.start on a Ticket (the plugin's \"What's this for?\" picker)", () => {
+  const TICKET_ID = "ticket-1";
+  let db: DeepMockProxy<PrismaClient>;
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    vi.mocked(recordActivity).mockClear();
+    withTransaction(db);
+    db.timeEntry.findFirst.mockResolvedValue(null); // no running timer
+    db.timeEntry.create.mockResolvedValue(
+      entryRow({ source: "plugin", status: "CONFIRMED", endedAt: null, createdByAgentId: null }) as never,
+    );
+  });
+
+  function arrangeTicket() {
+    // findTimerTicket (router access) …
+    db.ticket.findFirst.mockResolvedValue({ id: TICKET_ID } as never);
+    // … then the service's own read for title + workspace.
+    db.ticket.findUnique.mockResolvedValue({
+      id: TICKET_ID,
+      title: "Timer can start on a Ticket",
+      product: { workspaceId: WS_ID },
+    } as never);
+  }
+
+  it("first Play creates the person's timer Action on the Ticket, named after it; the typed text is the note", async () => {
+    arrangeTicket();
+    db.action.findFirst.mockResolvedValue(null);
+    db.action.create.mockResolvedValue({ id: ACTION_ID, workspaceId: WS_ID } as never);
+
+    await humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, typedTitle: "  wiring the picker  " });
+
+    // The find-then-create is serialised per (person, ticket).
+    const lockSql = (db.$executeRaw.mock.calls[0]![0] as unknown as string[]).join("?");
+    expect(lockSql).toContain("pg_advisory_xact_lock");
+    expect(db.$executeRaw.mock.calls[0]![1]).toBe(`timer-ticket-action:${OWNER_ID}:${TICKET_ID}`);
+    expect(db.action.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { ticketId: TICKET_ID, createdById: OWNER_ID, source: "plugin", status: "ACTIVE" },
+      }),
+    );
+    expect(db.action.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          name: "Timer can start on a Ticket",
+          ticketId: TICKET_ID,
+          workspaceId: WS_ID,
+          createdById: OWNER_ID,
+          source: "plugin",
+        }),
+      }),
+    );
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          actionId: ACTION_ID,
+          workspaceId: WS_ID,
+          source: "plugin",
+          note: "wiring the picker",
+        }),
+      }),
+    );
+  });
+
+  it("a later Play reuses that Action instead of adding another row to the Ticket", async () => {
+    arrangeTicket();
+    db.action.findFirst.mockResolvedValue({ id: "action-existing", workspaceId: WS_ID } as never);
+
+    await humanCaller(db).timeEntry.start({ ticketId: TICKET_ID });
+
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ actionId: "action-existing", note: null }),
+      }),
+    );
+  });
+
+  it("a ticket the caller can't reach is NOT_FOUND, and nothing is written", async () => {
+    db.ticket.findFirst.mockResolvedValue(null);
+
+    await expect(humanCaller(db).timeEntry.start({ ticketId: TICKET_ID })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    // Access is scoped through workspace membership via the ticket's product.
+    expect(db.ticket.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          AND: [
+            { id: TICKET_ID },
+            { product: { workspace: { is: expect.objectContaining({ OR: expect.any(Array) }) } } },
+          ],
+        },
+      }),
+    );
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("a workspace viewer can see the ticket but not log time on it: FORBIDDEN, nothing written", async () => {
+    // Visible through membership, but no write role (the write where names roles).
+    db.ticket.findFirst.mockImplementation((async (args: { where: unknown }) =>
+      JSON.stringify(args.where).includes('"role"') ? null : { id: TICKET_ID }) as never);
+
+    await expect(humanCaller(db).timeEntry.start({ ticketId: TICKET_ID })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+    expect(db.action.create).not.toHaveBeenCalled();
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("ticketId with actionId or projectId is BAD_REQUEST", async () => {
+    await expect(
+      humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, actionId: ACTION_ID }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    await expect(
+      humanCaller(db).timeEntry.start({ ticketId: TICKET_ID, projectId: "project-1" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+
+  it("without ticketId the typed-title path is unchanged: a new Action, no note", async () => {
+    db.action.create.mockResolvedValue({ id: ACTION_ID, workspaceId: WS_ID } as never);
+    db.workspaceUser.findUnique.mockResolvedValue({ role: "member" } as never);
+
+    await humanCaller(db).timeEntry.start({ typedTitle: "Inbox zero", workspaceId: WS_ID });
+
+    expect(db.action.findFirst).not.toHaveBeenCalled();
+    const data = (db.timeEntry.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty("note");
+  });
+});
+
+describe("timeEntry ticket / feature / cycle summaries (crisp.dove)", () => {
+  let db: DeepMockProxy<PrismaClient>;
+  const ALICE = { id: "u-alice", name: "Alice", image: null };
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    db.timeEntry.findMany.mockResolvedValue([
+      {
+        userId: ALICE.id,
+        startedAt: new Date("2026-11-10T09:00:00Z"),
+        endedAt: new Date("2026-11-10T10:30:00Z"),
+        source: "plugin",
+        status: "CONFIRMED",
+        user: ALICE,
+      },
+    ] as never);
+  });
+
+  const whereOfFindMany = () =>
+    (db.timeEntry.findMany.mock.calls[0]![0] as { where: Record<string, unknown> }).where;
+
+  it("ticketSummary sums the entries on the ticket's Actions", async () => {
+    db.ticket.findFirst.mockResolvedValue({ id: "t1" } as never);
+
+    const report = await humanCaller(db).timeEntry.ticketSummary({ ticketId: "t1" });
+
+    expect(report).toMatchObject({ confirmedMinutes: 90, people: [expect.objectContaining({ name: "Alice" })] });
+    expect(whereOfFindMany()).toEqual({ action: { ticketId: "t1" } });
+    // Read access: workspace membership via the ticket's product.
+    expect(JSON.stringify(db.ticket.findFirst.mock.calls[0]![0]!.where)).toContain('"workspace":{"is"');
+  });
+
+  it("featureSummary sums over the feature's tickets", async () => {
+    db.feature.findFirst.mockResolvedValue({ id: "f1" } as never);
+
+    await humanCaller(db).timeEntry.featureSummary({ featureId: "f1" });
+
+    expect(whereOfFindMany()).toEqual({ action: { ticket: { is: { featureId: "f1" } } } });
+  });
+
+  it("cycleSummary counts time that started inside the window on the cycle's product, not by ticket.cycleId", async () => {
+    const start = new Date("2026-11-09T00:00:00Z");
+    const end = new Date("2026-11-23T00:00:00Z");
+    db.list.findFirst.mockResolvedValue({ productId: "prod-1", workspaceId: WS_ID, startDate: start, endDate: end } as never);
+
+    await humanCaller(db).timeEntry.cycleSummary({ cycleId: "c1" });
+
+    expect(whereOfFindMany()).toEqual({
+      startedAt: { gte: start, lt: end },
+      action: { ticket: { is: { productId: "prod-1" } } },
+    });
+    expect(JSON.stringify(whereOfFindMany())).not.toContain("cycleId");
+    expect(JSON.stringify(db.list.findFirst.mock.calls[0]![0]!.where)).toContain('"listType":"SPRINT"');
+  });
+
+  it("a legacy workspace-shared cycle spans every product in the workspace", async () => {
+    const start = new Date("2026-11-09T00:00:00Z");
+    const end = new Date("2026-11-23T00:00:00Z");
+    db.list.findFirst.mockResolvedValue({ productId: null, workspaceId: WS_ID, startDate: start, endDate: end } as never);
+
+    await humanCaller(db).timeEntry.cycleSummary({ cycleId: "c1" });
+
+    expect(whereOfFindMany()).toMatchObject({ action: { ticket: { is: { product: { workspaceId: WS_ID } } } } });
+  });
+
+  it("a cycle without dates has no window: an empty report, no query", async () => {
+    db.list.findFirst.mockResolvedValue({ productId: "prod-1", workspaceId: WS_ID, startDate: null, endDate: null } as never);
+
+    const report = await humanCaller(db).timeEntry.cycleSummary({ cycleId: "c1" });
+
+    expect(report).toMatchObject({ confirmedMinutes: 0, people: [] });
+    expect(db.timeEntry.findMany).not.toHaveBeenCalled();
+  });
+
+  it("anything out of reach is NOT_FOUND and reads no time", async () => {
+    db.ticket.findFirst.mockResolvedValue(null);
+    db.feature.findFirst.mockResolvedValue(null);
+    db.list.findFirst.mockResolvedValue(null);
+
+    await expect(humanCaller(db).timeEntry.ticketSummary({ ticketId: "t1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(humanCaller(db).timeEntry.featureSummary({ featureId: "f1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(humanCaller(db).timeEntry.cycleSummary({ cycleId: "c1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(db.timeEntry.findMany).not.toHaveBeenCalled();
+  });
+});

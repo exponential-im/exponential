@@ -2,16 +2,21 @@
  * Workspace member ↔ GitHub login mapping.
  *
  * `GitHubActivity` records authors as GitHub logins (`prAuthor`,
- * `commitAuthor`), never as Exponential users. Two links between the two are
- * trusted, in this order:
- *  1. `account` — the `githubUsername` in the `github_metadata` credential on
+ * `commitAuthor`), never as Exponential users. Three links between the two
+ * are trusted, in this order:
+ *  1. `claim` — the user's **GitHub identity claim** (`User.githubLogin`): the
+ *     login GitHub returned when they linked their account from Settings →
+ *     Profile (see `identityClaim.ts`). Install-wide, and at most one user
+ *     holds a given login.
+ *  2. `account` — the `githubUsername` in the `github_metadata` credential on
  *     a member's OWN GitHub integration (verified by GitHub sign-in).
- *  2. `workspace` — a username a workspace owner/admin set for the member: an
+ *  3. `workspace` — a username a workspace owner/admin set for the member: an
  *     `IntegrationUserMapping` on the workspace's GitHub App installation, the
  *     same pairing the activity feed attributes events with. Scoped to that
  *     workspace only, because nobody verified it.
- * A member with neither has no login, and their PRs/commits stay unattributed
- * rather than guessed.
+ * A verified login belongs to its owner: a weaker link naming a login someone
+ * else holds more strongly is ignored. A member with none has no login, and
+ * their PRs/commits stay unattributed rather than guessed.
  */
 import type { PrismaClient } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
@@ -34,7 +39,7 @@ export function parseGithubUsername(raw: string | null | undefined): string | nu
   }
 }
 
-export type GithubLoginSource = "account" | "workspace";
+export type GithubLoginSource = "claim" | "account" | "workspace";
 
 export interface GithubIdentity {
   login: string;
@@ -48,7 +53,7 @@ export interface GithubIdentity {
  * updated wins.
  */
 export async function resolveGithubIdentities(
-  db: Pick<PrismaClient, "integration" | "integrationUserMapping">,
+  db: Pick<PrismaClient, "integration" | "integrationUserMapping" | "user">,
   workspaceId: string,
   userIds: string[],
 ): Promise<Map<string, GithubIdentity>> {
@@ -70,19 +75,55 @@ export async function resolveGithubIdentities(
     }),
   ]);
 
+  // The requested users' claims, plus whoever claimed any login the weaker
+  // links name, so a claim held by someone not asked about still wins.
+  const candidateLogins = [
+    ...new Set([...accounts.map((a) => a.login), ...mappings.map((m) => m.externalUserId)]),
+  ];
+  const claims = await db.user.findMany({
+    where: {
+      githubLogin: { not: null },
+      OR: [
+        { id: { in: userIds } },
+        ...candidateLogins.map((login) => ({
+          githubLogin: { equals: login, mode: "insensitive" as const },
+        })),
+      ],
+    },
+    select: { id: true, githubLogin: true },
+  });
+  const claimOwner = new Map<string, string>();
+  for (const { id, githubLogin } of claims) {
+    if (githubLogin) claimOwner.set(githubLogin.toLowerCase(), id);
+  }
+  const heldByOther = (login: string, userId: string) => {
+    const owner = claimOwner.get(login.toLowerCase());
+    return owner !== undefined && owner !== userId;
+  };
+
   const requested = new Set(userIds);
-  for (const { userId, login } of accounts) {
-    if (requested.has(userId) && !identities.has(userId)) {
-      identities.set(userId, { login, source: "account" });
+  for (const { id, githubLogin } of claims) {
+    if (requested.has(id) && githubLogin) {
+      identities.set(id, { login: githubLogin, source: "claim" });
     }
   }
+  for (const { userId, login } of accounts) {
+    if (!requested.has(userId) || identities.has(userId)) continue;
+    if (heldByOther(login, userId)) continue;
+    identities.set(userId, { login, source: "account" });
+  }
   // A connected account's login belongs to its owner: a workspace-set
-  // username that collides with one is ignored rather than allowed to take
-  // over that person's PRs and commits.
-  const accountLogins = new Set(accounts.map(({ login }) => login.toLowerCase()));
+  // username that collides with one (or with a claim) is ignored rather than
+  // allowed to take over that person's PRs and commits.
+  const accountLogins = new Set(
+    accounts
+      .filter(({ userId, login }) => !heldByOther(login, userId))
+      .map(({ login }) => login.toLowerCase()),
+  );
   for (const mapping of mappings) {
     if (identities.has(mapping.userId)) continue;
     if (accountLogins.has(mapping.externalUserId.toLowerCase())) continue;
+    if (heldByOther(mapping.externalUserId, mapping.userId)) continue;
     identities.set(mapping.userId, { login: mapping.externalUserId, source: "workspace" });
   }
   return identities;
@@ -90,7 +131,7 @@ export async function resolveGithubIdentities(
 
 /** {@link resolveGithubIdentities}, logins only. */
 export async function resolveGithubLogins(
-  db: Pick<PrismaClient, "integration" | "integrationUserMapping">,
+  db: Pick<PrismaClient, "integration" | "integrationUserMapping" | "user">,
   workspaceId: string,
   userIds: string[],
 ): Promise<Map<string, string>> {
@@ -156,7 +197,7 @@ export function normalizeGithubLogin(input: string): string | null {
  * caller's role and the member's membership.
  */
 export async function setWorkspaceGithubLogin(
-  db: Pick<PrismaClient, "integration" | "integrationUserMapping" | "$transaction">,
+  db: Pick<PrismaClient, "integration" | "integrationUserMapping" | "user" | "$transaction">,
   args: { workspaceId: string; userId: string; login: string | null },
 ): Promise<void> {
   const installation = await db.integration.findFirst({
@@ -179,6 +220,20 @@ export async function setWorkspaceGithubLogin(
   }
 
   if (login) {
+    // Someone proved this GitHub account is theirs by linking it; it's theirs.
+    const claimant = await db.user.findFirst({
+      where: {
+        id: { not: args.userId },
+        githubLogin: { equals: login, mode: "insensitive" },
+      },
+      select: { id: true },
+    });
+    if (claimant) {
+      throw new TRPCError({
+        code: "CONFLICT",
+        message: `@${login} is already linked by another user.`,
+      });
+    }
     // Another member connected this GitHub account themselves; it's theirs.
     const accounts = await connectedAccounts(db, args.workspaceId);
     const owner = accounts.find(

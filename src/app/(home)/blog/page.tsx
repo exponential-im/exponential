@@ -6,6 +6,10 @@ import { getPublicBaseUrlFromEnv } from "~/lib/urls";
 
 const blogUrl = `${getPublicBaseUrlFromEnv()}/blog`;
 
+// Hourly, so a scheduled post (lib/blog/schedule.ts) appears on its date
+// without waiting for a deploy.
+export const revalidate = 3600;
+
 export const metadata: Metadata = {
   title: `Blog | ${PRODUCT_NAME}`,
   description:

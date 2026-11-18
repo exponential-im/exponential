@@ -5,6 +5,7 @@ import { featureCommentRouter } from "./featureComment";
 import { ticketRouter } from "./ticket";
 import { researchRouter } from "./research";
 import { cycleRouter } from "./cycle";
+import { cycleBriefRouter } from "./cycleBrief";
 import { retrospectiveRouter } from "./retrospective";
 import { insightRouter } from "./insight";
 import { ticketSyncRouter } from "./ticketSync";
@@ -17,6 +18,7 @@ export const productPluginRouter = createTRPCRouter({
   research: researchRouter,
   insight: insightRouter,
   cycle: cycleRouter,
+  cycleBrief: cycleBriefRouter,
   retrospective: retrospectiveRouter,
   ticketSync: ticketSyncRouter,
 });

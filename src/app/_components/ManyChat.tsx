@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { browserTimeZone } from '~/lib/chat/localNow';
 import { useAiCapabilities } from '~/providers/AiCapabilitiesProvider';
 import { api } from "~/trpc/react";
 import DOMPurify from 'dompurify';
@@ -26,6 +27,7 @@ import type { VoiceEvent } from '~/lib/voice/voiceEventLog';
 import { buildVoiceSeedContext } from '~/lib/voice/seedContext';
 import { AgentMessageFeedback } from './agent/AgentMessageFeedback';
 import { ToolActivity } from './agent/ToolActivity';
+import { splitTurnText } from '~/lib/chat/turnText';
 import { ThinkingStatus } from './agent/ThinkingStatus';
 import { DraftActionsReviewCard } from './DraftActionsReviewCard';
 import { DraftFeaturesReviewCard } from './DraftFeaturesReviewCard';
@@ -47,6 +49,7 @@ import {
 } from '~/lib/localWiki';
 import { preprocessAgentMarkdown, linkifyBareUrls } from '~/lib/chat/agentMarkdown';
 import { failureCopy } from '~/lib/chat/failureCopy';
+import { resolveChatWorkspaceId } from '~/lib/chat/chatWorkspace';
 import { applyToolRefreshInvalidations } from './agent/toolRefreshInvalidation';
 import { LocalWikiFirstRun } from './LocalWikiFirstRun';
 import { PositionsImportPill, IMPORT_POSITIONS_PROMPT } from './PositionsImportPill';
@@ -216,7 +219,8 @@ function formatPageContextData(context: PageContext): string {
   - Actions created from this transcript: ${str(d.actionsCount, '0')}
   - Has transcription text: ${d.hasTranscription ? 'Yes' : 'No'}
   - Meeting date: ${d.meetingDate ? new Date(str(d.meetingDate)).toLocaleDateString() : 'Unknown'}
-  - Workspace: ${str(d.workspaceName)}`;
+  - Workspace: ${str(d.workspaceName)}
+  - The summary above is a condensed overview. For what was actually said in this meeting, call \`get-meeting-transcriptions\` with transcriptionId "${str(d.transcriptionId)}" (returns this meeting's full transcript), or \`query-meeting-context\` with the same transcriptionId to search inside it. Do NOT ask the user to paste the transcript.`;
     }
     default:
       return Object.entries(context.data)
@@ -331,6 +335,16 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
     [messages]
   );
 
+  // Text written between tool calls goes inside the tool card; the bubble
+  // shows only what came after the last call (ticket 982, rapid.drift).
+  const turnTexts = useMemo(
+    () =>
+      visibleMessages.map((m, i) =>
+        splitTurnText(m.content, m.answerOffset, !(isStreaming && i === visibleMessages.length - 1)),
+      ),
+    [visibleMessages, isStreaming]
+  );
+
   useEffect(() => {
     if (viewport.current) {
       viewport.current.scrollTo({ top: viewport.current.scrollHeight, behavior: 'smooth' });
@@ -350,11 +364,15 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
               {message.type === 'ai' ? (
                 <div className="max-w-[85%]">
                   {message.toolCalls && message.toolCalls.length > 0 && (
-                    <ToolActivity calls={message.toolCalls} />
+                    <ToolActivity
+                      calls={message.toolCalls}
+                      working={turnTexts[index]?.working}
+                      finished={!(isStreaming && index === visibleMessages.length - 1)}
+                    />
                   )}
                   {isStreaming &&
                     index === visibleMessages.length - 1 &&
-                    message.content === '' && (
+                    (turnTexts[index]?.answer ?? message.content) === '' && (
                       <ThinkingStatus
                         toolCalls={message.toolCalls}
                         requestText={
@@ -372,7 +390,7 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
                       {message.marker === 'voice' && (
                         <span title="Spoken via voice mode" aria-label="voice" className="mr-1">🎙</span>
                       )}
-                      {renderMessageContent(message.content, message.type)}
+                      {renderMessageContent(turnTexts[index]?.answer ?? message.content, message.type)}
                     </div>
                   )}
                   {message.failure && (
@@ -462,7 +480,15 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
   // Get messages, conversationId, and page context from context to persist across navigation
   const { messages, setMessages, conversationId, setConversationId, pageContext, isOpen, pendingPrompt, pendingContext, consumePendingPrompt } = useAgentModal();
   const { workspaceId: urlWorkspaceId } = useWorkspace();
-  const workspaceId = workspaceIdProp ?? urlWorkspaceId;
+  // A page that names its own workspace wins over the provider's value: on a
+  // route with no workspace slug (/recording/<id>) the provider falls back to
+  // the person's default workspace, which may not be the one on screen. The
+  // drawer resolves the same way before passing its prop (see chatWorkspace.ts).
+  const workspaceId = resolveChatWorkspaceId({
+    explicit: workspaceIdProp,
+    pageContext,
+    provider: urlWorkspaceId,
+  });
   const utils = api.useUtils();
 
   // Fetch the user's custom assistant (if configured)
@@ -532,7 +558,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - Status: ${projectData.status}
       - Priority: ${projectData.priority}
       - Progress: ${projectData.progress || 0}%${slackChannelContext}
-      - Active Tasks Shown: ${projectActions.length} (use retrieveActionsTool for complete history)
+      - Active Tasks Shown: ${projectActions.length} (call \`get-project-actions\` for the complete list)
       ${projectActions.length > 0 ?
         projectActions.map(action => `  • ${action.name} (${action.status}, ${action.priority})`).join('\n      ') :
         '  • No active tasks'}
@@ -541,7 +567,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - When creating actions: automatically assign to project ID: ${projectId}
       - When asked about tasks: refer to context above or use tools for complete data
       - Always specify project ID in tool calls for security
-      - For historical data beyond current context, explicitly use retrieveActionsTool
+      - For tasks beyond the ones shown above, call \`get-project-actions\`
       - When asked about meetings or transcriptions: refer to the meeting context above${projectSlackConfig?.slackChannel ? `\n      - When asked about Slack or project communications: search in channel${projectSlackConfig.slackChannelId ? ` ID "${projectSlackConfig.slackChannelId}"` : ` "${projectSlackConfig.slackChannel}"`}` : ''}
     ` : '';
 
@@ -584,51 +610,17 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
                   ${projectId ? `- Current project ID: ${projectId}` : ''}
                   
                   🛠️ TOOL USAGE PROTOCOLS:
-                  - ALWAYS report tool failures to user (never fail silently)
-                  - Use format: "⚠️ Tool Error: [action] failed - [reason]. Working with available context instead."
+                  - The interface already shows the user which steps failed. If a tool fails and another tool or the context still lets you answer in full, just answer; do not announce the failure or narrate the retry.
+                  - If a failure limits your answer, say so in one plain sentence: what you could not check, and what the answer is based on instead. Never guess at the technical cause and never paste error text.
+                  - A truncated transcript is a partial read. Never conclude that something was not said from one; fetch the full transcript by transcriptionId first, or say that you only read part of it.
                   - Context shows current/recent data only - use tools for historical/complete data
-                  - Available tools: createAction, updateAction, retrieveActions, createGitHubIssue, get_project_context, get-meeting-transcriptions, query-meeting-context, get-meeting-insights, firefliesCheckExisting, firefliesTestApiKey, firefliesCreateIntegration, firefliesGenerateWebhookToken, firefliesGetWebhookUrl
-                  - For project goals: use get_project_context tool with the project ID
+                  - Use only the tools you were actually given, by their exact names. Never call a tool because a name sounds right; if no tool fits, say what you cannot do.
+                  - For project goals: call \`get-project-context\` with the project ID
                   - If authentication fails, inform user and suggest checking token validity
 
-                  🔧 FIREFLIES INTEGRATION WIZARD:
-                  When user wants to connect Fireflies, set up meeting transcription, or asks about Fireflies configuration:
-
-                  1. CHECK EXISTING: First use firefliesCheckExisting tool to see if they already have Fireflies
-                     - If exists: Inform them and ask if they want to set up a new integration or configure webhooks
-
-                  2. GUIDE API KEY SETUP: If no integration exists, guide user to get their API key:
-                     - Tell them: "To connect Fireflies, you'll need your API key from the Fireflies dashboard"
-                     - Provide link: https://app.fireflies.ai/integrations/custom
-                     - Wait for them to share the key
-
-                  3. TEST THE KEY: When user provides an API key (long string, often starts with "ff_"):
-                     - Use firefliesTestApiKey tool to validate it
-                     - CRITICAL: NEVER echo the API key back to the user - this is a security requirement
-                     - On success: Proceed to integration creation
-                     - On failure: Explain the error and ask them to check the key
-
-                  4. CREATE INTEGRATION: After successful test:
-                     - Ask user to name their integration (suggest: "My Fireflies" or their workspace name)
-                     - Ask about scope: "Should this be just for you (personal), or available workspace-wide?"
-                     - Use firefliesCreateIntegration with the tested key, name, and scope
-
-                  5. WEBHOOK SETUP (after integration created):
-                     - Use firefliesGenerateWebhookToken to create a webhook secret
-                     - Use firefliesGetWebhookUrl to get the correct webhook URL
-                     - Provide CLEAR step-by-step instructions:
-                       a. Go to https://app.fireflies.ai/integrations/custom
-                       b. Click "Add Webhook" or find the webhook settings
-                       c. Enter the webhook URL provided
-                       d. Set authentication method to "Signature"
-                       e. Use the secret token provided
-                       f. Select event: "Transcription completed"
-                       g. Save the webhook
-
-                  6. CONFIRMATION: After setup, explain:
-                     - New meeting transcriptions will automatically appear in the app
-                     - They can test by having a short meeting or triggering a test from Fireflies
-                     - Offer to help with anything else
+                  🔧 CONNECTING FIREFLIES:
+                  - You cannot connect Fireflies from the chat. When the user asks to connect it or set up meeting transcription, send them to Settings → Integrations (/settings/integrations), where they add their Fireflies API key and webhook.
+                  - If the user pastes an API key into the chat, do not repeat it back, and tell them to enter it on that settings page instead.
 
                   📝 TRANSCRIPTION SEARCH (RAG):
                   - The transcription summaries in context show recent meetings - use them for quick reference
@@ -641,7 +633,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
 
                   📊 CONTEXT LIMITATIONS:
                   - Project data: Current snapshot only (real-time via tools)
-                  - Actions: Active actions shown (use retrieveActionsTool for historical)
+                  - Actions: Active actions shown (call \`get-project-actions\` for the rest)
                   - Transcriptions: Summaries shown in context (use search tools for full text and specific topics)
                   - For complete datasets or older data, explicitly use tools
                   - Always mention when working with limited context vs complete data
@@ -659,8 +651,10 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
 
                   When the user says "this", "the", or refers to content on their current page, they mean the above context.
                   Use this data to understand what the user is looking at right now.
-                  ` : ''}
-                  The current date is: ${new Date().toISOString().split('T')[0]}`
+                  ` : ''}`
+                  // The date, time and zone are added by /api/chat/stream from
+                  // the zone saved in the person's profile, so they are not
+                  // stated here from the browser's clock.
       },
       {
         type: 'ai',
@@ -1279,7 +1273,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
           const updated = [...prev];
           const last = updated[updated.length - 1];
           if (last && last.type === 'ai') {
-            updated[updated.length - 1] = { ...last, agentName, content: '', failure: undefined, toolCalls: undefined };
+            updated[updated.length - 1] = { ...last, agentName, content: '', failure: undefined, toolCalls: undefined, answerOffset: undefined };
           }
           return updated;
         });
@@ -1339,7 +1333,11 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
         workspaceId,
         projectId,
         conversationId,
+        // The browser's IANA zone. The route uses it only when the person has
+        // no zone saved in their profile, and then saves it.
+        timezone: browserTimeZone(),
         platform: "manychat" as const,
+        pageContextType: pageContext?.pageType,
       };
 
       // Debug: always log what we're sending to Mastra
@@ -1369,6 +1367,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
             updated[updated.length - 1] = {
               ...lastMessage,
               content: update.displayText,
+              answerOffset: update.answerOffset,
               ...(update.toolCalls.length > 0 ? { toolCalls: update.toolCalls } : {}),
             };
           }

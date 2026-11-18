@@ -99,6 +99,12 @@ export interface CreateEventInput {
   };
   location?: string;
   attendees?: Array<{ email: string; displayName?: string }>;
+  /**
+   * iCalendar recurrence lines, e.g. ["RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"].
+   * Google takes them as they are and needs `start.timeZone` to expand them.
+   * Not supported for Microsoft yet: callers must refuse, not drop it.
+   */
+  recurrence?: string[];
   conferenceData?: {
     createRequest: {
       requestId: string;

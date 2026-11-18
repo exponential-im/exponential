@@ -2,7 +2,9 @@
 
 import { useCallback, useMemo, useState } from 'react';
 import { keepPreviousData } from '@tanstack/react-query';
+import Link from 'next/link';
 import {
+  Anchor,
   Card,
   Text,
   Group,
@@ -469,8 +471,12 @@ function GithubLinkNotice({
   return (
     <Text size="xs" className="text-text-muted">
       PRs and commits aren&apos;t counted for {unlinked.join(', ')} — no GitHub
-      username is set. Workspace admins can set one under the name in the
-      Contributors table.
+      username is known. Each person can link their GitHub account in{' '}
+      <Anchor component={Link} href="/settings/profile" size="xs">
+        Settings → Profile
+      </Anchor>
+      , or a workspace admin can set one under the name in the Contributors
+      table.
     </Text>
   );
 }

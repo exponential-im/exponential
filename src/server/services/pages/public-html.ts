@@ -3,6 +3,7 @@ import "server-only";
 import { generateHTML } from "@tiptap/html";
 import type { JSONContent } from "@tiptap/core";
 
+import { PublicDatabaseNode } from "~/app/_components/databases/publicDatabaseNode";
 import { buildPrdExtensions } from "~/lib/prd/extensions";
 import {
   sanitizeDocForPublic,
@@ -16,7 +17,8 @@ import {
  * pass first — including resolving `pageLink` nodes against the supplied map
  * of published targets — then serializes through the same shared extension
  * schema the editor uses, so the public render and the editor agree on every
- * node type.
+ * node type. Database blocks render through `PublicDatabaseNode`, drawn like
+ * the editor's table.
  */
 export function renderPublicPageHtml(
   bodyDoc: JSONContent,
@@ -25,6 +27,6 @@ export function renderPublicPageHtml(
 ): string {
   return generateHTML(
     sanitizeDocForPublic(bodyDoc, pageLinks, databases),
-    buildPrdExtensions(),
+    [...buildPrdExtensions(), PublicDatabaseNode],
   );
 }

@@ -10,6 +10,7 @@ import { DraftActionsReviewCard } from '~/app/_components/DraftActionsReviewCard
 import { DraftFeaturesReviewCard } from '~/app/_components/DraftFeaturesReviewCard';
 import { DraftDecisionsReviewCard } from '~/app/_components/decisions/DraftDecisionsReviewCard';
 import { failureCopy } from '~/lib/chat/failureCopy';
+import { splitTurnText } from '~/lib/chat/turnText';
 import { useAgentModal, type ChatMessage } from '~/providers/AgentModalProvider';
 import classes from './ZoeCanvas.module.css';
 
@@ -34,6 +35,16 @@ export function ZoeCanvas({ messages, isStreaming, onDismiss, onRetry }: ZoeCanv
   const visibleMessages = useMemo(
     () => messages.filter(m => m.type === 'human' || m.type === 'ai'),
     [messages],
+  );
+
+  // Same split as the drawer: text written between tool calls goes inside the
+  // tool card, the turn shows what came after the last call.
+  const turnTexts = useMemo(
+    () =>
+      visibleMessages.map((m, i) =>
+        splitTurnText(m.content, m.answerOffset, !(isStreaming && i === visibleMessages.length - 1)),
+      ),
+    [visibleMessages, isStreaming],
   );
 
   // Esc dismisses the engagement — unless the drawer is open on top, whose own
@@ -87,17 +98,21 @@ export function ZoeCanvas({ messages, isStreaming, onDismiss, onRetry }: ZoeCanv
           ) : (
             <div key={message.interactionId ?? `ai-${index}`} className={classes.aiTurn}>
               {message.toolCalls && message.toolCalls.length > 0 && (
-                <ToolActivity calls={message.toolCalls} />
+                <ToolActivity
+                  calls={message.toolCalls}
+                  working={turnTexts[index]?.working}
+                  finished={!(isStreaming && index === visibleMessages.length - 1)}
+                />
               )}
               {isStreaming &&
                 index === visibleMessages.length - 1 &&
-                message.content === '' && (
+                (turnTexts[index]?.answer ?? message.content) === '' && (
                   <ThinkingStatus toolCalls={message.toolCalls} requestText={lastUserText} />
                 )}
               {/* A clean error with no usable content renders only the failure
                   footer; otherwise the streamed text (full or partial). */}
               {!(message.failure?.severity === 'error' && message.content === '') && (
-                <MarkdownRenderer content={message.content} variant="compact" />
+                <MarkdownRenderer content={turnTexts[index]?.answer ?? message.content} variant="compact" />
               )}
               {message.failure && (
                 <div className={classes.failureRow}>

@@ -23,6 +23,8 @@ import { DateInput } from "@mantine/dates";
 import { modals } from "@mantine/modals";
 import { api } from "~/trpc/react";
 import { useProductDetailTitle } from "../../ProductDetailTitle";
+import { CycleTimeStat } from "~/app/_components/TimeLoggedSummary";
+import { CycleBriefPanel } from "./CycleBriefPanel";
 
 const STATUS_OPTIONS = [
   { value: "PLANNED", label: "Planned" },
@@ -73,6 +75,8 @@ export function CycleDetailClient() {
     onSuccess: async () => {
       await utils.product.cycle.getById.invalidate({ id: cycleId });
       await utils.product.cycle.list.invalidate();
+      // Completing the cycle closes its brief and asks for results.
+      await utils.product.cycleBrief.getForCycle.invalidate({ cycleId });
     },
   });
 
@@ -280,8 +284,16 @@ export function CycleDetailClient() {
               {donePoints} / {totalPoints}
             </Title>
           </div>
+          <CycleTimeStat cycleId={cycleId} workspaceShared={cycle.productId === null} />
         </Group>
       </Card>
+
+      <CycleBriefPanel
+        cycleId={cycleId}
+        workspaceSlug={workspaceSlug}
+        productSlug={productSlug}
+        cycleSlug={cycle.slug}
+      />
 
       {/* Goal + achievements */}
       <Card className="border border-border-primary bg-surface-secondary">

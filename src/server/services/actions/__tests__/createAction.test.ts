@@ -18,6 +18,8 @@ vi.mock("~/server/services/projectActivity", () => ({
 vi.mock("~/server/services/notifications/emit/emitNotification", () => ({
   emitNotification: vi.fn(async () => undefined),
 }));
+const { reportMock } = vi.hoisted(() => ({ reportMock: vi.fn() }));
+vi.mock("~/server/utils/reportHandledErrorServer", () => ({ reportHandledErrorServer: reportMock }));
 
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import { logProjectActivity } from "~/server/services/projectActivity";
@@ -382,6 +384,32 @@ describe("createAction", () => {
           subject: { actionId: "a1", assignedUserIds: [COLLEAGUE] },
         }),
       );
+    });
+
+    it("reports a failed Assignment emit with the action's id as context", async () => {
+      stubAttachableWorkspace();
+      reportMock.mockClear();
+      vi.mocked(emitNotification).mockResolvedValueOnce(null);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+      try {
+        await createAction(deps(db), {
+          source: "ui",
+          name: "Ship it",
+          workspaceId: WORKSPACE,
+          assigneeIds: [ACTOR, COLLEAGUE],
+        });
+        // No request scope here, so the emit ran detached and the reporter
+        // loads lazily; wait for it to land.
+        await vi.waitFor(() =>
+          expect(reportMock).toHaveBeenCalledWith(expect.any(Error), {
+            area: "createAction.assignmentNotification",
+            context: { actionId: "a1" },
+          }),
+        );
+      } finally {
+        consoleError.mockRestore();
+      }
     });
 
     it("emits nothing when the actor is the only assignee", async () => {

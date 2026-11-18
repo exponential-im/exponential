@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useSession } from 'next-auth/react';
 import { api } from "~/trpc/react";
+import { browserTimeZone } from '~/lib/chat/localNow';
 import { 
   Paper, 
   TextInput, 
@@ -161,6 +162,8 @@ export default function Chat({ initialMessages, githubSettings, buttons }: ChatP
           messages: mastraMessages,
           agentId: 'projectManagerAgent',
           conversationId,
+          // Used only when the person has no zone saved in their profile.
+          timezone: browserTimeZone(),
         }),
       });
 

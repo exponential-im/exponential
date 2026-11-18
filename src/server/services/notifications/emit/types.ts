@@ -34,11 +34,14 @@ export interface PositionAssignedSubject {
   addedHolderUserIds: string[];
 }
 
-/** Assignment (V1): the action and the users just assigned to it. */
-export interface AssignmentSubject {
-  actionId: string;
-  assignedUserIds: string[];
-}
+/**
+ * Assignment: the item and the users just assigned to it. The item is an
+ * action (V1) or a ticket; exactly one of `actionId` / `ticketId` is set, and
+ * the content builder and access gate branch on which.
+ */
+export type AssignmentSubject =
+  | { actionId: string; ticketId?: undefined; assignedUserIds: string[] }
+  | { ticketId: string; actionId?: undefined; assignedUserIds: string[] };
 
 /**
  * Meeting participant added: a meeting (TranscriptionSession) and the workspace
@@ -174,6 +177,21 @@ export interface UpdateReviewSubject {
 }
 
 /**
+ * Billing: something about a workspace's plan or Assistant use that its
+ * owners and admins have to act on. One event so far: the workspace's own
+ * Anthropic key stopped working, so its Assistant is back on the monthly
+ * allowance. Recipients are the workspace's owners and admins.
+ */
+export interface BillingSubject {
+  workspaceId: string;
+  event: "model_key_failing";
+  /** The key's last four characters, so the reader can tell which key it is. Never more. */
+  keyLast4: string;
+  /** When the key was marked as failing: part of the dedup key, so one failure notifies once. */
+  occurredAt: Date;
+}
+
+/**
  * Discriminated union pairing each category with its subject. `emitNotification`
  * narrows on `category`, so recipient resolvers and content builders get a
  * fully-typed subject with no casts.
@@ -228,6 +246,10 @@ export type EmitNotificationInput = {
   | {
       category: typeof NOTIFICATION_CATEGORIES.POSITION_ASSIGNED;
       subject: PositionAssignedSubject;
+    }
+  | {
+      category: typeof NOTIFICATION_CATEGORIES.BILLING;
+      subject: BillingSubject;
     }
 );
 

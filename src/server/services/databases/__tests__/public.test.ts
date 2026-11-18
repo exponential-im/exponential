@@ -42,12 +42,19 @@ describe("publicDatabaseTables", () => {
     const tables = await publicDatabaseTables(db, "page-1");
     const metrics = tables.get("db1")!;
     expect(metrics.name).toBe("Metrics");
-    expect(metrics.columns).toEqual(["Status", "Name"]);
+    // Each column carries its type and width so the page draws it as the editor does.
+    expect(metrics.columns).toEqual([
+      { name: "Status", type: "select", width: 180, status: true },
+      { name: "Name", type: "title", width: 280 },
+    ]);
     // The title is the second column here; the public link must follow it.
     expect(metrics.titleIndex).toBe(1);
     expect(metrics.rows).toEqual([
-      { cells: ["Tracked", "Alert latency"], href: "/p/alert-latency-abcd1234" },
-      { cells: ["", "Untitled"] },
+      {
+        cells: [{ text: "Tracked", pills: [{ label: "Tracked", color: "green" }] }, { text: "Alert latency" }],
+        href: "/p/alert-latency-abcd1234",
+      },
+      { cells: [{ text: "" }, { text: "Untitled" }] },
     ]);
     // Only attached databases of this page are projected.
     expect(db.pageDatabase.findMany.mock.calls[0]![0]).toMatchObject({ where: { pageId: "page-1", detachedAt: null } });

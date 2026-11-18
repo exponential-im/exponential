@@ -114,10 +114,11 @@ export async function assertAssignableDri(
  * but fell through to an unconditional `true` when the action had neither —
  * and then returned `assignees.user.email`, reopening the same leak.
  *
- * The replacement mirrors exactly what `getAssignableUsers` offers the picker
- * for such an action, so the server enforces what the UI already presents:
- * yourself (1), members of the action's workspace (2), and users who share a
- * team with you (3). Nothing wider.
+ * The replacement covers what `getAssignableUsers` offers the picker for such
+ * an action, so the server enforces what the UI presents: yourself (1),
+ * members of the action's workspace (2), and users who share a team with you
+ * (3). The picker is narrower on (3) for an action with a workspace — it only
+ * offers teams in that workspace — so this check is a superset of it there.
  */
 export async function canAssignToUnscopedAction(
   db: PrismaClient,

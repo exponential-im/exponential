@@ -15,6 +15,8 @@ export type AgendaSectionType =
   | "decisions_pending"
   | "okr_review"
   | "cycle_progress"
+  // The product's active Cycle brief: outcomes with status, stale after 7 days (ADR-0085)
+  | "cycle_brief"
   | "retro_actions"
   | "project_state"
   | "free_text"
@@ -45,6 +47,7 @@ export const AGENDA_SECTION_TYPES: ReadonlyArray<{ value: AgendaSectionType; lab
   { value: "decisions_pending", label: "Decisions pending", hint: "Open and proposed Decisions in scope" },
   { value: "okr_review", label: "OKR review", hint: "Key results without a recent check-in or with a status change" },
   { value: "cycle_progress", label: "Cycle progress", hint: "Latest cycle snapshot and tickets moved" },
+  { value: "cycle_brief", label: "Cycle brief", hint: "The active cycle's signed-off outcomes with their status; flags any status older than 7 days" },
   { value: "retro_actions", label: "Retro actions", hint: "Actions from the previous retrospective, with status" },
   { value: "project_state", label: "Project state", hint: "The linked project's status, movement since last time, and dates coming up" },
   { value: "occurrence_actions", label: "Status on action points", hint: "Actions from the previous occurrence, and participants' project actions due since, with owner and status" },
@@ -261,7 +264,9 @@ export const CEREMONY_TEMPLATES: readonly CeremonyTemplate[] = [
     durationMinutes: 60,
     leadTimeHours: 24,
     agendaTemplate: [
-      { key: "okr_review", type: "okr_review", title: "Objectives and key results", minutes: 15 },
+      // Brief outcomes take 5 minutes from the OKR review so the hour still adds up.
+      { key: "okr_review", type: "okr_review", title: "Objectives and key results", minutes: 10 },
+      { key: "cycle_brief", type: "cycle_brief", title: "Cycle brief outcomes", minutes: 5 },
       { key: "decisions_pending", type: "decisions_pending", title: "Decisions pending", minutes: 20 },
       { key: "carried_over", type: "carried_over", title: "Carried over", minutes: 10 },
       { key: "free_text", type: "free_text", title: "Candidates", minutes: 15 },
