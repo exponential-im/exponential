@@ -2615,8 +2615,26 @@ export const mastraRouter = createTRPCRouter({
         displayName: z.string().optional(),
       })).optional(),
       provider: z.enum(['google', 'microsoft']).default('google'),
+      // A repeating event: iCalendar RRULE lines. One event that repeats, not
+      // one event per day, so the person can move or stop the whole series.
+      recurrence: z.array(z.string().regex(/^RRULE:[A-Z0-9=;,:+-]+$/)).max(2).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Dropping the rule would create a single event and report a series.
+      if (input.recurrence?.length && input.provider !== 'google') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Repeating events are only supported for Google Calendar for now',
+        });
+      }
+      // A repeating event with no zone is expanded in UTC and drifts by an
+      // hour at every daylight-saving change.
+      if (input.recurrence?.length && !input.start.timeZone) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'A repeating event needs start.timeZone',
+        });
+      }
       const service = getCalendarService(input.provider);
 
       const createdEvent = await service.createEvent(
@@ -2628,6 +2646,7 @@ export const mastraRouter = createTRPCRouter({
           end: input.end,
           location: input.location,
           attendees: input.attendees,
+          ...(input.recurrence?.length ? { recurrence: input.recurrence } : {}),
         }
       );
 
