@@ -173,7 +173,14 @@
 }
 
 /* An empty cell reads as empty, as in Notion; the row page keeps its dash. */
-.table /* A "Status" column's option, as Notion's status type: rounded, led by a dot. */
+.table .cellEmpty {
+  visibility: hidden;
+}
+
+/*
+ * A "Status" column's option, as Notion's status type: rounded, led by a
+ * dot. Unscoped, so the row page's Status field draws it the same way.
+ */
 .pill[data-variant='status'] {
   display: inline-flex;
   align-items: center;
@@ -187,10 +194,6 @@
   width: 8px;
   height: 8px;
   border-radius: var(--radius-full);
-}
-
-.cellEmpty {
-  visibility: hidden;
 }
 
 /* ── editable cells ── */
