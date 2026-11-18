@@ -1316,23 +1316,19 @@ describe("action router (mocked)", () => {
         assignees: [],
         project: null,
         team: null,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any);
+      } as never);
       dbMock.workspaceUser.findUnique.mockResolvedValue(
         workspaceId
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ? ({ userId: callerId, workspaceId, role: "member", joinedAt: new Date() } as any)
+          ? ({ userId: callerId, workspaceId, role: "member", joinedAt: new Date() } as never)
           : null,
       );
       dbMock.teamUser.findFirst.mockResolvedValue(null);
       dbMock.team.findMany.mockResolvedValue([]);
       dbMock.workspaceUser.findMany.mockResolvedValue([
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        { user: { id: "u2", name: "Colleague", email: "u2@test.com", image: null } } as any,
+        { user: { id: "u2", name: "Colleague", email: "u2@test.com", image: null } } as never,
       ]);
       dbMock.user.findUnique.mockResolvedValue(
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        { id: callerId, name: "Me", email: "caller-1@test.com", image: null } as any,
+        { id: callerId, name: "Me", email: "caller-1@test.com", image: null } as never,
       );
     }
 
