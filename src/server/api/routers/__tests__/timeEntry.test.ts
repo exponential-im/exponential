@@ -10,6 +10,11 @@
  *   another user holds, FORBIDDEN for an agent key with no bound agent;
  * - `confirmDay` / `rememberResolution` are human-only: an agent key, a shadow
  *   principal, and Zoe's tokens (person as session user) are FORBIDDEN;
+ * - under Zoe's tokens `update` keeps Proposed time PROPOSED, `update` of any
+ *   CONFIRMED entry and `delete` of completed CONFIRMED time are FORBIDDEN
+ *   (the person's own record); cancelling a running Timer is allowed;
+ * - a Timer entry Zoe starts or stops is PROPOSED and moves no spent time;
+ *   only one the person both started and stopped counts outright;
  * - `action.upsertBySource` reuses the (sourceType, sourceId) match.
  *
  * Uses `vitest-mock-extended`'s `mockDeep<PrismaClient>()` — no real DB, ever
@@ -231,6 +236,49 @@ describe("timeEntry.create — ADR-0061 owner carve-out", () => {
     expect(recordActivity).toHaveBeenCalledTimes(1);
   });
 
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token writes the person's entry, forced to PROPOSED with no agent author",
+    async (tokenType) => {
+      arrangeAction(db, OWNER_ID);
+      db.timeEntry.create.mockResolvedValue(entryRow({ createdByAgentId: null, source: "manual" }) as never);
+
+      await callerWithToken(db, tokenType).timeEntry.create({
+        actionId: ACTION_ID,
+        startedAt: START,
+        endedAt: END,
+        status: "CONFIRMED", // asked for, refused
+      });
+
+      expect(db.externalAgent.findUnique).not.toHaveBeenCalled();
+      expect(db.timeEntry.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ userId: OWNER_ID, createdByAgentId: null, status: "PROPOSED" }),
+        }),
+      );
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(PERSON_TOKEN_TYPES)("a %s token is the person, so the entry is CONFIRMED", async (tokenType) => {
+    arrangeAction(db, OWNER_ID);
+    db.timeEntry.create.mockResolvedValue(
+      entryRow({ status: "CONFIRMED", createdByAgentId: null, source: "manual" }) as never,
+    );
+
+    await callerWithToken(db, tokenType).timeEntry.create({ actionId: ACTION_ID, startedAt: START, endedAt: END });
+
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ userId: OWNER_ID, createdByAgentId: null, status: "CONFIRMED" }),
+      }),
+    );
+    expect(db.action.update).toHaveBeenCalledWith({
+      where: { id: ACTION_ID },
+      data: { timeSpentMins: { increment: 68 } },
+    });
+  });
+
   it("access runs against the owner: an Action only the shadow user can see is NOT_FOUND", async () => {
     arrangeAgent(db);
     arrangeAction(db, SHADOW_ID); // created by the agent, invisible to the owner
@@ -319,6 +367,56 @@ describe("timeEntry.upsertBySourceRef", () => {
     );
   });
 
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token → the person's entry, PROPOSED with no agent author, reconciled against manual time",
+    async (tokenType) => {
+      arrangeRows([], []);
+      db.timeEntry.create.mockResolvedValue(
+        entryRow({ sourceRef: "zoe:s1#0", createdByAgentId: null, source: "manual" }) as never,
+      );
+
+      const result = await callerWithToken(db, tokenType).timeEntry.upsertBySourceRef({
+        actionId: ACTION_ID,
+        startedAt: START,
+        endedAt: END,
+        status: "CONFIRMED", // asked for, refused
+        sourceRef: "zoe:s1#0",
+      });
+
+      expect(result.outcome).toBe("created");
+      expect(db.externalAgent.findUnique).not.toHaveBeenCalled();
+      // Family read, then the manual-time read only Proposed time gets.
+      expect(db.timeEntry.findMany).toHaveBeenCalledTimes(2);
+      expect(db.timeEntry.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ userId: OWNER_ID, createdByAgentId: null, status: "PROPOSED" }),
+        }),
+      );
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(PERSON_TOKEN_TYPES)("a %s token is the person, so the entry is CONFIRMED", async (tokenType) => {
+    arrangeRows([], []);
+    db.timeEntry.create.mockResolvedValue(
+      entryRow({ sourceRef: "cli:s1", status: "CONFIRMED", createdByAgentId: null, source: "manual" }) as never,
+    );
+
+    await callerWithToken(db, tokenType).timeEntry.upsertBySourceRef({
+      actionId: ACTION_ID,
+      startedAt: START,
+      endedAt: END,
+      sourceRef: "cli:s1",
+    });
+
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ userId: OWNER_ID, createdByAgentId: null, status: "CONFIRMED" }),
+      }),
+    );
+  });
+
   it("PROPOSED match → updated in place, still no spent-time arithmetic", async () => {
     arrangeRows([entryRow({ sourceRef: "claude-session:s1#0" })], []);
     db.timeEntry.update.mockResolvedValue(entryRow({ sourceRef: "claude-session:s1#0", note: "run 2" }) as never);
@@ -379,6 +477,265 @@ describe("timeEntry.upsertBySourceRef", () => {
       data: { note: "claude-session:s1#0" },
     });
     expect(db.timeEntry.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("timeEntry.update — editing Proposed time confirms it, unless Zoe edits", () => {
+  let db: DeepMockProxy<PrismaClient>;
+  const NEW_END = new Date("2026-09-11T10:00:00Z"); // 38 minutes
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    withTransaction(db);
+    db.timeEntry.findUnique.mockResolvedValue(entryRow({ createdByAgentId: null }) as never);
+    db.timeEntry.update.mockResolvedValue(entryRow({ endedAt: NEW_END }) as never);
+  });
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token corrects a PROPOSED entry, which stays PROPOSED and moves no spent time",
+    async (tokenType) => {
+      await callerWithToken(db, tokenType).timeEntry.update({ entryId: "entry-1", endedAt: NEW_END });
+
+      const data = db.timeEntry.update.mock.calls[0]![0].data;
+      expect(data).toMatchObject({ endedAt: NEW_END });
+      expect(data).not.toHaveProperty("status");
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(PERSON_TOKEN_TYPES)("a %s token is the person, so the edit confirms it", async (tokenType) => {
+    await callerWithToken(db, tokenType).timeEntry.update({ entryId: "entry-1", endedAt: NEW_END });
+
+    expect(db.timeEntry.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ endedAt: NEW_END, status: "CONFIRMED" }) }),
+    );
+    expect(db.action.update).toHaveBeenCalledWith({
+      where: { id: ACTION_ID },
+      data: { timeSpentMins: { increment: 38 } },
+    });
+  });
+});
+
+describe("timeEntry.update / delete — CONFIRMED time is the person's own record", () => {
+  let db: DeepMockProxy<PrismaClient>;
+  // Zoe stretching a confirmed 68-minute entry by eight hours.
+  const STRETCHED_END = new Date("2026-09-11T18:30:00Z");
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    withTransaction(db);
+    db.timeEntry.findUnique.mockResolvedValue(
+      entryRow({ status: "CONFIRMED", source: "manual", createdByAgentId: null }) as never,
+    );
+    db.timeEntry.update.mockResolvedValue(entryRow({ status: "CONFIRMED", endedAt: STRETCHED_END }) as never);
+    db.timeEntry.delete.mockResolvedValue(entryRow({ status: "CONFIRMED" }) as never);
+  });
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token cannot edit a CONFIRMED entry: FORBIDDEN, nothing written, no spent time moved",
+    async (tokenType) => {
+      await expect(
+        callerWithToken(db, tokenType).timeEntry.update({ entryId: "entry-1", endedAt: STRETCHED_END }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+      expect(db.timeEntry.update).not.toHaveBeenCalled();
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token cannot delete a CONFIRMED entry: FORBIDDEN, nothing removed, no spent time moved",
+    async (tokenType) => {
+      await expect(callerWithToken(db, tokenType).timeEntry.delete({ entryId: "entry-1" })).rejects.toMatchObject({
+        code: "FORBIDDEN",
+      });
+
+      expect(db.timeEntry.delete).not.toHaveBeenCalled();
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token may still discard a PROPOSED entry, which never counted",
+    async (tokenType) => {
+      db.timeEntry.findUnique.mockResolvedValue(entryRow() as never);
+
+      expect(await callerWithToken(db, tokenType).timeEntry.delete({ entryId: "entry-1" })).toEqual({
+        id: "entry-1",
+      });
+      expect(db.timeEntry.delete).toHaveBeenCalledWith({ where: { id: "entry-1" } });
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token may cancel a running Timer entry (CONFIRMED, no end), which counts nothing yet",
+    async (tokenType) => {
+      db.timeEntry.findUnique.mockResolvedValue(
+        entryRow({ status: "CONFIRMED", source: "manual", endedAt: null, createdByAgentId: null }) as never,
+      );
+
+      expect(await callerWithToken(db, tokenType).timeEntry.delete({ entryId: "entry-1" })).toEqual({
+        id: "entry-1",
+      });
+      expect(db.timeEntry.delete).toHaveBeenCalledWith({ where: { id: "entry-1" } });
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token cannot set bounds on a running Timer entry: FORBIDDEN (bounds are not elapsed time)",
+    async (tokenType) => {
+      db.timeEntry.findUnique.mockResolvedValue(
+        entryRow({ status: "CONFIRMED", source: "manual", endedAt: null, createdByAgentId: null }) as never,
+      );
+
+      await expect(
+        callerWithToken(db, tokenType).timeEntry.update({ entryId: "entry-1", endedAt: STRETCHED_END }),
+      ).rejects.toMatchObject({ code: "FORBIDDEN" });
+      expect(db.timeEntry.update).not.toHaveBeenCalled();
+      expect(db.action.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(PERSON_TOKEN_TYPES)(
+    "a %s token is the person, so the edit applies and spent time moves by (new − old)",
+    async (tokenType) => {
+      await callerWithToken(db, tokenType).timeEntry.update({ entryId: "entry-1", endedAt: STRETCHED_END });
+
+      const data = db.timeEntry.update.mock.calls[0]![0].data;
+      expect(data).toMatchObject({ endedAt: STRETCHED_END });
+      expect(data).not.toHaveProperty("status");
+      expect(db.action.update).toHaveBeenCalledWith({
+        where: { id: ACTION_ID },
+        data: { timeSpentMins: { increment: 480 } },
+      });
+    },
+  );
+
+  it.each(PERSON_TOKEN_TYPES)(
+    "a %s token is the person, so the delete applies and takes its minutes off spent time",
+    async (tokenType) => {
+      await callerWithToken(db, tokenType).timeEntry.delete({ entryId: "entry-1" });
+
+      expect(db.timeEntry.delete).toHaveBeenCalledWith({ where: { id: "entry-1" } });
+      expect(db.action.update).toHaveBeenCalledWith({
+        where: { id: ACTION_ID },
+        data: { timeSpentMins: { decrement: 68 } },
+      });
+    },
+  );
+});
+
+describe("timeEntry.start / stop — a Timer Zoe operates writes Proposed time", () => {
+  let db: DeepMockProxy<PrismaClient>;
+
+  /** A Timer entry running for the last 30 minutes. */
+  function runningRow(overrides: Record<string, unknown> = {}) {
+    return entryRow({
+      source: "plugin",
+      status: "CONFIRMED",
+      startedAt: new Date(Date.now() - 30 * 60_000),
+      endedAt: null,
+      createdByAgentId: null,
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    vi.mocked(recordActivity).mockClear();
+    withTransaction(db);
+    arrangeAction(db, OWNER_ID);
+    db.timeEntry.create.mockResolvedValue(runningRow() as never);
+    db.timeEntry.update.mockImplementation((async (args: { data: Record<string, unknown> }) =>
+      runningRow({ endedAt: new Date(), ...args.data })) as never);
+  });
+
+  it.each(ZOE_TOKEN_TYPES)("a %s token starts a Timer entry that is born PROPOSED", async (tokenType) => {
+    db.timeEntry.findFirst.mockResolvedValue(null);
+
+    await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ userId: OWNER_ID, status: "PROPOSED" }) }),
+    );
+  });
+
+  it.each(PERSON_TOKEN_TYPES)("a %s token is the person, so the entry takes the CONFIRMED default", async (tokenType) => {
+    db.timeEntry.findFirst.mockResolvedValue(null);
+
+    await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+    const data = (db.timeEntry.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty("status");
+  });
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token stopping the person's running Timer leaves Proposed time: no spent time, no feed event",
+    async (tokenType) => {
+      db.timeEntry.findFirst.mockResolvedValue(runningRow() as never);
+
+      const stopped = await callerWithToken(db, tokenType).timeEntry.stop();
+
+      expect(db.timeEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "entry-1" },
+          data: { endedAt: expect.any(Date), status: "PROPOSED" },
+        }),
+      );
+      expect(stopped.status).toBe("PROPOSED");
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token starting a Timer auto-stops the running one as Proposed time, moving no spent time",
+    async (tokenType) => {
+      db.timeEntry.findFirst.mockResolvedValue(
+        { ...runningRow({ id: "entry-running" }), action: { name: "Deep work" } } as never,
+      );
+
+      await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+      expect(db.timeEntry.update).toHaveBeenCalledWith({
+        where: { id: "entry-running" },
+        data: { endedAt: expect.any(Date), status: "PROPOSED" },
+      });
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the person stopping a Timer Zoe started keeps it PROPOSED until they confirm the day", async () => {
+    db.timeEntry.findFirst.mockResolvedValue(runningRow({ status: "PROPOSED" }) as never);
+
+    await humanCaller(db).timeEntry.stop();
+
+    expect(db.timeEntry.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { endedAt: expect.any(Date), status: "PROPOSED" } }),
+    );
+    expect(db.action.update).not.toHaveBeenCalled();
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("the person stopping their own Timer confirms it as before: spent time moves, the feed hears of it", async () => {
+    db.timeEntry.findFirst.mockResolvedValue(runningRow() as never);
+
+    await humanCaller(db).timeEntry.stop();
+
+    expect(db.timeEntry.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { endedAt: expect.any(Date) } }),
+    );
+    expect(db.action.update).toHaveBeenCalledWith({
+      where: { id: ACTION_ID },
+      data: { timeSpentMins: { increment: 30 } },
+    });
+    expect(recordActivity).toHaveBeenCalled();
   });
 });
 

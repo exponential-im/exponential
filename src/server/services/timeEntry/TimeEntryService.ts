@@ -73,11 +73,19 @@ interface StartInput {
   projectId?: string | null;
   /** Used only when actionId is omitted (otherwise inherited from the action). */
   workspaceId?: string | null;
+  /**
+   * An agent is operating the Timer (Zoe acting for the person, ADR-0070):
+   * the new entry is born `PROPOSED`, and a running entry this start
+   * auto-stops becomes `PROPOSED` too. See `stop`.
+   */
+  agentActing?: boolean;
 }
 
 interface StopInput {
   userId: string;
   entryId?: string;
+  /** An agent is operating the Timer (ADR-0070): the stopped entry is `PROPOSED`. See `stop`. */
+  agentActing?: boolean;
 }
 
 export interface CreateInput {
@@ -130,6 +138,21 @@ const ACTION_INCLUDE = {
 } as const;
 
 /**
+ * Confirmed time is the person's own record (ADR-0061): an agent acting for
+ * them (Zoe, ADR-0070) may correct or discard Proposed time, never change or
+ * remove what the person confirmed.
+ */
+function assertNotConfirmed(status: TimeEntryStatus): void {
+  if (status === "CONFIRMED") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message:
+        "Confirmed time can only be changed or deleted by the person themselves — agents (including Zoe) cannot",
+    });
+  }
+}
+
+/**
  * The data a just-completed TimeEntry needs to surface as a `time_entry`
  * activity event. Collected inside the stop transaction so the activity write
  * (which runs after commit, on the non-transactional client) has everything it
@@ -164,7 +187,7 @@ export class TimeEntryService {
    */
   async start(input: StartInput): Promise<TimeEntryWithAction> {
     const { created, autoStopped } = await this.db.$transaction(async (tx) => {
-      const stopped = await this.autoStopRunning(tx, input.userId);
+      const stopped = await this.autoStopRunning(tx, input.userId, input.agentActing ?? false);
 
       let actionId: string;
       let workspaceId: string | null;
@@ -211,6 +234,7 @@ export class TimeEntryService {
           workspaceId,
           source: "plugin",
           startedAt: new Date(),
+          ...(input.agentActing ? { status: "PROPOSED" as const } : {}),
           ...(input.ticketId ? { note: input.typedTitle?.trim() || null } : {}),
         },
         include: {
@@ -646,12 +670,20 @@ export class TimeEntryService {
    * Stamps `endedAt = now()` (clamped to never precede `startedAt`) and
    * increments the parent Action's denormalized `timeSpentMins`.
    *
+   * A Timer entry counts as the person's time only when a person both
+   * started and stopped it. Under `agentActing` (Zoe acting for the person,
+   * ADR-0070) the stopped entry becomes `PROPOSED`, and a `PROPOSED` entry
+   * (one an agent started) stays so whoever stops it: neither moves
+   * `timeSpentMins` or reaches the activity feed until the person confirms
+   * the day (ADR-0061). Timer entries carry no `sourceRef`, so the Daily
+   * worklog never overwrites them.
+   *
    * Throws NOT_FOUND if nothing is running and no entryId was provided.
    * Throws FORBIDDEN if entryId belongs to a different user.
    * Throws BAD_REQUEST if the entry is already stopped.
    */
   async stop(input: StopInput): Promise<TimeEntryWithAction> {
-    const updated = await this.db.$transaction(async (tx) => {
+    const { result: updated, proposed } = await this.db.$transaction(async (tx) => {
       const entry = input.entryId
         ? await tx.timeEntry.findUnique({ where: { id: input.entryId } })
         : await tx.timeEntry.findFirst({
@@ -682,10 +714,11 @@ export class TimeEntryService {
 
       const endedAt = safeEndedAt(entry.startedAt);
       const mins = durationMinutes(entry.startedAt, endedAt);
+      const proposed = input.agentActing === true || entry.status === "PROPOSED";
 
       const result = await tx.timeEntry.update({
         where: { id: entry.id },
-        data: { endedAt },
+        data: { endedAt, ...(proposed ? { status: "PROPOSED" as const } : {}) },
         include: {
           action: {
             select: {
@@ -698,15 +731,18 @@ export class TimeEntryService {
         },
       });
 
-      if (mins > 0) {
+      if (mins > 0 && !proposed) {
         await tx.action.update({
           where: { id: entry.actionId },
           data: { timeSpentMins: { increment: mins } },
         });
       }
 
-      return result;
+      return { result, proposed };
     });
+
+    // Proposed time reaches the feed when the person confirms it (confirmDay).
+    if (proposed) return updated;
 
     // Surface the completed recording in the activity feed. Post-commit and
     // fire-and-forget: a feed-write failure must never fail the user's stop.
@@ -743,8 +779,17 @@ export class TimeEntryService {
    * below then simply adds the new duration. The Daily worklog will not touch
    * the entry again (`upsertBySourceRef` reports "left").
    *
-   * Throws NOT_FOUND for missing entries, FORBIDDEN for other users' entries,
-   * BAD_REQUEST when `endedAt <= startedAt`.
+   * `agentActing` (Zoe acting for the person, ADR-0070): she may correct
+   * Proposed time, but the entry stays `PROPOSED` and still counts for
+   * nothing until the person confirms it. CONFIRMED time is the person's own
+   * record and is refused outright: turning it back into a proposal would
+   * hand a confirmed worklog row back to `upsertBySourceRef` to overwrite
+   * and lose the confirmed value, and keeping it CONFIRMED would move spent
+   * time with no human act.
+   *
+   * Throws NOT_FOUND for missing entries, FORBIDDEN for other users' entries
+   * and for CONFIRMED entries under `agentActing`, BAD_REQUEST when
+   * `endedAt <= startedAt`.
    */
   async update(input: {
     userId: string;
@@ -752,6 +797,7 @@ export class TimeEntryService {
     startedAt?: Date;
     endedAt?: Date | null;
     actionId?: string;
+    agentActing?: boolean;
   }): Promise<TimeEntryWithAction> {
     return this.db.$transaction(async (tx) => {
       const existing = await tx.timeEntry.findUnique({
@@ -766,6 +812,7 @@ export class TimeEntryService {
           message: "Cannot edit another user's time entry",
         });
       }
+      if (input.agentActing) assertNotConfirmed(existing.status);
 
       const newStartedAt = input.startedAt ?? existing.startedAt;
       const newEndedAt =
@@ -780,15 +827,19 @@ export class TimeEntryService {
       }
 
       // Compute old & new contributions to timeSpentMins. A PROPOSED entry
-      // never contributed, so its baseline is zero.
+      // never contributed, so its baseline is zero — and one that stays
+      // PROPOSED contributes nothing afterwards either.
       const wasProposed = existing.status === "PROPOSED";
+      const confirms = wasProposed && !input.agentActing;
+      const staysProposed = wasProposed && !confirms;
       const oldDurMins =
         existing.endedAt && !wasProposed
           ? durationMinutes(existing.startedAt, existing.endedAt)
           : 0;
-      const newDurMins = newEndedAt
-        ? durationMinutes(newStartedAt, newEndedAt)
-        : 0;
+      const newDurMins =
+        newEndedAt && !staysProposed
+          ? durationMinutes(newStartedAt, newEndedAt)
+          : 0;
 
       // If reassigned, validate target action exists and inherit its workspaceId.
       let newWorkspaceId: string | null = existing.workspaceId;
@@ -813,7 +864,7 @@ export class TimeEntryService {
           endedAt: newEndedAt,
           actionId: newActionId,
           workspaceId: newWorkspaceId,
-          ...(wasProposed ? { status: "CONFIRMED" as const } : {}),
+          ...(confirms ? { status: "CONFIRMED" as const } : {}),
         },
         include: {
           action: {
@@ -861,8 +912,18 @@ export class TimeEntryService {
    * `timeSpentMins` by the entry's recorded duration (running entries — those
    * with no endedAt — contribute 0, and so does a PROPOSED entry, which never
    * counted; deleting one is its confirmation-and-removal in one step).
+   *
+   * `agentActing` (Zoe acting for the person, ADR-0070): she may discard
+   * Proposed time, which never counted, and cancel a running Timer entry,
+   * which counts nothing yet (operating the Timer, like `start`/`stop`). But
+   * deleting completed CONFIRMED time would undo the person's confirmation
+   * with no way back, so it is FORBIDDEN.
    */
-  async delete(input: { userId: string; entryId: string }): Promise<{ id: string }> {
+  async delete(input: {
+    userId: string;
+    entryId: string;
+    agentActing?: boolean;
+  }): Promise<{ id: string }> {
     return this.db.$transaction(async (tx) => {
       const existing = await tx.timeEntry.findUnique({
         where: { id: input.entryId },
@@ -876,6 +937,7 @@ export class TimeEntryService {
           message: "Cannot delete another user's time entry",
         });
       }
+      if (input.agentActing && existing.endedAt) assertNotConfirmed(existing.status);
 
       const dur =
         existing.endedAt && existing.status !== "PROPOSED"
@@ -1089,11 +1151,13 @@ export class TimeEntryService {
    * resync the parent Action's timeSpentMins. Used by `start` to enforce the
    * single-timer-per-user invariant. Returns the completed entry's data (so the
    * caller can emit a `time_entry` activity event after commit), or null when
-   * nothing was running.
+   * nothing was running or the stopped entry is Proposed time — an agent
+   * started it, or an agent's start stopped it (`agentActing`); see `stop`.
    */
   private async autoStopRunning(
     tx: Db,
     userId: string,
+    agentActing: boolean,
   ): Promise<CompletedEntry | null> {
     const running = await tx.timeEntry.findFirst({
       where: { userId, endedAt: null },
@@ -1106,11 +1170,14 @@ export class TimeEntryService {
     // subsequent create() violate the one-running-timer-per-user unique index.
     const endedAt = safeEndedAt(running.startedAt);
     const mins = durationMinutes(running.startedAt, endedAt);
+    const proposed = agentActing || running.status === "PROPOSED";
 
     await tx.timeEntry.update({
       where: { id: running.id },
-      data: { endedAt },
+      data: { endedAt, ...(proposed ? { status: "PROPOSED" as const } : {}) },
     });
+
+    if (proposed) return null;
 
     if (mins > 0) {
       await tx.action.update({
