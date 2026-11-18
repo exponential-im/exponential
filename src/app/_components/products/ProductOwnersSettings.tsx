@@ -55,7 +55,8 @@ export function ProductOwnersSettings({ productId }: { productId: string }) {
       <Group>
         <Button
           size="sm"
-          disabled={unchanged}
+          // Saving before the current owners load would send [] and clear them all.
+          disabled={owners === undefined || unchanged}
           loading={save.isPending}
           onClick={() => save.mutate({ productId, userIds: selected })}
         >
