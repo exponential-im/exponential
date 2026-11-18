@@ -3,6 +3,7 @@ import type { PrismaClient } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/api/trpc";
 import { TEXT_LIMITS } from "~/lib/text-limits";
+import { getWorkspaceMembership } from "~/server/services/access";
 import { getPublicBrief } from "~/server/services/cycleBriefs/public";
 import { assertWorkspaceAccess, type WorkspaceAccessLevel } from "./product";
 
@@ -62,13 +63,16 @@ async function loadOutcomeWithAccess(
   return outcome;
 }
 
-/** Only a Product owner of the brief's product signs off (D-0092). */
+/**
+ * Only a person who is a Product owner of the brief's product signs off
+ * (D-0092). An agent never does, even one left in the owner list (ADR-0070).
+ */
 async function assertProductOwner(db: PrismaClient, userId: string, productId: string) {
   const owner = await db.productOwner.findUnique({
     where: { productId_userId: { productId, userId } },
-    select: { userId: true },
+    select: { user: { select: { isAgent: true } } },
   });
-  if (!owner) {
+  if (!owner || owner.user.isAgent) {
     throw new TRPCError({
       code: "FORBIDDEN",
       message: "Only a Product owner can sign off this brief",
@@ -76,7 +80,99 @@ async function assertProductOwner(db: PrismaClient, userId: string, productId: s
   }
 }
 
+async function loadProductWithAccess(
+  db: PrismaClient,
+  userId: string,
+  productId: string,
+  level: WorkspaceAccessLevel,
+) {
+  const product = await db.product.findUnique({
+    where: { id: productId },
+    select: { id: true, workspaceId: true },
+  });
+  if (!product) throw new TRPCError({ code: "NOT_FOUND", message: "Product not found" });
+  await assertWorkspaceAccess(db, userId, product.workspaceId, level);
+  return product;
+}
+
 export const cycleBriefRouter = createTRPCRouter({
+  /** The people who sign off this product's Cycle briefs. */
+  listProductOwners: protectedProcedure
+    .input(z.object({ productId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
+      const rows = await ctx.db.productOwner.findMany({
+        where: { productId: input.productId },
+        orderBy: { createdAt: "asc" },
+        select: { user: { select: { id: true, name: true, email: true, image: true } } },
+      });
+      return rows.map((r) => r.user);
+    }),
+
+  /** People who may be made Product owners: the workspace's direct members, agents left out. */
+  listOwnerCandidates: protectedProcedure
+    .input(z.object({ productId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const product = await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
+      const rows = await ctx.db.workspaceUser.findMany({
+        where: { workspaceId: product.workspaceId, user: { isAgent: false } },
+        select: { user: { select: { id: true, name: true, email: true } } },
+      });
+      return rows
+        .map((r) => r.user)
+        .sort((a, b) => (a.name ?? a.email ?? "").localeCompare(b.name ?? b.email ?? ""));
+    }),
+
+  /**
+   * Replace a product's owners. Workspace owners and admins only. Every owner
+   * must be a person in the workspace: an Assistant or External agent is
+   * rejected (D-0092).
+   */
+  setProductOwners: protectedProcedure
+    .input(z.object({ productId: z.string(), userIds: z.array(z.string()).max(20) }))
+    .mutation(async ({ ctx, input }) => {
+      const product = await loadProductWithAccess(ctx.db, ctx.session.user.id, input.productId, "view");
+      const membership = await getWorkspaceMembership(ctx.db, ctx.session.user.id, product.workspaceId);
+      if (membership?.role !== "owner" && membership?.role !== "admin") {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "Only workspace owners and admins can set Product owners",
+        });
+      }
+      const userIds = [...new Set(input.userIds)];
+      const users = await ctx.db.user.findMany({
+        where: { id: { in: userIds } },
+        select: { id: true, isAgent: true },
+      });
+      if (users.length !== userIds.length) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "User not found" });
+      }
+      if (users.some((u) => u.isAgent)) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "A Product owner must be a person, not an Assistant or agent",
+        });
+      }
+      for (const userId of userIds) {
+        if (!(await getWorkspaceMembership(ctx.db, userId, product.workspaceId))) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "A Product owner must be a member of the workspace",
+          });
+        }
+      }
+      await ctx.db.$transaction([
+        ctx.db.productOwner.deleteMany({
+          where: { productId: product.id, userId: { notIn: userIds } },
+        }),
+        ctx.db.productOwner.createMany({
+          data: userIds.map((userId) => ({ productId: product.id, userId })),
+          skipDuplicates: true,
+        }),
+      ]);
+      return { userIds };
+    }),
+
   /** The brief of one cycle for the team: drafts, snapshots and status. Null when none exists yet. */
   getForCycle: protectedProcedure
     .input(z.object({ cycleId: z.string() }))
@@ -89,7 +185,7 @@ export const cycleBriefRouter = createTRPCRouter({
         throw new TRPCError({ code: "NOT_FOUND", message: "Cycle not found" });
       }
       await assertWorkspaceAccess(ctx.db, ctx.session.user.id, cycle.workspaceId, "view");
-      const [brief, owner] = await Promise.all([
+      const [brief, owner, ownerCount] = await Promise.all([
         ctx.db.cycleBrief.findUnique({
           where: { cycleId: cycle.id },
           include: {
@@ -99,14 +195,19 @@ export const cycleBriefRouter = createTRPCRouter({
         cycle.productId
           ? ctx.db.productOwner.findUnique({
               where: { productId_userId: { productId: cycle.productId, userId: ctx.session.user.id } },
-              select: { userId: true },
+              select: { user: { select: { isAgent: true } } },
             })
           : null,
+        cycle.productId
+          ? ctx.db.productOwner.count({ where: { productId: cycle.productId, user: { isAgent: false } } })
+          : 0,
       ]);
       return {
         /** Legacy workspace-shared cycles get no brief. */
         canHaveBrief: cycle.productId !== null,
-        isProductOwner: owner !== null,
+        isProductOwner: owner !== null && !owner.user.isAgent,
+        /** No Product owner means nobody can sign off (open decision 2): the UI prompts to set one. */
+        hasProductOwner: ownerCount > 0,
         cycleGoal: cycle.cycleGoal,
         brief,
       };

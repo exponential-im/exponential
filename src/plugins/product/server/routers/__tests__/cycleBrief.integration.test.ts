@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { getTestDb } from "~/test/test-db";
 import { createTestCaller, createUnauthenticatedCaller } from "~/test/trpc-helpers";
-import { createUser, createWorkspace, createProduct, createCycle } from "~/test/factories";
+import { createUser, createWorkspace, createProduct, createCycle, addWorkspaceMember } from "~/test/factories";
 
 /**
  * Cycle briefs (ADR-0085) through the `cycleBrief` router: the team drafts,
@@ -78,5 +78,71 @@ describe("cycleBrief router", () => {
     await expect(
       caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Ship it", why: "   " }),
     ).rejects.toThrow(/why is required/i);
+  });
+});
+
+describe("cycleBrief Product owners", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  async function setup() {
+    const admin = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: admin.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: admin.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: admin.id, productId: product.id });
+    return { admin, ws, product, cycle, caller: createTestCaller(admin.id) };
+  }
+
+  it("lets a workspace admin name Product owners and rejects an agent", async () => {
+    const { admin, ws, product, caller } = await setup();
+    const person = await createUser(db);
+    await addWorkspaceMember(db, ws.id, person.id, "member");
+    const agent = await db.user.create({ data: { name: "Zoe", isAgent: true } });
+    await addWorkspaceMember(db, ws.id, agent.id, "member");
+
+    await caller.product.cycleBrief.setProductOwners({ productId: product.id, userIds: [admin.id, person.id] });
+    const owners = await caller.product.cycleBrief.listProductOwners({ productId: product.id });
+    expect(owners.map((o) => o.id).sort()).toEqual([admin.id, person.id].sort());
+
+    await expect(
+      caller.product.cycleBrief.setProductOwners({ productId: product.id, userIds: [admin.id, agent.id] }),
+    ).rejects.toThrow(/person/i);
+    // The rejected call changed nothing
+    expect(await db.productOwner.count({ where: { productId: product.id } })).toBe(2);
+
+    const candidates = await caller.product.cycleBrief.listOwnerCandidates({ productId: product.id });
+    expect(candidates.map((c) => c.id)).not.toContain(agent.id);
+  });
+
+  it("does not let a plain member set Product owners", async () => {
+    const { ws, product } = await setup();
+    const member = await createUser(db);
+    await addWorkspaceMember(db, ws.id, member.id, "member");
+    await expect(
+      createTestCaller(member.id).product.cycleBrief.setProductOwners({ productId: product.id, userIds: [member.id] }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("returns FORBIDDEN when a non-owner or an agent owner signs off", async () => {
+    const { ws, product, cycle, caller } = await setup();
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Aim", why: "Because" });
+
+    // No Product owner at all: nobody can sign off (open decision 2)
+    await expect(caller.product.cycleBrief.signOff({ briefId: brief.id })).rejects.toMatchObject({
+      code: "FORBIDDEN",
+    });
+
+    // An agent left in the owner list (written directly) still cannot
+    const agent = await db.user.create({ data: { name: "Zoe", isAgent: true } });
+    await addWorkspaceMember(db, ws.id, agent.id, "member");
+    await db.productOwner.create({ data: { productId: product.id, userId: agent.id } });
+    await expect(
+      createTestCaller(agent.id).product.cycleBrief.signOff({ briefId: brief.id }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect((await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } })).planSignedOffAt).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { Button, Group, Stack, Text, Textarea } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
@@ -99,7 +100,8 @@ export function CycleBriefPanel({
   const signOff = api.product.cycleBrief.signOff.useMutation({ onSuccess: invalidate, onError });
 
   if (!data?.canHaveBrief) return null;
-  const { brief, isProductOwner, cycleGoal } = data;
+  const { brief, isProductOwner, hasProductOwner, cycleGoal } = data;
+  const ownersHref = `/w/${workspaceSlug}/products/${productSlug}/settings?section=owners`;
   const publicHref = `/briefs/${workspaceSlug}/${productSlug}/${cycleSlug}`;
 
   if (!brief) {
@@ -215,11 +217,20 @@ export function CycleBriefPanel({
       </Stack>
 
       <Group justify="space-between" className="mt-4">
-        <Text size="xs" className="text-text-muted">
-          {brief.planSignedOffAt
-            ? `Signed off ${new Date(brief.planSignedOffAt).toLocaleDateString()}`
-            : "Only a Product owner can sign off the plan."}
-        </Text>
+        {hasProductOwner ? (
+          <Text size="xs" className="text-text-muted">
+            {brief.planSignedOffAt
+              ? `Signed off ${new Date(brief.planSignedOffAt).toLocaleDateString()}`
+              : "Only a Product owner can sign off the plan."}
+          </Text>
+        ) : (
+          <Text size="xs" className="text-text-muted">
+            This product has no Product owner, so nobody can sign off the brief.{" "}
+            <Link href={ownersHref} className="text-text-primary underline">
+              Set a Product owner
+            </Link>
+          </Text>
+        )}
         {isProductOwner && (
           <Button size="xs" onClick={onSignOff} loading={signOff.isPending} disabled={brief.outcomes.length === 0}>
             {isPublic ? "Sign off changes" : "Sign off and publish"}
