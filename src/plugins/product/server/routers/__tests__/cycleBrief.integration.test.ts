@@ -609,4 +609,30 @@ describe("cycleBrief review fixes", () => {
     const candidates = await caller.product.cycleBrief.carryOverCandidates({ briefId: b2.id });
     expect(candidates?.outcomes.find((o) => o.id === source.id)?.isCarried).toBe(false);
   });
+
+  it("refuses to carry an outcome over from a later cycle", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const caller = createTestCaller(owner.id);
+    const earlier = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      startDate: new Date("2030-05-01"),
+    });
+    const later = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      startDate: new Date("2030-05-15"),
+    });
+    const earlierBrief = await caller.product.cycleBrief.create({ cycleId: earlier.id });
+    const laterBrief = await caller.product.cycleBrief.create({ cycleId: later.id });
+    const future = await caller.product.cycleBrief.upsertOutcome({ briefId: laterBrief.id, text: "Later aim", why: "x" });
+    await expect(
+      caller.product.cycleBrief.carryOver({ outcomeId: future.id, toBriefId: earlierBrief.id }),
+    ).rejects.toThrow(/earlier cycle/i);
+  });
 });

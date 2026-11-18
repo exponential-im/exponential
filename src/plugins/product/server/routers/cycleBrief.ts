@@ -714,13 +714,25 @@ export const cycleBriefRouter = createTRPCRouter({
           goalId: true,
           removedAt: true,
           features: { select: { featureId: true } },
-          brief: { select: { id: true, productId: true } },
+          brief: {
+            select: { id: true, productId: true, cycle: { select: { startDate: true, createdAt: true } } },
+          },
         },
       });
       if (!source || source.removedAt || source.brief.productId !== target.productId) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Outcome not found in this product" });
       }
-      if (source.brief.id === target.id) {
+      const targetCycle = await ctx.db.list.findUniqueOrThrow({
+        where: { id: target.cycleId },
+        select: { startDate: true, createdAt: true },
+      });
+      // Earlier by start date, as carryOverCandidates orders them; by creation when either has no dates.
+      const sourceCycle = source.brief.cycle;
+      const isEarlier =
+        sourceCycle.startDate && targetCycle.startDate
+          ? sourceCycle.startDate < targetCycle.startDate
+          : sourceCycle.createdAt < targetCycle.createdAt;
+      if (source.brief.id === target.id || !isEarlier) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Carry an outcome over from an earlier cycle" });
       }
       const already = await ctx.db.cycleOutcome.findFirst({
