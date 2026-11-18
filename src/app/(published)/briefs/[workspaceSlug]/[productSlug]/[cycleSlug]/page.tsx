@@ -5,6 +5,7 @@ import { db } from "~/server/db";
 import { getPublicBaseUrl } from "~/lib/urls";
 import { getPublicBrief, publicBriefPath, publicBriefsPath } from "~/server/services/cycleBriefs/public";
 import { BriefShell, formatBriefDate, formatCycleWindow } from "../../../_components/BriefShell";
+import { OutcomeStatusPill } from "../../../_components/OutcomeStatusPill";
 
 /** Never cached: a sign-off or a status change must show at once. */
 export const dynamic = "force-dynamic";
@@ -44,6 +45,12 @@ export default async function PublicBriefPage({ params }: Params) {
         <ol className="space-y-6">
           {brief.outcomes.map((outcome, index) => (
             <li key={index} className="border-l-2 border-border-primary pl-4">
+              <div className="mb-1">
+                <OutcomeStatusPill
+                  status={outcome.status}
+                  asOf={outcome.statusSetAt ? formatBriefDate(outcome.statusSetAt) : null}
+                />
+              </div>
               <p className="text-base font-medium text-text-primary">{outcome.text}</p>
               <p className="mt-1 text-sm text-text-secondary">
                 <span className="text-text-muted">Why: </span>

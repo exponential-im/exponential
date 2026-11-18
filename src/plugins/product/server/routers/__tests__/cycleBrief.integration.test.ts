@@ -146,3 +146,58 @@ describe("cycleBrief Product owners", () => {
     expect((await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } })).planSignedOffAt).toBeNull();
   });
 });
+
+describe("cycleBrief weekly status", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("goes public at once without sign-off, with its date and without who set it", async () => {
+    const owner = await createUser(db, { name: "Olive Owner" });
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const member = await createUser(db, { name: "Mona Member" });
+    await addWorkspaceMember(db, ws.id, member.id, "member");
+
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    const outcome = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Aim", why: "Because" });
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+
+    await createTestCaller(member.id).product.cycleBrief.setStatus({ outcomeId: outcome.id, status: "at_risk" });
+
+    const result = await createUnauthenticatedCaller().product.cycleBrief.publicGet({
+      workspaceSlug: ws.slug,
+      productSlug: product.slug,
+      cycleSlug: cycle.slug,
+    });
+    expect(result?.brief.outcomes[0]?.status).toBe("at_risk");
+    expect(result?.brief.outcomes[0]?.statusSetAt).toBeInstanceOf(Date);
+    const json = JSON.stringify(result);
+    expect(json).not.toContain(member.id);
+    expect(json).not.toContain("Mona Member");
+    expect(json).not.toContain("Olive Owner");
+  });
+
+  it("is refused for a viewer", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    const viewer = await createUser(db);
+    await addWorkspaceMember(db, ws.id, viewer.id, "viewer");
+    const brief = await createTestCaller(owner.id).product.cycleBrief.create({ cycleId: cycle.id });
+    const outcome = await createTestCaller(owner.id).product.cycleBrief.upsertOutcome({
+      briefId: brief.id,
+      text: "Aim",
+      why: "Because",
+    });
+    await expect(
+      createTestCaller(viewer.id).product.cycleBrief.setStatus({ outcomeId: outcome.id, status: "done" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});

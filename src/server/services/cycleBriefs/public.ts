@@ -10,10 +10,15 @@
  * Objective, Feature or Insight ids, or any person's name (D-0094).
  */
 import type { PrismaClient } from "@prisma/client";
+import { isOutcomeStatus, type OutcomeStatus } from "./types";
 
 export interface PublicCycleOutcome {
   text: string;
   why: string;
+  /** Live weekly status, public without sign-off (D-0097). */
+  status: OutcomeStatus | null;
+  /** When the status was set: the page shows "as of <date>". */
+  statusSetAt: Date | null;
 }
 
 export interface PublicCycleBrief {
@@ -41,6 +46,8 @@ export interface BriefProjectionInput {
     publicText: string | null;
     publicWhy: string | null;
     removedAt: Date | null;
+    status: string | null;
+    statusSetAt: Date | null;
   }>;
 }
 
@@ -53,7 +60,15 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
   const outcomes = brief.outcomes
     .filter((o) => o.publicText !== null && o.removedAt === null)
     .sort((a, b) => a.position - b.position)
-    .map((o) => ({ text: o.publicText ?? "", why: o.publicWhy ?? "" }));
+    .map((o) => {
+      const status = isOutcomeStatus(o.status) ? o.status : null;
+      return {
+        text: o.publicText ?? "",
+        why: o.publicWhy ?? "",
+        status,
+        statusSetAt: status ? o.statusSetAt : null,
+      };
+    });
   return {
     cycleName: brief.cycle.name,
     cycleSlug: brief.cycle.slug,
@@ -68,7 +83,14 @@ const PROJECTION_SELECT = {
   planSignedOffAt: true,
   cycle: { select: { name: true, slug: true, startDate: true, endDate: true } },
   outcomes: {
-    select: { position: true, publicText: true, publicWhy: true, removedAt: true },
+    select: {
+      position: true,
+      publicText: true,
+      publicWhy: true,
+      removedAt: true,
+      status: true,
+      statusSetAt: true,
+    },
   },
 } as const;
 

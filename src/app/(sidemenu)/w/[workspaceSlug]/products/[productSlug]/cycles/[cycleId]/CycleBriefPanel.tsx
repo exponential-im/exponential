@@ -2,12 +2,19 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Button, Group, Stack, Text, Textarea } from "@mantine/core";
+import { Button, Group, Select, Stack, Text, Textarea } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { IconExternalLink, IconPlus } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
 import { Panel, Pill, SectionHeader } from "~/app/_components/ui";
+import {
+  OUTCOME_STATUSES,
+  OUTCOME_STATUS_LABELS,
+  isOutcomeStatus,
+} from "~/server/services/cycleBriefs/types";
+
+const STATUS_OPTIONS = OUTCOME_STATUSES.map((value) => ({ value, label: OUTCOME_STATUS_LABELS[value] }));
 
 interface OutcomeDraft {
   text: string;
@@ -98,6 +105,7 @@ export function CycleBriefPanel({
     onError,
   });
   const signOff = api.product.cycleBrief.signOff.useMutation({ onSuccess: invalidate, onError });
+  const setStatus = api.product.cycleBrief.setStatus.useMutation({ onSuccess: invalidate, onError });
 
   if (!data?.canHaveBrief) return null;
   const { brief, isProductOwner, hasProductOwner, cycleGoal } = data;
@@ -192,6 +200,25 @@ export function CycleBriefPanel({
                 <Button size="compact-xs" variant="subtle" onClick={() => setEditingId(outcome.id)}>
                   Edit
                 </Button>
+              </Group>
+              <Group gap="xs" className="mt-2">
+                <Select
+                  size="xs"
+                  w={140}
+                  placeholder="Set status"
+                  aria-label="Weekly status"
+                  data={STATUS_OPTIONS}
+                  value={isOutcomeStatus(outcome.status) ? outcome.status : null}
+                  disabled={brief.closedAt !== null}
+                  onChange={(value) => {
+                    if (isOutcomeStatus(value)) setStatus.mutate({ outcomeId: outcome.id, status: value });
+                  }}
+                />
+                <Text size="xs" className="text-text-muted">
+                  {outcome.statusSetAt
+                    ? `as of ${new Date(outcome.statusSetAt).toLocaleDateString()} · public at once`
+                    : "Set weekly; goes public at once, no sign-off"}
+                </Text>
               </Group>
             </Panel>
           ),

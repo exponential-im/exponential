@@ -5,6 +5,7 @@ import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/
 import { TEXT_LIMITS } from "~/lib/text-limits";
 import { getWorkspaceMembership } from "~/server/services/access";
 import { getPublicBrief } from "~/server/services/cycleBriefs/public";
+import { OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
 import { assertWorkspaceAccess, type WorkspaceAccessLevel } from "./product";
 
 /**
@@ -316,6 +317,28 @@ export const cycleBriefRouter = createTRPCRouter({
         }),
       ]);
       return { signedOffAt: brief.planSignedOffAt ?? now };
+    }),
+
+  /**
+   * The weekly status of an outcome: anyone with edit access sets it, and it
+   * is public at once, with its date, without sign-off (D-0097). It is never
+   * derived from tickets. Closed briefs take results instead.
+   */
+  setStatus: protectedProcedure
+    .input(z.object({ outcomeId: z.string(), status: z.enum(OUTCOME_STATUSES) }))
+    .mutation(async ({ ctx, input }) => {
+      const outcome = await loadOutcomeWithAccess(ctx.db, ctx.session.user.id, input.outcomeId, "edit");
+      if (outcome.brief.closedAt) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This cycle is closed: give the outcome a final result instead",
+        });
+      }
+      return ctx.db.cycleOutcome.update({
+        where: { id: outcome.id },
+        data: { status: input.status, statusSetAt: new Date(), statusSetById: ctx.session.user.id },
+        select: { id: true, status: true, statusSetAt: true },
+      });
     }),
 
   /** One signed-off brief as the public sees it. Null when not public. */
