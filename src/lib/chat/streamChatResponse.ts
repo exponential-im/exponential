@@ -1,3 +1,4 @@
+import { browserTimeZone } from './localNow';
 import { parseChatStreamBuffer, type ParsedChatStream } from './streamProtocol';
 
 export interface ChatStreamCoreMessage {
@@ -14,6 +15,11 @@ export interface ChatStreamPayload {
   projectId?: string | null;
   conversationId?: string | null;
   platform: string;
+  /**
+   * The browser's IANA zone. The route uses it only when the person has no
+   * zone saved in their profile. Filled in from the browser when omitted.
+   */
+  timezone?: string;
   /** `PageContext.pageType` of the page the chat is on; recorded with the turn. */
   pageContextType?: string;
 }
@@ -91,7 +97,7 @@ export async function streamChatResponse(
     const response = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, timezone: payload.timezone ?? browserTimeZone() }),
       signal: abortController.signal,
     });
 

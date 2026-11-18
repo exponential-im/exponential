@@ -36,7 +36,7 @@ import {
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { classifyToolError, isReportableToolError, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
-import { isValidTimeZone } from "~/lib/chat/localNow";
+import { resolveTimeZone, shouldSaveDetectedZone, timeZonePromptBlock } from "~/lib/chat/timeZoneContext";
 import {
   PER_REQUEST_COST_ALERT_USD,
   priceTokenBreakdown,
@@ -300,10 +300,27 @@ export async function POST(req: Request) {
       ],
     ];
     // The person's IANA time zone, for tools that place things on a clock
-    // (calendar events). Client-supplied, so only a zone this runtime
-    // recognises is passed on; a tool with no zone must ask, not assume UTC.
-    if (isValidTimeZone(rawTimezone)) {
-      entries.push(["timezone", rawTimezone]);
+    // (calendar events) and for the date in the prompt. The zone saved in
+    // their profile wins; the browser's zone is the fallback, and is saved
+    // the first time it is seen. With neither, no zone is passed and the
+    // agent asks; it never assumes UTC. See ~/lib/chat/timeZoneContext.
+    const savedTimeZone = await db.user
+      .findUnique({ where: { id: session.user.id }, select: { timezone: true } })
+      .then((u) => u?.timezone ?? null);
+    let timeZone = resolveTimeZone({ saved: savedTimeZone, browser: rawTimezone });
+    if (shouldSaveDetectedZone(timeZone)) {
+      // `timezone: null` in the filter: a zone saved by another tab or the
+      // settings page between the read and this write is never overwritten.
+      const saved = await db.user
+        .updateMany({ where: { id: session.user.id, timezone: null }, data: { timezone: timeZone.zone } })
+        .then((r) => r.count > 0)
+        .catch(() => false);
+      if (saved) timeZone = { zone: timeZone.zone, source: "detected" };
+    }
+    if (timeZone.zone) {
+      entries.push(["timezone", timeZone.zone]);
+      // Lets get-my-time-zone say the zone is the one saved in the profile.
+      if (timeZone.source !== "browser") entries.push(["timezoneSource", "profile"]);
     }
     
     // Verify workspace access and fetch the in-scope AI instructions for the
@@ -544,6 +561,15 @@ export async function POST(req: Request) {
         ...finalMessages,
       ];
     }
+
+    // The person's date, time and zone. Built here from the resolved zone (not
+    // by the client), so the date the model reads and the zone its tools use
+    // always agree, and so a saved zone beats the browser's.
+    const timeBlock = timeZonePromptBlock(timeZone, new Date());
+    finalMessages = [
+      { role: 'system' as const, content: timeBlock },
+      ...finalMessages,
+    ];
 
     // NOTE: The ACIP security policy is NOT injected here. Each Mastra agent
     // embeds SECURITY_POLICY (or SECURITY_POLICY_COMPACT) inside its own
