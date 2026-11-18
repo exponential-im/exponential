@@ -14,6 +14,7 @@ export type AgendaRefType =
   | "goal"
   | "ticket"
   | "cycle"
+  | "cycle_outcome"
   | "meeting"
   | "project"
   | "text";
