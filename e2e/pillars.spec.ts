@@ -21,6 +21,8 @@ const names = {
   project: `E2E Migrate to Railway ${RUN}`,
   projectAction: `E2E untagged action in the project ${RUN}`,
   ticket: `E2E alert on failed backups ${RUN}`,
+  goal: `E2E zero unplanned downtime ${RUN}`,
+  resource: `E2E incident runbook ${RUN}`,
 };
 
 interface Seeded {
@@ -29,6 +31,8 @@ interface Seeded {
   projectSlug: string;
   actionId: string;
   ticketId: string;
+  goalId: number;
+  resourceId: string;
 }
 
 async function trpc(request: APIRequestContext, procedure: string, input: unknown) {
@@ -92,12 +96,35 @@ test.describe("Pillars", () => {
         tags: { create: { tagId: tag.id } },
       },
     });
-    seeded = { tagId: tag.id, projectId: project.id, projectSlug, actionId: action.id, ticketId: ticket.id };
+    const goal = await db.goal.create({
+      data: { title: names.goal, userId: fixture.userId, workspaceId: workspace.id, status: "active" },
+    });
+    const resource = await db.resource.create({
+      data: {
+        title: names.resource,
+        userId: fixture.userId,
+        workspaceId: workspace.id,
+        contentType: "note",
+        content: "Restore from the latest snapshot.",
+        readStatus: "read",
+      },
+    });
+    seeded = {
+      tagId: tag.id,
+      projectId: project.id,
+      projectSlug,
+      actionId: action.id,
+      ticketId: ticket.id,
+      goalId: goal.id,
+      resourceId: resource.id,
+    };
   });
 
   test.afterAll(async () => {
     if (seeded) {
       await db.ticket.delete({ where: { id: seeded.ticketId } });
+      await db.goal.delete({ where: { id: seeded.goalId } });
+      await db.resource.delete({ where: { id: seeded.resourceId } });
       await db.action.delete({ where: { id: seeded.actionId } });
       await db.project.delete({ where: { id: seeded.projectId } });
       await db.tag.delete({ where: { id: seeded.tagId } });
@@ -135,5 +162,34 @@ test.describe("Pillars", () => {
     await expect(loose.getByRole("link", { name: names.ticket })).toBeVisible();
     await expect(loose.getByText("Unassigned")).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pillar-page.png"), fullPage: true });
+  });
+
+  test("a goal and a resource filed under the Pillar from their own pages appear on it", async ({ page }) => {
+    // The first test promoted the tag; this one runs after it (serial).
+    const fileUnder = async (button: string) => {
+      const add = page.getByRole("button", { name: button });
+      await expect(add).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+      await add.click();
+      await page.locator("label", { hasText: names.pillar }).click();
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(page.getByRole("link", { name: names.pillar })).toBeVisible();
+    };
+
+    await page.goto(`/w/${fixture.workspaceSlug}/goals/${seeded.goalId}`);
+    await fileUnder("Add Pillar");
+    await page.screenshot({ path: test.info().outputPath("goal-with-pillar.png"), fullPage: true });
+
+    await page.goto(`/w/${fixture.workspaceSlug}/knowledge-base/${seeded.resourceId}`);
+    await fileUnder("Add Pillar");
+
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    await expect(page.getByRole("region", { name: "Goals" }).getByRole("link", { name: names.goal })).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Resources" }).getByRole("link", { name: names.resource }),
+    ).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("pillar-page-goals-resources.png"), fullPage: true });
   });
 });

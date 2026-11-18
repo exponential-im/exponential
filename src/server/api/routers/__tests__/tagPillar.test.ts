@@ -268,3 +268,85 @@ describe("tag.setEntityTags on a project", () => {
     ).toBe("BAD_REQUEST");
   });
 });
+
+describe("tag.setEntityTags on a goal and a resource", () => {
+  const pillar = { id: "tag-devops", category: "pillar", workspaceId, archivedAt: null };
+
+  it("files a workspace objective under a Pillar, parsing its numeric id", async () => {
+    stubRole(dbMock, "member");
+    dbMock.goal.findUnique.mockResolvedValue({
+      userId: "someone-else",
+      driUserId: null,
+      workspaceId,
+      pillarTags: [],
+    } as never);
+    dbMock.tag.findMany.mockResolvedValue([pillar] as never);
+    dbMock.goalTag.findMany.mockResolvedValue([] as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setEntityTags({ entityType: "goal", entityId: "42", tagIds: ["tag-devops"] });
+
+    expect(dbMock.goalTag.createMany).toHaveBeenCalledWith({
+      data: [{ goalId: 42, tagId: "tag-devops" }],
+      skipDuplicates: true,
+    });
+  });
+
+  it("refuses a viewer filing an objective", async () => {
+    stubRole(dbMock, "viewer");
+    dbMock.goal.findUnique.mockResolvedValue({
+      userId: callerId,
+      driUserId: null,
+      workspaceId,
+      pillarTags: [],
+    } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(
+        caller.tag.setEntityTags({ entityType: "goal", entityId: "42", tagIds: ["tag-devops"] }),
+      ),
+    ).toBe("FORBIDDEN");
+    expect(dbMock.goalTag.createMany).not.toHaveBeenCalled();
+  });
+
+  it("lets a Resource's owner file it", async () => {
+    stubRole(dbMock, "member");
+    dbMock.resource.findUnique.mockResolvedValue({ userId: callerId, workspaceId, pillarTags: [] } as never);
+    dbMock.tag.findMany.mockResolvedValue([pillar] as never);
+    dbMock.resourceTag.findMany.mockResolvedValue([] as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setEntityTags({ entityType: "resource", entityId: "res-1", tagIds: ["tag-devops"] });
+
+    expect(dbMock.resourceTag.createMany).toHaveBeenCalledWith({
+      data: [{ resourceId: "res-1", tagId: "tag-devops" }],
+      skipDuplicates: true,
+    });
+  });
+
+  it("never lets anyone else file someone's Resource", async () => {
+    stubRole(dbMock, "owner");
+    dbMock.resource.findUnique.mockResolvedValue({ userId: "someone-else", workspaceId, pillarTags: [] } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(
+        caller.tag.setEntityTags({ entityType: "resource", entityId: "res-1", tagIds: ["tag-devops"] }),
+      ),
+    ).toBe("NOT_FOUND");
+    expect(dbMock.resourceTag.createMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses a Resource with no workspace", async () => {
+    stubRole(dbMock, "member");
+    dbMock.resource.findUnique.mockResolvedValue({ userId: callerId, workspaceId: null, pillarTags: [] } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(
+        caller.tag.setEntityTags({ entityType: "resource", entityId: "res-1", tagIds: ["tag-devops"] }),
+      ),
+    ).toBe("BAD_REQUEST");
+  });
+});

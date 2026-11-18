@@ -5,8 +5,10 @@ import Link from "next/link";
 import type { ReactNode } from "react";
 import { Avatar, Container, Group, Skeleton, Text, ThemeIcon, Title, Tooltip } from "@mantine/core";
 import {
+  IconBookmark,
   IconCircleDashed,
   IconFolder,
+  IconTarget,
   IconTicket,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
@@ -54,7 +56,7 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
     );
   }
 
-  const { pillar, projects, looseWork } = data;
+  const { pillar, goals, projects, looseWork, resources } = data;
   const looseCount = looseWork.actions.length + looseWork.tickets.length;
 
   return (
@@ -81,6 +83,35 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
       </header>
 
       <div className="flex flex-col gap-8">
+        <section aria-label="Goals">
+          <SectionHeader title="Goals" icon={<IconTarget size={14} />} count={goals.length} className="mb-3" />
+          {goals.length === 0 ? (
+            <EmptyState compact message="No open goal is filed under this Pillar." />
+          ) : (
+            <Panel padding="sm">
+              <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                {goals.map((goal) => (
+                  <WorkRow
+                    key={goal.id}
+                    href={`/w/${workspaceSlug}/goals/${goal.id}`}
+                    icon={<IconTarget size={14} />}
+                    label={goal.title}
+                    meta={
+                      goal.period ? (
+                        <Text size="xs" className="shrink-0 text-text-muted">
+                          {goal.period}
+                        </Text>
+                      ) : undefined
+                    }
+                    people={goal.driUser ? [goal.driUser] : []}
+                    emptyPeopleLabel="No DRI"
+                  />
+                ))}
+              </ul>
+            </Panel>
+          )}
+        </section>
+
         <section aria-label="Projects">
           <SectionHeader title="Active projects" icon={<IconFolder size={14} />} count={projects.length} className="mb-3" />
           {projects.length === 0 ? (
@@ -135,6 +166,32 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
             </Panel>
           )}
         </section>
+
+        <section aria-label="Resources">
+          <SectionHeader
+            title="Resources"
+            icon={<IconBookmark size={14} />}
+            count={resources.length}
+            className="mb-3"
+          />
+          {resources.length === 0 ? (
+            <EmptyState compact message="No reading or reference is filed under this Pillar." />
+          ) : (
+            <Panel padding="sm">
+              <ul className="m-0 flex list-none flex-col gap-1 p-0">
+                {resources.map((resource) => (
+                  <WorkRow
+                    key={resource.id}
+                    href={`/w/${workspaceSlug}/knowledge-base/${resource.id}`}
+                    icon={<IconBookmark size={14} />}
+                    label={resource.title}
+                    people={[resource.user]}
+                  />
+                ))}
+              </ul>
+            </Panel>
+          )}
+        </section>
       </div>
     </Container>
   );
@@ -146,12 +203,14 @@ function WorkRow({
   label,
   meta,
   people,
+  emptyPeopleLabel = "Unassigned",
 }: {
   href: string;
   icon: ReactNode;
   label: string;
   meta?: ReactNode;
   people: PageUser[];
+  emptyPeopleLabel?: string;
 }) {
   return (
     <li className="flex items-center gap-2 py-1">
@@ -161,7 +220,7 @@ function WorkRow({
       </Link>
       {meta}
       {people.length === 0 ? (
-        <Pill size="xs">Unassigned</Pill>
+        <Pill size="xs">{emptyPeopleLabel}</Pill>
       ) : (
         <Avatar.Group spacing="xs">
           {people.slice(0, 3).map((person) => (

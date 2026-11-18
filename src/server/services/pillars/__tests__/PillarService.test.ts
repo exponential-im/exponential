@@ -15,6 +15,7 @@ vi.mock("~/server/services/access", () => ({
   buildActionAccessWhere: vi.fn(() => ({ actionAccess: true })),
   buildTicketAccessWhere: vi.fn(() => ({ ticketAccess: true })),
   buildWorkspaceProjectAccessWhere: vi.fn(() => Promise.resolve({ projectAccess: true })),
+  buildSharedResourceWhere: vi.fn(() => Promise.resolve({ sharedResource: true })),
 }));
 
 import { assertWorkspaceMembership, assertWorkspaceRole } from "~/server/services/access";
@@ -135,6 +136,8 @@ describe("getPillarPage", () => {
     db.project.findMany.mockResolvedValue([] as never);
     db.action.findMany.mockResolvedValue([] as never);
     db.ticket.findMany.mockResolvedValue([] as never);
+    db.goal.findMany.mockResolvedValue([] as never);
+    db.resource.findMany.mockResolvedValue([] as never);
   });
 
   it("hides a tag that is not a Pillar", async () => {
@@ -207,5 +210,27 @@ describe("getPillarPage", () => {
     const page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
 
     expect(page.pillar.archivedAt).toEqual(archivedAt);
+  });
+
+  it("lists the workspace's open objectives filed under the Pillar", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(db.goal.findMany.mock.calls[0]![0]!.where).toEqual({
+      workspaceId: WS,
+      pillarTags: { some: { tagId: "tag-devops" } },
+      status: { notIn: ["completed", "archived"] },
+    });
+  });
+
+  it("lists only Resources the viewer owns or shares through a Project", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(db.resource.findMany.mock.calls[0]![0]!.where).toEqual({
+      AND: [
+        { OR: [{ userId: USER }, { sharedResource: true }] },
+        { workspaceId: WS, archivedAt: null },
+        { pillarTags: { some: { tagId: "tag-devops" } } },
+      ],
+    });
   });
 });

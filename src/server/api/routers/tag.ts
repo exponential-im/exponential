@@ -11,7 +11,15 @@ import {
 import { setPillar as setPillarService } from "~/server/services/pillars/PillarService";
 import { PILLAR_CATEGORY } from "~/types/tag";
 
-const tagEntityTypeSchema = z.enum(["action", "ticket", "feature", "epic", "project"]);
+const tagEntityTypeSchema = z.enum([
+  "action",
+  "ticket",
+  "feature",
+  "epic",
+  "project",
+  "goal",
+  "resource",
+]);
 
 /**
  * `tag.create` and `tag.update` may not make or unmake a Pillar: promotion has

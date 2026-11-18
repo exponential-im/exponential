@@ -1,8 +1,10 @@
 import type { PrismaClient, Tag } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import {
+  assertCanEditGoal,
   assertWorkspaceMembership,
   assertWorkspaceWriteRole,
+  buildSharedResourceWhere,
   canEditAction,
   canEditProject,
   getActionAccess,
@@ -11,13 +13,24 @@ import {
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
 
-export type TagEntityType = "action" | "ticket" | "feature" | "epic" | "project";
+export type TagEntityType =
+  | "action"
+  | "ticket"
+  | "feature"
+  | "epic"
+  | "project"
+  | "goal"
+  | "resource";
 
 /**
  * Entities that take Pillars only, never ordinary labels (ADR-0085): a
  * Project, Goal or Resource is filed under a standing area, not labelled.
  */
-const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set(["project"]);
+const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set([
+  "project",
+  "goal",
+  "resource",
+]);
 
 interface EntityResolution {
   workspaceId: string;
@@ -159,7 +172,74 @@ async function resolveEntity(
         currentTagIds: project.pillarTags.map((t) => t.tagId),
       };
     }
+    case "goal": {
+      const goalId = parseGoalId(entityId);
+      const goal = await db.goal.findUnique({
+        where: { id: goalId },
+        select: {
+          userId: true,
+          driUserId: true,
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (level === "edit") {
+        await assertCanEditGoal(db, userId, goal);
+      } else if (!goal) {
+        throwNotFound("Objective");
+      }
+      const workspaceId = requireEntityWorkspace(goal!.workspaceId, "Objective");
+      // Reading an objective's Pillars: any member of its workspace, as for the objective.
+      if (level === "view") await assertWorkspaceMembership(db, userId, workspaceId);
+      return {
+        workspaceId,
+        currentTagIds: goal!.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "resource": {
+      const resource = await db.resource.findUnique({
+        where: { id: entityId },
+        select: {
+          userId: true,
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!resource) throwNotFound("Resource");
+      const isOwner = resource.userId === userId;
+      // Only its owner files a Resource; others it is shared with may read its Pillars.
+      if (!isOwner && !(level === "view" && (await canReadSharedResource(db, userId, entityId)))) {
+        throwNotFound("Resource");
+      }
+      const workspaceId = requireEntityWorkspace(resource.workspaceId, "Resource");
+      if (level === "edit") await assertWorkspaceWriteRole(db, userId, workspaceId);
+      return {
+        workspaceId,
+        currentTagIds: resource.pillarTags.map((t) => t.tagId),
+      };
+    }
   }
+}
+
+/** A goal's id is an integer; the polymorphic API passes every id as a string. */
+function parseGoalId(entityId: string): number {
+  const id = Number(entityId);
+  if (!Number.isInteger(id) || id <= 0) throwNotFound("Objective");
+  return id;
+}
+
+async function canReadSharedResource(
+  db: PrismaClient,
+  userId: string,
+  resourceId: string,
+): Promise<boolean> {
+  const shared = await buildSharedResourceWhere(db, userId);
+  if (!shared) return false;
+  const row = await db.resource.findFirst({
+    where: { AND: [{ id: resourceId }, shared] },
+    select: { id: true },
+  });
+  return row !== null;
 }
 
 /** A tag is workspace-scoped, so an entity with no workspace carries none. */
@@ -319,6 +399,32 @@ async function applyTagSet(
           });
         }
         return;
+      case "goal": {
+        const goalId = parseGoalId(entityId);
+        if (toRemove.length > 0) {
+          await tx.goalTag.deleteMany({ where: { goalId, tagId: { in: toRemove } } });
+        }
+        if (toAdd.length > 0) {
+          await tx.goalTag.createMany({
+            data: toAdd.map((tagId) => ({ goalId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
+      }
+      case "resource":
+        if (toRemove.length > 0) {
+          await tx.resourceTag.deleteMany({
+            where: { resourceId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.resourceTag.createMany({
+            data: toAdd.map((tagId) => ({ resourceId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
     }
   });
 }
@@ -364,6 +470,22 @@ async function loadTagsForEntity(
     case "project": {
       const rows = await db.projectTag.findMany({
         where: { projectId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "goal": {
+      const rows = await db.goalTag.findMany({
+        where: { goalId: parseGoalId(entityId) },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "resource": {
+      const rows = await db.resourceTag.findMany({
+        where: { resourceId: entityId },
         include: { tag: true },
         orderBy: { createdAt: "asc" },
       });

@@ -11,13 +11,15 @@ import { PILLAR_CATEGORY } from "~/types/tag";
 import { getTagMantineColor } from "~/utils/tagColors";
 
 /** Entities that take Pillars only (never ordinary labels). */
-export type PillarEntityType = "project";
+export type PillarEntityType = "project" | "goal" | "resource";
 
 interface EntityPillarsProps {
   entityType: PillarEntityType;
   entityId: string;
   workspaceId: string;
   workspaceSlug: string;
+  /** Show the Pillars without the editor (someone who may only read the item). */
+  readOnly?: boolean;
   /** Frame the control (a section with a heading, say). Not called when nothing is shown. */
   wrapper?: (content: ReactNode) => ReactNode;
 }
@@ -32,6 +34,7 @@ export function EntityPillars({
   entityId,
   workspaceId,
   workspaceSlug,
+  readOnly = false,
   wrapper = (content) => content,
 }: EntityPillarsProps) {
   const utils = api.useUtils();
@@ -39,7 +42,10 @@ export function EntityPillars({
   const [draft, setDraft] = useState<string[]>([]);
 
   const current = api.tag.listForEntity.useQuery({ entityType, entityId });
-  const pillars = api.tag.list.useQuery({ workspaceId, category: PILLAR_CATEGORY });
+  const pillars = api.tag.list.useQuery(
+    { workspaceId, category: PILLAR_CATEGORY },
+    { enabled: !readOnly },
+  );
 
   const save = api.tag.setEntityTags.useMutation({
     onSuccess: async () => {
@@ -60,8 +66,12 @@ export function EntityPillars({
     (t) => !t.archivedAt || currentIds.includes(t.id),
   );
 
-  // Nothing to file under yet, and nothing filed: say nothing.
-  if (!current.isLoading && !pillars.isLoading && currentTags.length === 0 && offered.length === 0) {
+  // Nothing filed and nothing to file under (or no right to): say nothing.
+  if (
+    !current.isLoading &&
+    currentTags.length === 0 &&
+    (readOnly || (!pillars.isLoading && offered.length === 0))
+  ) {
     return null;
   }
 
@@ -72,7 +82,7 @@ export function EntityPillars({
 
   return wrapper(
     <Group gap={6} wrap="wrap" align="center">
-      {currentTags.length === 0 && (
+      {currentTags.length === 0 && !readOnly && (
         <Text size="xs" className="text-text-muted">
           Not under any Pillar
         </Text>
@@ -90,6 +100,7 @@ export function EntityPillars({
           {tag.name}
         </Badge>
       ))}
+      {!readOnly && (
       <Popover opened={opened} onChange={setOpened} position="bottom-start" width={300} shadow="md">
         <Popover.Target>
           <Button
@@ -149,6 +160,7 @@ export function EntityPillars({
           </Stack>
         </Popover.Dropdown>
       </Popover>
+      )}
     </Group>,
   );
 }

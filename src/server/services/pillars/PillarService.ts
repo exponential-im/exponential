@@ -17,6 +17,7 @@ import {
   assertWorkspaceMembership,
   assertWorkspaceRole,
   buildActionAccessWhere,
+  buildSharedResourceWhere,
   buildTicketAccessWhere,
   buildWorkspaceProjectAccessWhere,
 } from "~/server/services/access";
@@ -29,6 +30,8 @@ export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
 const CLOSED_ACTION_STATUSES = ["COMPLETED", "CANCELLED", "DELETED", "DRAFT"];
 /** Ticket statuses that count as finished on a Pillar page. */
 const CLOSED_TICKET_STATUSES = ["DONE", "DEPLOYED", "ARCHIVED"] as const;
+/** Objective statuses that count as finished on a Pillar page. */
+const CLOSED_GOAL_STATUSES = ["completed", "archived"];
 /** How many open Actions to list under each Project on the page. */
 const CONTAINER_WORK_LIMIT = 10;
 
@@ -149,9 +152,33 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
   const openTicket: Prisma.TicketWhereInput = {
     status: { notIn: [...CLOSED_TICKET_STATUSES] },
   };
-  const projectAccess = await buildWorkspaceProjectAccessWhere(db, userId, workspaceId);
+  const [projectAccess, sharedResources] = await Promise.all([
+    buildWorkspaceProjectAccessWhere(db, userId, workspaceId),
+    buildSharedResourceWhere(db, userId, { workspaceId }),
+  ]);
+  // A Resource is private to its owner unless filed under a Project the viewer is in.
+  const resourceAccess: Prisma.ResourceWhereInput = {
+    OR: [{ userId }, ...(sharedResources ? [sharedResources] : [])],
+  };
 
-  const [projects, looseActions, looseTickets] = await Promise.all([
+  const [goals, projects, looseActions, looseTickets, resources] = await Promise.all([
+    // Objectives in a workspace are readable by every member of it.
+    db.goal.findMany({
+      where: {
+        workspaceId,
+        pillarTags: { some: { tagId } },
+        status: { notIn: CLOSED_GOAL_STATUSES },
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        period: true,
+        dueDate: true,
+        driUser: { select: userSelect },
+      },
+      orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { title: "asc" }],
+    }),
     db.project.findMany({
       where: {
         AND: [
@@ -201,6 +228,24 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
       select: ticketSelect,
       orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     }),
+    db.resource.findMany({
+      where: {
+        AND: [
+          resourceAccess,
+          { workspaceId, archivedAt: null },
+          { pillarTags: { some: { tagId } } },
+        ],
+      },
+      select: {
+        id: true,
+        title: true,
+        url: true,
+        contentType: true,
+        readStatus: true,
+        user: { select: userSelect },
+      },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
 
   const looseWork: PillarLooseWork = {
@@ -217,8 +262,10 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
       archivedAt: pillar.archivedAt,
       workspaceId,
     },
+    goals,
     projects,
     looseWork,
+    resources,
   };
 }
 
