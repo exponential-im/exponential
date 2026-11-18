@@ -44,6 +44,14 @@ export interface ParsedChatStream {
   displayText: string;
   /** Tool calls in first-seen order, each at its latest lifecycle state. */
   toolCalls: ToolCall[];
+  /**
+   * Where the answer starts in `displayText`: just after the last tool frame
+   * (or a tool frame still arriving). Text before it was written while the
+   * agent worked ("Let me look that up…") and belongs with the tool steps;
+   * see `splitTurnText`. 0 when no tool frame has arrived. Optional because
+   * the local wiki stream builds its own state without it.
+   */
+  answerOffset?: number;
   /** Set once the meta frame has fully arrived and parsed. */
   interactionId?: string;
 }
@@ -55,13 +63,20 @@ const TOOL_PREFIX = '__exp_tool__:';
 // Zero-width-space keepalives the server emits on non-text chunks. They reset
 // the reader's idle timer but must never appear in rendered text.
 const KEEPALIVE_RE = /​/g;
+// U+001E, the sentinel the route puts in front of each frame.
+const RECORD_SEPARATOR_RE = /\u001E/g;
 
 type ToolFramePayload =
   | { phase: 'call'; id: string; name: string; args?: Record<string, unknown> }
   | { phase: 'result'; id: string; name: string }
   | { phase: 'error'; id: string; name: string; kind?: string; msg?: string };
 
-export function parseChatStreamBuffer(buffer: string): ParsedChatStream {
+export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
+  // The route writes every frame as `\n\u001E__exp_…`. Drop the record
+  // separators first so the frame patterns take the newline with them;
+  // otherwise a stray `\n\u001E` is left where each frame was, and a turn
+  // that ends on a tool call looks like it has an answer after it.
+  const buffer = rawBuffer.replace(RECORD_SEPARATOR_RE, '');
   let displayText = buffer;
   let interactionId: string | undefined;
 
@@ -79,11 +94,20 @@ export function parseChatStreamBuffer(buffer: string): ParsedChatStream {
     }
   }
 
+  // Keepalives go first so the answer offset below counts only rendered text.
+  displayText = displayText.replace(KEEPALIVE_RE, '');
+
   // Extract every complete tool frame and fold it into the call map. A
   // `result`/`error` frame inherits `args` from its earlier `call` frame,
   // which necessarily precedes it in the buffer.
   const toolCallsById = new Map<string, ToolCall>();
-  displayText = displayText.replace(TOOL_RE, (_match, json: string) => {
+  // Characters removed so far, to map a frame's buffer offset to its position
+  // in the rendered text.
+  let removed = 0;
+  let answerOffset = 0;
+  displayText = displayText.replace(TOOL_RE, (match: string, json: string, offset: number) => {
+    answerOffset = offset - removed;
+    removed += match.length;
     try {
       const payload = JSON.parse(json) as ToolFramePayload;
       if (payload.phase === 'call') {
@@ -124,14 +148,15 @@ export function parseChatStreamBuffer(buffer: string): ParsedChatStream {
   const incompleteAt = displayText.lastIndexOf(TOOL_PREFIX);
   if (incompleteAt !== -1 && !displayText.slice(incompleteAt).includes('\n')) {
     displayText = displayText.slice(0, incompleteAt).replace(/\n$/, '');
+    // A tool is starting, so everything written so far was working text.
+    answerOffset = displayText.length;
   }
-
-  displayText = displayText.replace(KEEPALIVE_RE, '');
 
   return {
     displayText,
     toolCalls: Array.from(toolCallsById.values()),
     interactionId,
+    answerOffset: Math.min(answerOffset, displayText.length),
   };
 }
 

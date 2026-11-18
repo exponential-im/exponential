@@ -24,6 +24,12 @@ export interface ChatMessage {
   agentName?: string;
   interactionId?: string;
   toolCalls?: ToolCall[];
+  /**
+   * Where the answer starts in `content`: text before it was written between
+   * tool calls and renders inside the tool card (`splitTurnText`). Unset for
+   * turns without tool calls and for threads restored from history.
+   */
+  answerOffset?: number;
   /** 'voice' when this turn was spoken via voice mode (renders the 🎙 marker). */
   marker?: 'voice';
   /**

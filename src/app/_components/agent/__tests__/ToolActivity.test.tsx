@@ -148,3 +148,69 @@ describe('ToolActivity', () => {
     expect(screen.getByText('Search meeting notes — failed')).toBeInTheDocument();
   });
 });
+
+// Ticket 982 (rapid.drift): a finished turn leaves one line, not a list.
+describe('ToolActivity — finished turns and plumbing', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  const turnCalls: ToolCall[] = [
+    call({ id: 'a', name: 'toolSearch' }),
+    call({ id: 'b', name: 'getTodaysActionsTool' }),
+    call({ id: 'c', name: 'checkCalendarConnectionTool' }),
+    call({ id: 'd', name: 'toolSearch' }),
+  ];
+
+  it('never shows tool search', () => {
+    render(<ToolActivity calls={turnCalls} />);
+    expect(screen.queryByText(/Tool search/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Fetched today's tasks")).toBeInTheDocument();
+  });
+
+  it('shows each step while the turn is still running', () => {
+    render(<ToolActivity calls={turnCalls} working="Let me look that up." finished={false} />);
+    expect(screen.getByText("Fetched today's tasks")).toBeInTheDocument();
+    expect(screen.queryByText(/Used \d tools/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Let me look that up.')).not.toBeInTheDocument();
+  });
+
+  it('folds a finished turn into one summary row, counting only visible steps', () => {
+    render(<ToolActivity calls={turnCalls} working="Let me look that up." finished />);
+    const summary = screen.getByRole('button', { name: /Used 2 tools/ });
+    expect(summary).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('shows the steps and the working text once the summary is opened', () => {
+    render(<ToolActivity calls={turnCalls} working="Let me look that up." finished />);
+    fireEvent.click(screen.getByRole('button', { name: /Used 2 tools/ }));
+    expect(screen.getByRole('button', { name: /Used 2 tools/ })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText("Fetched today's tasks")).toBeInTheDocument();
+    expect(screen.getByText('Let me look that up.')).toBeInTheDocument();
+  });
+
+  it('leaves a finished single step with no working text as it is', () => {
+    render(<ToolActivity calls={[call({ args: { name: 'Website relaunch' } })]} finished />);
+    expect(screen.getByText(/Created project: Website relaunch/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Used/ })).not.toBeInTheDocument();
+  });
+
+  it('says how many steps failed in the summary', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({ id: 'x', name: 'getTodaysActionsTool' }),
+          call({ id: 'y', name: 'createCalendarEventTool', status: 'error', errorKind: 'rejected' }),
+        ]}
+        finished
+      />,
+    );
+    expect(screen.getByRole('button', { name: /Used 2 tools · 1 failed/ })).toBeInTheDocument();
+  });
+
+  it('renders nothing for a turn whose only step was tool search', () => {
+    render(<ToolActivity calls={[call({ name: 'toolSearch' })]} finished />);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Tool search|Used/)).not.toBeInTheDocument();
+  });
+});

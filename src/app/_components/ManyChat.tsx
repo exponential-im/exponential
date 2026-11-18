@@ -27,6 +27,7 @@ import type { VoiceEvent } from '~/lib/voice/voiceEventLog';
 import { buildVoiceSeedContext } from '~/lib/voice/seedContext';
 import { AgentMessageFeedback } from './agent/AgentMessageFeedback';
 import { ToolActivity } from './agent/ToolActivity';
+import { splitTurnText } from '~/lib/chat/turnText';
 import { ThinkingStatus } from './agent/ThinkingStatus';
 import { DraftActionsReviewCard } from './DraftActionsReviewCard';
 import { DraftFeaturesReviewCard } from './DraftFeaturesReviewCard';
@@ -334,6 +335,16 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
     [messages]
   );
 
+  // Text written between tool calls goes inside the tool card; the bubble
+  // shows only what came after the last call (ticket 982, rapid.drift).
+  const turnTexts = useMemo(
+    () =>
+      visibleMessages.map((m, i) =>
+        splitTurnText(m.content, m.answerOffset, !(isStreaming && i === visibleMessages.length - 1)),
+      ),
+    [visibleMessages, isStreaming]
+  );
+
   useEffect(() => {
     if (viewport.current) {
       viewport.current.scrollTo({ top: viewport.current.scrollHeight, behavior: 'smooth' });
@@ -353,11 +364,15 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
               {message.type === 'ai' ? (
                 <div className="max-w-[85%]">
                   {message.toolCalls && message.toolCalls.length > 0 && (
-                    <ToolActivity calls={message.toolCalls} />
+                    <ToolActivity
+                      calls={message.toolCalls}
+                      working={turnTexts[index]?.working}
+                      finished={!(isStreaming && index === visibleMessages.length - 1)}
+                    />
                   )}
                   {isStreaming &&
                     index === visibleMessages.length - 1 &&
-                    message.content === '' && (
+                    (turnTexts[index]?.answer ?? message.content) === '' && (
                       <ThinkingStatus
                         toolCalls={message.toolCalls}
                         requestText={
@@ -375,7 +390,7 @@ const MessageList = memo(function MessageList({ messages, conversationId, isStre
                       {message.marker === 'voice' && (
                         <span title="Spoken via voice mode" aria-label="voice" className="mr-1">🎙</span>
                       )}
-                      {renderMessageContent(message.content, message.type)}
+                      {renderMessageContent(turnTexts[index]?.answer ?? message.content, message.type)}
                     </div>
                   )}
                   {message.failure && (
@@ -1258,7 +1273,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
           const updated = [...prev];
           const last = updated[updated.length - 1];
           if (last && last.type === 'ai') {
-            updated[updated.length - 1] = { ...last, agentName, content: '', failure: undefined, toolCalls: undefined };
+            updated[updated.length - 1] = { ...last, agentName, content: '', failure: undefined, toolCalls: undefined, answerOffset: undefined };
           }
           return updated;
         });
@@ -1352,6 +1367,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
             updated[updated.length - 1] = {
               ...lastMessage,
               content: update.displayText,
+              answerOffset: update.answerOffset,
               ...(update.toolCalls.length > 0 ? { toolCalls: update.toolCalls } : {}),
             };
           }

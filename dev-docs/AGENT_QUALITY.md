@@ -83,6 +83,7 @@ A contract test for agent tools carries both. A bug in a tool carries `agent-qua
 - **A tool that returns part of something** (a truncated transcript, the first page of a list) says so in a field the model can read, with how to get the rest. The agent must never conclude "not found" or "not said" from a partial read.
 - **A failed tool step** is shown to the person as one plain sentence. Raw error text goes to admins only.
 - **Agent prompts** do not tell the model to announce tool failures or guess their cause. It answers when a fallback worked, and says what it could not check when that limits the answer.
+- **Narration between tool calls** ("Let me look that up…") is handled by the chat, not the prompt: text written before the last tool call folds into the tool card (`splitTurnText` in `src/lib/chat/turnText.ts`). A "don't narrate" prompt rule made the Assistant create calendar events without asking (ticket 982, mastra PR 98), so do not add one.
 
 ## Related
 

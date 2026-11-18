@@ -49,7 +49,6 @@
   "src/app/_components/actions/components/ReschedulePopover.module.css": 5,
   "src/app/_components/actions/components/TimelineRail.module.css": 5,
   "src/app/_components/actions/components/ZoePanel.module.css": 7,
-  "src/app/_components/agent/ToolActivity.tsx": 1,
   "src/app/_components/content/ContentDashboard.tsx": 1,
   "src/app/_components/content/ContentDraftCard.tsx": 1,
   "src/app/_components/content/PipelineRunHistory.tsx": 1,
