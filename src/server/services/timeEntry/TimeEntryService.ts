@@ -73,11 +73,19 @@ interface StartInput {
   projectId?: string | null;
   /** Used only when actionId is omitted (otherwise inherited from the action). */
   workspaceId?: string | null;
+  /**
+   * An agent is operating the Timer (Zoe acting for the person, ADR-0070):
+   * the new entry is born `PROPOSED`, and a running entry this start
+   * auto-stops becomes `PROPOSED` too. See `stop`.
+   */
+  agentActing?: boolean;
 }
 
 interface StopInput {
   userId: string;
   entryId?: string;
+  /** An agent is operating the Timer (ADR-0070): the stopped entry is `PROPOSED`. See `stop`. */
+  agentActing?: boolean;
 }
 
 export interface CreateInput {
@@ -179,7 +187,7 @@ export class TimeEntryService {
    */
   async start(input: StartInput): Promise<TimeEntryWithAction> {
     const { created, autoStopped } = await this.db.$transaction(async (tx) => {
-      const stopped = await this.autoStopRunning(tx, input.userId);
+      const stopped = await this.autoStopRunning(tx, input.userId, input.agentActing ?? false);
 
       let actionId: string;
       let workspaceId: string | null;
@@ -226,6 +234,7 @@ export class TimeEntryService {
           workspaceId,
           source: "plugin",
           startedAt: new Date(),
+          ...(input.agentActing ? { status: "PROPOSED" as const } : {}),
           ...(input.ticketId ? { note: input.typedTitle?.trim() || null } : {}),
         },
         include: {
@@ -661,12 +670,20 @@ export class TimeEntryService {
    * Stamps `endedAt = now()` (clamped to never precede `startedAt`) and
    * increments the parent Action's denormalized `timeSpentMins`.
    *
+   * A Timer entry counts as the person's time only when a person both
+   * started and stopped it. Under `agentActing` (Zoe acting for the person,
+   * ADR-0070) the stopped entry becomes `PROPOSED`, and a `PROPOSED` entry
+   * (one an agent started) stays so whoever stops it: neither moves
+   * `timeSpentMins` or reaches the activity feed until the person confirms
+   * the day (ADR-0061). Timer entries carry no `sourceRef`, so the Daily
+   * worklog never overwrites them.
+   *
    * Throws NOT_FOUND if nothing is running and no entryId was provided.
    * Throws FORBIDDEN if entryId belongs to a different user.
    * Throws BAD_REQUEST if the entry is already stopped.
    */
   async stop(input: StopInput): Promise<TimeEntryWithAction> {
-    const updated = await this.db.$transaction(async (tx) => {
+    const { result: updated, proposed } = await this.db.$transaction(async (tx) => {
       const entry = input.entryId
         ? await tx.timeEntry.findUnique({ where: { id: input.entryId } })
         : await tx.timeEntry.findFirst({
@@ -697,10 +714,11 @@ export class TimeEntryService {
 
       const endedAt = safeEndedAt(entry.startedAt);
       const mins = durationMinutes(entry.startedAt, endedAt);
+      const proposed = input.agentActing === true || entry.status === "PROPOSED";
 
       const result = await tx.timeEntry.update({
         where: { id: entry.id },
-        data: { endedAt },
+        data: { endedAt, ...(proposed ? { status: "PROPOSED" as const } : {}) },
         include: {
           action: {
             select: {
@@ -713,15 +731,18 @@ export class TimeEntryService {
         },
       });
 
-      if (mins > 0) {
+      if (mins > 0 && !proposed) {
         await tx.action.update({
           where: { id: entry.actionId },
           data: { timeSpentMins: { increment: mins } },
         });
       }
 
-      return result;
+      return { result, proposed };
     });
+
+    // Proposed time reaches the feed when the person confirms it (confirmDay).
+    if (proposed) return updated;
 
     // Surface the completed recording in the activity feed. Post-commit and
     // fire-and-forget: a feed-write failure must never fail the user's stop.
@@ -1130,11 +1151,13 @@ export class TimeEntryService {
    * resync the parent Action's timeSpentMins. Used by `start` to enforce the
    * single-timer-per-user invariant. Returns the completed entry's data (so the
    * caller can emit a `time_entry` activity event after commit), or null when
-   * nothing was running.
+   * nothing was running or the stopped entry is Proposed time — an agent
+   * started it, or an agent's start stopped it (`agentActing`); see `stop`.
    */
   private async autoStopRunning(
     tx: Db,
     userId: string,
+    agentActing: boolean,
   ): Promise<CompletedEntry | null> {
     const running = await tx.timeEntry.findFirst({
       where: { userId, endedAt: null },
@@ -1147,11 +1170,14 @@ export class TimeEntryService {
     // subsequent create() violate the one-running-timer-per-user unique index.
     const endedAt = safeEndedAt(running.startedAt);
     const mins = durationMinutes(running.startedAt, endedAt);
+    const proposed = agentActing || running.status === "PROPOSED";
 
     await tx.timeEntry.update({
       where: { id: running.id },
-      data: { endedAt },
+      data: { endedAt, ...(proposed ? { status: "PROPOSED" as const } : {}) },
     });
+
+    if (proposed) return null;
 
     if (mins > 0) {
       await tx.action.update({

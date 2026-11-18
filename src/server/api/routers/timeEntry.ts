@@ -34,7 +34,9 @@ import {
  * is forced to `PROPOSED` whatever it asked for. An agent acting for a person
  * (Zoe, the chat gateways, voice) writes the person's time, also `PROPOSED`:
  * confirming is the person's act. This carve-out exists only for the
- * explicit-bounds procedures below; `start`/`stop` stay principal-owned.
+ * explicit-bounds procedures below; `start`/`stop` stay principal-owned, but
+ * the Timer follows the same rule: an entry an agent started or stopped is
+ * `PROPOSED` (see `TimeEntryService.stop`).
  */
 interface TimeEntryPrincipal {
   ownerUserId: string;
@@ -219,6 +221,9 @@ export const timeEntryRouter = createTRPCRouter({
         }
       }
 
+      // A Timer an agent operates (Zoe acting for the person) writes
+      // Proposed time, like `create` (ADR-0061, ADR-0070).
+      const principal = await resolveApiKeyCallerPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.start({
         userId: ctx.userId,
@@ -227,6 +232,7 @@ export const timeEntryRouter = createTRPCRouter({
         typedTitle: input.typedTitle,
         projectId: input.projectId ?? null,
         workspaceId: input.workspaceId ?? null,
+        agentActing: principal.kind !== "human",
       });
     }),
 
@@ -397,10 +403,14 @@ export const timeEntryRouter = createTRPCRouter({
         .optional(),
     )
     .mutation(async ({ ctx, input }) => {
+      // Stopping is choosing the entry's end: under an agent it is Proposed
+      // time the person confirms with their day (ADR-0061, ADR-0070).
+      const principal = await resolveApiKeyCallerPrincipal(ctx);
       const service = new TimeEntryService(ctx.db);
       return service.stop({
         userId: ctx.userId,
         entryId: input?.entryId,
+        agentActing: principal.kind !== "human",
       });
     }),
 

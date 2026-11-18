@@ -13,6 +13,8 @@
  * - under Zoe's tokens `update` keeps Proposed time PROPOSED, `update` of any
  *   CONFIRMED entry and `delete` of completed CONFIRMED time are FORBIDDEN
  *   (the person's own record); cancelling a running Timer is allowed;
+ * - a Timer entry Zoe starts or stops is PROPOSED and moves no spent time;
+ *   only one the person both started and stopped counts outright;
  * - `action.upsertBySource` reuses the (sourceType, sourceId) match.
  *
  * Uses `vitest-mock-extended`'s `mockDeep<PrismaClient>()` — no real DB, ever
@@ -625,6 +627,116 @@ describe("timeEntry.update / delete — CONFIRMED time is the person's own recor
       });
     },
   );
+});
+
+describe("timeEntry.start / stop — a Timer Zoe operates writes Proposed time", () => {
+  let db: DeepMockProxy<PrismaClient>;
+
+  /** A Timer entry running for the last 30 minutes. */
+  function runningRow(overrides: Record<string, unknown> = {}) {
+    return entryRow({
+      source: "plugin",
+      status: "CONFIRMED",
+      startedAt: new Date(Date.now() - 30 * 60_000),
+      endedAt: null,
+      createdByAgentId: null,
+      ...overrides,
+    });
+  }
+
+  beforeEach(() => {
+    db = getDbMock();
+    mockReset(db);
+    vi.mocked(recordActivity).mockClear();
+    withTransaction(db);
+    arrangeAction(db, OWNER_ID);
+    db.timeEntry.create.mockResolvedValue(runningRow() as never);
+    db.timeEntry.update.mockImplementation((async (args: { data: Record<string, unknown> }) =>
+      runningRow({ endedAt: new Date(), ...args.data })) as never);
+  });
+
+  it.each(ZOE_TOKEN_TYPES)("a %s token starts a Timer entry that is born PROPOSED", async (tokenType) => {
+    db.timeEntry.findFirst.mockResolvedValue(null);
+
+    await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+    expect(db.timeEntry.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ userId: OWNER_ID, status: "PROPOSED" }) }),
+    );
+  });
+
+  it.each(PERSON_TOKEN_TYPES)("a %s token is the person, so the entry takes the CONFIRMED default", async (tokenType) => {
+    db.timeEntry.findFirst.mockResolvedValue(null);
+
+    await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+    const data = (db.timeEntry.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+    expect(data).not.toHaveProperty("status");
+  });
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token stopping the person's running Timer leaves Proposed time: no spent time, no feed event",
+    async (tokenType) => {
+      db.timeEntry.findFirst.mockResolvedValue(runningRow() as never);
+
+      const stopped = await callerWithToken(db, tokenType).timeEntry.stop();
+
+      expect(db.timeEntry.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "entry-1" },
+          data: { endedAt: expect.any(Date), status: "PROPOSED" },
+        }),
+      );
+      expect(stopped.status).toBe("PROPOSED");
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(ZOE_TOKEN_TYPES)(
+    "a %s token starting a Timer auto-stops the running one as Proposed time, moving no spent time",
+    async (tokenType) => {
+      db.timeEntry.findFirst.mockResolvedValue(
+        { ...runningRow({ id: "entry-running" }), action: { name: "Deep work" } } as never,
+      );
+
+      await callerWithToken(db, tokenType).timeEntry.start({ actionId: ACTION_ID });
+
+      expect(db.timeEntry.update).toHaveBeenCalledWith({
+        where: { id: "entry-running" },
+        data: { endedAt: expect.any(Date), status: "PROPOSED" },
+      });
+      expect(db.action.update).not.toHaveBeenCalled();
+      expect(recordActivity).not.toHaveBeenCalled();
+    },
+  );
+
+  it("the person stopping a Timer Zoe started keeps it PROPOSED until they confirm the day", async () => {
+    db.timeEntry.findFirst.mockResolvedValue(runningRow({ status: "PROPOSED" }) as never);
+
+    await humanCaller(db).timeEntry.stop();
+
+    expect(db.timeEntry.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { endedAt: expect.any(Date), status: "PROPOSED" } }),
+    );
+    expect(db.action.update).not.toHaveBeenCalled();
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("the person stopping their own Timer confirms it as before: spent time moves, the feed hears of it", async () => {
+    db.timeEntry.findFirst.mockResolvedValue(runningRow() as never);
+
+    await humanCaller(db).timeEntry.stop();
+
+    expect(db.timeEntry.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { endedAt: expect.any(Date) } }),
+    );
+    expect(db.action.update).toHaveBeenCalledWith({
+      where: { id: ACTION_ID },
+      data: { timeSpentMins: { increment: 30 } },
+    });
+    expect(recordActivity).toHaveBeenCalled();
+  });
 });
 
 describe("timeEntry.confirmDay — human-only", () => {
