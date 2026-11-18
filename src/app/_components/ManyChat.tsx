@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react';
+import { browserTimeZone, describeLocalNow, upcomingDays } from '~/lib/chat/localNow';
 import { useAiCapabilities } from '~/providers/AiCapabilitiesProvider';
 import { api } from "~/trpc/react";
 import DOMPurify from 'dompurify';
@@ -671,7 +672,11 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
                   When the user says "this", "the", or refers to content on their current page, they mean the above context.
                   Use this data to understand what the user is looking at right now.
                   ` : ''}
-                  The current date is: ${new Date().toISOString().split('T')[0]}`
+                  🗓️ DATE AND TIME:
+                  - The user's local date and time: ${describeLocalNow(new Date(), browserTimeZone())}
+                  - The coming days: ${upcomingDays(new Date(), browserTimeZone())}
+                  - Read weekdays off the list above; never work one out from memory. Whenever you propose or confirm a date, state it WITH its weekday.
+                  - Times the user gives are in their time zone. If a day they name has already passed this week, say so and ask whether they mean next week; never move it silently.`
       },
       {
         type: 'ai',
@@ -1350,6 +1355,9 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
         workspaceId,
         projectId,
         conversationId,
+        // The person's IANA zone, so agent tools place "8:30" on their clock
+        // and not on the server's.
+        timezone: browserTimeZone(),
         platform: "manychat" as const,
       };
 
