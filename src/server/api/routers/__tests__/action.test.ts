@@ -1304,6 +1304,61 @@ describe("action router (mocked)", () => {
       expect(byId.get("u2")?.positions.map((p) => p.title)).toEqual(["Delivery lead"]);
       expect(byId.get(callerId)?.positions).toEqual([]);
     });
+
+    /** A project-less action, e.g. one extracted from a meeting with no project. */
+    function stubLooseAction(workspaceId: string | null) {
+      dbMock.action.findUnique.mockResolvedValue({
+        id: "a1",
+        createdById: callerId,
+        projectId: null,
+        workspaceId,
+        teamId: null,
+        assignees: [],
+        project: null,
+        team: null,
+      } as never);
+      dbMock.workspaceUser.findUnique.mockResolvedValue(
+        workspaceId
+          ? ({ userId: callerId, workspaceId, role: "member", joinedAt: new Date() } as never)
+          : null,
+      );
+      dbMock.teamUser.findFirst.mockResolvedValue(null);
+      dbMock.team.findMany.mockResolvedValue([]);
+      dbMock.workspaceUser.findMany.mockResolvedValue([
+        { user: { id: "u2", name: "Colleague", email: "u2@test.com", image: null } } as never,
+      ]);
+      dbMock.user.findUnique.mockResolvedValue(
+        { id: callerId, name: "Me", email: "caller-1@test.com", image: null } as never,
+      );
+    }
+
+    it("only takes teams from the action's own workspace", async () => {
+      // The caller's teams in other workspaces used to land in the picker
+      // (people from one workspace offered on another's action).
+      stubLooseAction("w1");
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      const result = await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      expect(dbMock.team.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(dbMock.workspaceUser.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(result.assignableUsers.map((u) => u.id).sort()).toEqual([callerId, "u2"]);
+    });
+
+    it("keeps every team as the fallback for an action with no workspace", async () => {
+      stubLooseAction(null);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      const teamWhere = (dbMock.team.findMany.mock.calls[0]?.[0] as { where: object }).where;
+      expect(teamWhere).not.toHaveProperty("workspaceId");
+      expect(dbMock.workspaceUser.findMany).not.toHaveBeenCalled();
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────

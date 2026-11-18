@@ -1765,8 +1765,9 @@ export const actionRouter = createTRPCRouter({
       };
     }),
 
-  // Get users available for assignment to a specific action
-  // Returns all users from all teams the current user belongs to
+  // Get users available for assignment to a specific action: your teams (in
+  // the action's workspace, when it has one), the workspace's members, the
+  // project's members, and you.
   getAssignableUsers: protectedProcedure
     .input(z.object({
       actionId: z.string(),
@@ -1809,6 +1810,11 @@ export const actionRouter = createTRPCRouter({
       // 1. Get users from teams the current user belongs to.
       //    Skip when the action's project is restricted - only ProjectMembers
       //    (plus creator + workspace owner/admin escape hatch) are valid.
+      //    An action in a workspace only takes teams from that workspace:
+      //    otherwise every team you belong to, in any workspace, landed in
+      //    the picker (same rule as getAssignableUsersForContext). Only an
+      //    action with no workspace at all keeps every team as its fallback.
+      const actionWorkspaceId = action.project?.workspaceId ?? action.workspaceId ?? null;
       const userTeams = await ctx.db.team.findMany({
         where: {
           members: {
@@ -1816,6 +1822,7 @@ export const actionRouter = createTRPCRouter({
               userId: ctx.session.user.id,
             },
           },
+          ...(actionWorkspaceId ? { workspaceId: actionWorkspaceId } : {}),
         },
         include: {
           members: {
