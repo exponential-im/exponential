@@ -36,6 +36,7 @@ import {
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 import { classifyToolError, isReportableToolError, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
+import { isValidTimeZone } from "~/lib/chat/localNow";
 import {
   PER_REQUEST_COST_ALERT_USD,
   priceTokenBreakdown,
@@ -184,7 +185,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, pageContextType: rawPageContextType } = (await req.json()) as {
+    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, timezone: rawTimezone, pageContextType: rawPageContextType } = (await req.json()) as {
       messages: CoreMessage[];
       agentId?: string;
       assistantId?: string;
@@ -192,6 +193,7 @@ export async function POST(req: Request) {
       projectId?: string;
       conversationId?: string;
       platform?: string;
+      timezone?: string;
       pageContextType?: string;
     };
     // Recorded on the interaction row for whoever diagnoses the turn later.
@@ -297,6 +299,12 @@ export async function POST(req: Request) {
           "http://localhost:3000",
       ],
     ];
+    // The person's IANA time zone, for tools that place things on a clock
+    // (calendar events). Client-supplied, so only a zone this runtime
+    // recognises is passed on; a tool with no zone must ask, not assume UTC.
+    if (isValidTimeZone(rawTimezone)) {
+      entries.push(["timezone", rawTimezone]);
+    }
     
     // Verify workspace access and fetch the in-scope AI instructions for the
     // demoted scope-instruction block. `loadScopeInstructions` is shared with

@@ -100,4 +100,51 @@ describe('ToolActivity', () => {
     fireEvent.click(screen.getByRole('button'));
     expect(screen.getByText("This step didn't work.")).toBeInTheDocument();
   });
+
+  it('hides a phantom tool call the assistant got past, leaving only the step that worked', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({ id: 'a', name: 'createAction', status: 'error', errorKind: 'no-such-tool' }),
+          call({ id: 'b', name: 'quickCreateActionTool', status: 'success', args: { name: 'Parse outputs' } }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/failed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Create action/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Created task: Parse outputs/)).toBeInTheDocument();
+  });
+
+  it('still shows an admin the recovered failure, with its raw error', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({
+            id: 'a',
+            name: 'createAction',
+            status: 'error',
+            errorKind: 'no-such-tool',
+            errorMsg: "Model tried to call unavailable tool 'createAction'.",
+          }),
+          call({ id: 'b', name: 'quickCreateActionTool', status: 'success', args: { name: 'Parse outputs' } }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Create action — failed')).toBeInTheDocument();
+  });
+
+  it('keeps a failure visible when a different tool answered instead', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({ id: 'a', name: 'queryMeetingContextTool', status: 'error', errorKind: 'contract' }),
+          call({ id: 'b', name: 'getUserWorkspacesTool', status: 'success' }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('Search meeting notes — failed')).toBeInTheDocument();
+  });
 });
