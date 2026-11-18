@@ -21,12 +21,15 @@ const names = {
   pillar: `E2E Infra ${RUN}`,
   position: `E2E Technical Director ${RUN}`,
   recurring: `E2E check backups ${RUN}`,
+  oldProject: `E2E Exponential GTM ${RUN}`,
 };
 
 interface Seeded {
   pillarId: string;
   positionId: string;
   recurringTaskId: string;
+  oldProjectId: string;
+  oldProjectSlug: string;
 }
 
 test.describe("Pillar accountability", () => {
@@ -73,13 +76,32 @@ test.describe("Pillar accountability", () => {
         createdById: fixture.userId,
       },
     });
-    seeded = { pillarId: pillar.id, positionId: position.id, recurringTaskId: recurring.id };
+    // An active project with no end date, started 120 days ago.
+    const oldProjectSlug = `e2e-gtm-${RUN}`;
+    const oldProject = await db.project.create({
+      data: {
+        name: names.oldProject,
+        slug: oldProjectSlug,
+        status: "ACTIVE",
+        createdById: fixture.userId,
+        workspaceId: workspace.id,
+        createdAt: new Date(Date.now() - 120 * 24 * 60 * 60 * 1000),
+      },
+    });
+    seeded = {
+      pillarId: pillar.id,
+      positionId: position.id,
+      recurringTaskId: recurring.id,
+      oldProjectId: oldProject.id,
+      oldProjectSlug,
+    };
   });
 
   test.afterAll(async () => {
     if (seeded) {
       await db.position.delete({ where: { id: seeded.positionId } });
       await db.recurringTask.delete({ where: { id: seeded.recurringTaskId } });
+      await db.project.delete({ where: { id: seeded.oldProjectId } });
       await db.tag.delete({ where: { id: seeded.pillarId } });
     }
     await db?.$disconnect();
@@ -116,5 +138,22 @@ test.describe("Pillar accountability", () => {
     const duties = page.getByRole("region", { name: "Recurring duties" });
     await expect(duties.getByText(names.recurring)).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     await expect(duties.getByText("Every week on Mon")).toBeVisible();
+  });
+
+  test("a long-running project with no end date suggests it may be a Pillar, until dismissed", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.oldProjectSlug}-${seeded.oldProjectId}`);
+    const hint = page.getByRole("note", { name: "This project may be a Pillar" });
+    await expect(hint).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(hint.getByRole("link", { name: "Set up a Pillar" })).toHaveAttribute(
+      "href",
+      `/w/${fixture.workspaceSlug}/settings?section=pillars`,
+    );
+    await page.screenshot({ path: test.info().outputPath("looks-ongoing-hint.png"), fullPage: true });
+
+    await hint.getByRole("button", { name: "Dismiss" }).click();
+    await expect(hint).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByRole("heading", { name: names.oldProject })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(page.getByRole("note", { name: "This project may be a Pillar" })).toHaveCount(0);
   });
 });
