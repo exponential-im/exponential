@@ -6,7 +6,7 @@
  */
 
 import { db } from "~/server/db";
-import { oauthError, publicJson, publicPreflight, whenOAuthEnabled } from "~/server/mcp/oauth/http";
+import { oauthError, publicJson, publicPreflight, readCappedText, whenOAuthEnabled } from "~/server/mcp/oauth/http";
 import { parseRegistration, registrationResponse } from "~/server/mcp/oauth/registration";
 import { checkRateLimit, clientIpFrom, tooManyRequestsInit } from "~/server/utils/rateLimit";
 
@@ -30,12 +30,8 @@ export const POST = whenOAuthEnabled(async (req: Request): Promise<Response> => 
     return oauthError(init.status, "too_many_requests", "Too many registrations from this address.", init.headers);
   }
 
-  const declaredLength = Number(req.headers.get("content-length") ?? 0);
-  if (declaredLength > MAX_BODY_BYTES) {
-    return oauthError(400, "invalid_client_metadata", "The registration request is too large.");
-  }
-  const text = await req.text();
-  if (text.length > MAX_BODY_BYTES) {
+  const text = await readCappedText(req, MAX_BODY_BYTES);
+  if (text === null) {
     return oauthError(400, "invalid_client_metadata", "The registration request is too large.");
   }
   let body: unknown;

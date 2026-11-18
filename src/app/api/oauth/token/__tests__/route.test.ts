@@ -35,6 +35,7 @@ vi.mock("~/server/utils/rateLimit", async (importOriginal) => ({
 }));
 
 import { OPTIONS, POST } from "../route";
+import { endlessRequest } from "~/test/endlessBody";
 
 const TOKENS = {
   access_token: "exp_oat_x",
@@ -184,6 +185,17 @@ describe("POST /api/oauth/token", () => {
     envOverrides.MCP_OAUTH_MODE = mode;
 
     expect((await POST(tokenRequest(form(GRANT)))).status).toBe(404);
+    expect(redeemAuthorizationCode).not.toHaveBeenCalled();
+  });
+
+  it("cuts off a chunked body with no Content-Length instead of reading it whole", async () => {
+    const endless = endlessRequest({ "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": "203.0.113.7" });
+
+    const res = await POST(endless.request);
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_request" });
+    expect(endless.cancelled()).toBe(true);
     expect(redeemAuthorizationCode).not.toHaveBeenCalled();
   });
 });
