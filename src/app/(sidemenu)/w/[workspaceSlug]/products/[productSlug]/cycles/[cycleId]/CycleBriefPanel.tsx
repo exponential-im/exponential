@@ -446,8 +446,10 @@ export function CycleBriefPanel({
                   {indexHref}
                 </a>
               </>
+            ) : isProductOwner ? (
+              "Not public until you sign it off."
             ) : (
-              "Only a Product owner can sign off the plan."
+              "Not public until a Product owner signs it off."
             )}
           </Text>
         ) : (
