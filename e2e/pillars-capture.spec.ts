@@ -152,4 +152,33 @@ test.describe("Capture with Pillars", () => {
     await expect(placement.getByRole("checkbox", { name: names.pillar })).not.toBeChecked();
     await page.screenshot({ path: test.info().outputPath("project-ticks-pillar.png"), fullPage: true });
   });
+
+  test("the Create Action modal asks Pillars then Project, and files under the Pillar", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    await page.getByRole("button", { name: /Create Action/i }).first().click();
+
+    const dialog = page.getByRole("dialog");
+    const nameBox = dialog.locator('form [contenteditable="true"]').first();
+    await expect(nameBox).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await nameBox.click();
+    await page.keyboard.type(names.action);
+    const placement = dialog.getByLabel("Where this goes");
+    await expect(placement).toBeVisible();
+    await placement.locator("label", { hasText: names.pillar }).click();
+    // The footer's own project picker gives way to the capture row.
+    await expect(dialog.getByPlaceholder("Select a project (optional)")).toHaveCount(0);
+    await page.screenshot({ path: test.info().outputPath("create-action-with-pillar.png"), fullPage: true });
+    await dialog.getByRole("button", { name: "New action" }).click();
+
+    await expect
+      .poll(async () => db.actionTag.count({ where: { tagId: seeded.pillarId, action: { name: names.action } } }))
+      .toBe(1);
+    await page.reload();
+    await expect(
+      page.getByRole("region", { name: "Loose work" }).getByRole("link", { name: names.action }),
+    ).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+  });
 });

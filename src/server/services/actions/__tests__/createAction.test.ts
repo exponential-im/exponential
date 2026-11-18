@@ -313,6 +313,17 @@ describe("createAction", () => {
       expect(emitNotification).not.toHaveBeenCalled();
     });
 
+    it("refuses an inactive Pillar on a new Action and writes no row", async () => {
+      stubWorkspaceRole(db, WORKSPACE, "member");
+      db.tag.findMany.mockResolvedValue([{ id: TAG }] as never);
+      db.tag.count.mockResolvedValue(1);
+
+      await expect(
+        createAction(deps(db), { source: "ui", name: "Ship it", workspaceId: WORKSPACE, tagIds: [TAG] }),
+      ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+      expect(db.action.create).not.toHaveBeenCalled();
+    });
+
     it("refuses an assignee who cannot read the action, with NOT_FOUND and no row", async () => {
       // Caller is a member; the candidate is not, and shares no team.
       db.workspaceUser.findUnique.mockImplementation(((args: { where: { userId_workspaceId: { userId: string } } }) =>

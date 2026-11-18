@@ -7,7 +7,8 @@ import { PillarIcon } from "./PillarIcon";
 import { pillarsAfterProjectChoice, projectsForPillars } from "./captureRules";
 
 export interface CapturePlacementValue {
-  /** Ticked Pillars. */
+  /** Ticked Pillars. May also hold ordinary labels (a form that keeps both in
+   * one list); those are left as they are. */
   tagIds: string[];
   /** The optional Project. */
   projectId: string | null;
@@ -45,7 +46,9 @@ export function CapturePlacement({
     { enabled: withProject, staleTime: 60 * 1000 },
   );
   const projects = projectData?.projects ?? [];
-  const offeredProjects = projectsForPillars(projects, value.tagIds);
+  const pillarIds = new Set(pillars.map((p) => p.id));
+  const tickedPillars = value.tagIds.filter((id) => pillarIds.has(id));
+  const offeredProjects = projectsForPillars(projects, tickedPillars);
   // A chosen project stays listed even if the ticks would hide it.
   const chosen = projects.find((p) => p.id === value.projectId) ?? null;
   const projectOptions = [
@@ -67,8 +70,13 @@ export function CapturePlacement({
           </Group>
           <Chip.Group
             multiple
-            value={value.tagIds}
-            onChange={(tagIds) => onChange({ ...value, tagIds })}
+            value={tickedPillars}
+            onChange={(ticked) =>
+              onChange({
+                ...value,
+                tagIds: [...value.tagIds.filter((id) => !pillarIds.has(id)), ...ticked],
+              })
+            }
           >
             <Group gap={4}>
               {pillars.map((pillar) => (
@@ -90,7 +98,7 @@ export function CapturePlacement({
       {withProject && projects.length > 0 && (
         <Select
           aria-label="Project"
-          placeholder={value.tagIds.length > 0 ? "No project (file under the Pillars)" : "No project"}
+          placeholder={tickedPillars.length > 0 ? "No project (file under the Pillars)" : "No project"}
           size="xs"
           w={240}
           searchable

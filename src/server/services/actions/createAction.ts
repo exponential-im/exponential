@@ -172,6 +172,13 @@ export async function createAction(
   //    refused attachment means no row is written at all.
   if (uniqueTagIds.length > 0) {
     await assertTagsInWorkspace(db, actor.userId, targetWorkspaceId, uniqueTagIds);
+    // An inactive Pillar is never put on new work (ADR-0085).
+    const inactive = await db.tag.count({
+      where: { id: { in: uniqueTagIds }, archivedAt: { not: null } },
+    });
+    if (inactive > 0) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "An inactive Pillar cannot be added" });
+    }
   }
   if (uniqueAssigneeIds.length > 0) {
     await assertAssignableUsers(
