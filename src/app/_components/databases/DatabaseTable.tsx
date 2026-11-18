@@ -259,15 +259,20 @@ export function DatabaseTable({
     ...display,
   };
 
-  // The toolbar's "New" made a row: open its title once it has arrived,
-  // once — later row updates must not reopen it.
-  const openedTitleRef = useRef<string | null>(null);
+  // The toolbar's "New" made a row: open its title. The block appends the
+  // row to the cached rows before handing over its id, so it is here now.
+  // Each request is tried once: a row the view does not show is not waited
+  // for, so its title can never pop open later (after a filter change, say).
+  const handledTitleRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!editTitleOf || openedTitleRef.current === editTitleOf) return;
-    if (!rows.some((r) => r.id === editTitleOf)) return;
-    openedTitleRef.current = editTitleOf;
-    setEditing({ rowId: editTitleOf, propertyId: database.titlePropertyId });
-  }, [editTitleOf, rows, database.titlePropertyId]);
+    if (!editTitleOf || handledTitleRef.current === editTitleOf) return;
+    handledTitleRef.current = editTitleOf;
+    if (rows.some((r) => r.id === editTitleOf)) {
+      setEditing({ rowId: editTitleOf, propertyId: database.titlePropertyId });
+    }
+    // Only a new request runs this; row updates must not re-try an old one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editTitleOf]);
 
   // A row that vanished (deleted, filtered out) ends any edit on it.
   useEffect(() => {

@@ -167,6 +167,20 @@ describe("DatabaseTable — editing", () => {
     expect(await screen.findByRole("textbox", { name: "Name" })).toBeTruthy();
   });
 
+  it("the toolbar's New opens the new row's title once, and never for a row the view hides", () => {
+    const props = { database, columns: [TITLE, SCORE, STATUS, DONE], editable: true, onWriteCell: vi.fn() };
+    const shown = render(<DatabaseTable {...props} rows={rows} editTitleOf="row-2" />);
+    expect(screen.getByRole("textbox", { name: "Name" })).toBeTruthy();
+    shown.unmount();
+
+    // A row the saved view filters out is not waited for: when it shows up
+    // later, its title stays closed.
+    const hidden = render(<DatabaseTable {...props} rows={rows.slice(0, 1)} editTitleOf="row-2" />);
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+    hidden.rerender(<DatabaseTable {...props} rows={rows} editTitleOf="row-2" />);
+    expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+  });
+
   it("a relation cell shows each target as a pill, linked when it has a href", () => {
     const PROBLEMS = "pproblems001";
     render(

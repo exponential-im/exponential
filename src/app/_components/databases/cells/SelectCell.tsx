@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { MultiSelect, Select, UnstyledButton } from "@mantine/core";
-import type { PropertyDef, SelectOption } from "~/lib/databases/schema";
+import type { PillColor, PropertyDef, SelectOption } from "~/lib/databases/schema";
 import styles from "../DatabaseBlock.module.css";
 
 const CREATE_PREFIX = "__create__:";
@@ -25,8 +25,10 @@ interface SelectCellProps {
  * tint behind text that is mostly the page's own text colour, so the label
  * stays readable in both themes (the list pages' `pillTint` puts the
  * palette's filled shade on its own tint, which washes out at 14px).
+ * `PillColor` is the stored option colour, validated against Mantine's
+ * palette names, so every variable named here exists in the theme.
  */
-export function databasePillTint(color: string): React.CSSProperties {
+export function databasePillTint(color: PillColor): React.CSSProperties {
   return {
     backgroundColor: `var(--mantine-color-${color}-light)`,
     color:
