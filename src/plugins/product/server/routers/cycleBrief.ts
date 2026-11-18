@@ -275,7 +275,7 @@ export const cycleBriefRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       const cycle = await ctx.db.list.findUnique({
         where: { id: input.cycleId },
-        select: { id: true, workspaceId: true, productId: true, listType: true },
+        select: { id: true, workspaceId: true, productId: true, listType: true, status: true },
       });
       if (!cycle || cycle.listType !== "SPRINT") {
         throw new TRPCError({ code: "NOT_FOUND", message: "Cycle not found" });
@@ -289,7 +289,13 @@ export const cycleBriefRouter = createTRPCRouter({
       }
       return ctx.db.cycleBrief.upsert({
         where: { cycleId: cycle.id },
-        create: { cycleId: cycle.id, productId: cycle.productId, workspaceId: cycle.workspaceId },
+        create: {
+          cycleId: cycle.id,
+          productId: cycle.productId,
+          workspaceId: cycle.workspaceId,
+          // A brief started on a cycle that already completed is closed from the start.
+          closedAt: cycle.status === "COMPLETED" ? new Date() : null,
+        },
         update: {},
         select: BRIEF_SELECT,
       });
@@ -664,7 +670,7 @@ export const cycleBriefRouter = createTRPCRouter({
       });
       if (!previous) return null;
       const carried = await ctx.db.cycleOutcome.findMany({
-        where: { briefId: brief.id, carriedFromId: { in: previous.outcomes.map((o) => o.id) } },
+        where: { briefId: brief.id, carriedFromId: { in: previous.outcomes.map((o) => o.id) }, removedAt: null },
         select: { carriedFromId: true },
       });
       const carriedIds = new Set(carried.map((c) => c.carriedFromId));

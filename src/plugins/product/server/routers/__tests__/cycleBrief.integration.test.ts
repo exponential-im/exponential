@@ -556,3 +556,57 @@ describe("cycleBrief carry-over", () => {
     });
   });
 });
+
+describe("cycleBrief review fixes", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("starts a brief on an already-completed cycle closed", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.list.update({ where: { id: cycle.id }, data: { status: "COMPLETED" } });
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    expect((await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } })).closedAt).toBeInstanceOf(Date);
+    const outcome = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Aim", why: "Because" });
+    await expect(caller.product.cycleBrief.setStatus({ outcomeId: outcome.id, status: "done" })).rejects.toThrow(
+      /closed/i,
+    );
+  });
+
+  it("offers an outcome for carry-over again once its carried copy was removed", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const caller = createTestCaller(owner.id);
+    const c1 = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      startDate: new Date("2030-04-01"),
+    });
+    const c2 = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      startDate: new Date("2030-04-15"),
+    });
+    const b1 = await caller.product.cycleBrief.create({ cycleId: c1.id });
+    const source = await caller.product.cycleBrief.upsertOutcome({ briefId: b1.id, text: "Aim", why: "Because" });
+    const b2 = await caller.product.cycleBrief.create({ cycleId: c2.id });
+    const copy = await caller.product.cycleBrief.carryOver({ outcomeId: source.id, toBriefId: b2.id });
+    await caller.product.cycleBrief.signOff({ briefId: b2.id });
+    await caller.product.cycleBrief.requestRemoveOutcome({ outcomeId: copy.id });
+    await caller.product.cycleBrief.upsertOutcome({ briefId: b2.id, text: "Other", why: "Still a plan" });
+    await caller.product.cycleBrief.signOff({ briefId: b2.id });
+
+    const candidates = await caller.product.cycleBrief.carryOverCandidates({ briefId: b2.id });
+    expect(candidates?.outcomes.find((o) => o.id === source.id)?.isCarried).toBe(false);
+  });
+});
