@@ -4,7 +4,7 @@ import { TRPCError } from "@trpc/server";
 import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/api/trpc";
 import { TEXT_LIMITS } from "~/lib/text-limits";
 import { getWorkspaceMembership } from "~/server/services/access";
-import { getPublicBrief } from "~/server/services/cycleBriefs/public";
+import { getPublicBrief, listPublicBriefs } from "~/server/services/cycleBriefs/public";
 import { OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
 import { pendingChange } from "~/server/services/cycleBriefs/changes";
 import { assertWorkspaceAccess, type WorkspaceAccessLevel } from "./product";
@@ -593,6 +593,11 @@ export const cycleBriefRouter = createTRPCRouter({
         select: { id: true, status: true, statusSetAt: true },
       });
     }),
+
+  /** A product's signed-off briefs, newest first. Null when it has none. */
+  publicList: publicProcedure
+    .input(z.object({ workspaceSlug: z.string(), productSlug: z.string() }))
+    .query(({ ctx, input }) => listPublicBriefs(ctx.db, input.workspaceSlug, input.productSlug)),
 
   /** One signed-off brief as the public sees it. Null when not public. */
   publicGet: publicProcedure

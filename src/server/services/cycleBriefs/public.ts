@@ -167,6 +167,32 @@ export async function getPublicBrief(
   return { product: found.product, brief };
 }
 
+/** Briefs on the product index; a product runs about 26 cycles a year. */
+export const PUBLIC_INDEX_LIMIT = 100;
+
+/**
+ * A product's signed-off briefs, newest cycle first: the product's one stable
+ * public URL (D-0096). Null when the product has no signed-off brief, so the
+ * page 404s rather than showing an empty shell.
+ */
+export async function listPublicBriefs(
+  db: PrismaClient,
+  workspaceSlug: string,
+  productSlug: string,
+): Promise<{ product: PublicProduct; briefs: PublicCycleBrief[] } | null> {
+  const found = await findPublicProduct(db, workspaceSlug, productSlug);
+  if (!found) return null;
+  const rows = await db.cycleBrief.findMany({
+    where: { productId: found.id, planSignedOffAt: { not: null } },
+    orderBy: [{ cycle: { startDate: { sort: "desc", nulls: "last" } } }, { createdAt: "desc" }],
+    take: PUBLIC_INDEX_LIMIT,
+    select: PROJECTION_SELECT,
+  });
+  const briefs = rows.map(projectPublicBrief).filter((b): b is PublicCycleBrief => b !== null);
+  if (briefs.length === 0) return null;
+  return { product: found.product, briefs };
+}
+
 export function publicBriefsPath(workspaceSlug: string, productSlug: string): string {
   return `/briefs/${workspaceSlug}/${productSlug}`;
 }

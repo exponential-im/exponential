@@ -174,7 +174,8 @@ export function CycleBriefPanel({
   if (!data?.canHaveBrief) return null;
   const { brief, isProductOwner, hasProductOwner, hasPendingChanges, cycleGoal } = data;
   const ownersHref = `/w/${workspaceSlug}/products/${productSlug}/settings?section=owners`;
-  const publicHref = `/briefs/${workspaceSlug}/${productSlug}/${cycleSlug}`;
+  const indexHref = `/briefs/${workspaceSlug}/${productSlug}`;
+  const publicHref = `${indexHref}/${cycleSlug}`;
 
   if (!brief) {
     return (
@@ -356,9 +357,17 @@ export function CycleBriefPanel({
       <Group justify="space-between" className="mt-4">
         {hasProductOwner ? (
           <Text size="xs" className="text-text-muted">
-            {brief.planSignedOffAt
-              ? `Signed off ${new Date(brief.planSignedOffAt).toLocaleDateString()}`
-              : "Only a Product owner can sign off the plan."}
+            {brief.planSignedOffAt ? (
+              <>
+                Signed off {new Date(brief.planSignedOffAt).toLocaleDateString()} · Every cycle&apos;s brief is
+                listed at{" "}
+                <a href={indexHref} target="_blank" rel="noreferrer" className="text-text-primary underline">
+                  {indexHref}
+                </a>
+              </>
+            ) : (
+              "Only a Product owner can sign off the plan."
+            )}
           </Text>
         ) : (
           <Text size="xs" className="text-text-muted">

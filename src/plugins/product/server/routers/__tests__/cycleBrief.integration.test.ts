@@ -384,3 +384,42 @@ describe("cycleBrief Not this cycle", () => {
     expect(json).not.toContain("Noah");
   });
 });
+
+describe("cycleBrief public index", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("lists only signed-off briefs, newest cycle first, and is null with none", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const caller = createTestCaller(owner.id);
+    const anon = createUnauthenticatedCaller();
+    const key = { workspaceSlug: ws.slug, productSlug: product.slug };
+
+    async function briefFor(name: string, start: string, signOff: boolean) {
+      const cycle = await createCycle(db, {
+        workspaceId: ws.id,
+        createdById: owner.id,
+        productId: product.id,
+        name,
+        startDate: new Date(start),
+      });
+      const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+      await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: `${name} aim`, why: "Because" });
+      if (signOff) await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    }
+
+    await briefFor("Cycle 20", "2030-02-02", false);
+    expect(await anon.product.cycleBrief.publicList(key)).toBeNull();
+
+    await briefFor("Cycle 19", "2030-01-19", true);
+    await briefFor("Cycle 21", "2030-02-16", true);
+    const result = await anon.product.cycleBrief.publicList(key);
+    expect(result?.briefs.map((b) => b.cycleName)).toEqual(["Cycle 21", "Cycle 19"]);
+  });
+});
