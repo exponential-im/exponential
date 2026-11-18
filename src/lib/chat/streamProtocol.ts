@@ -63,13 +63,20 @@ const TOOL_PREFIX = '__exp_tool__:';
 // Zero-width-space keepalives the server emits on non-text chunks. They reset
 // the reader's idle timer but must never appear in rendered text.
 const KEEPALIVE_RE = /​/g;
+// U+001E, the sentinel the route puts in front of each frame.
+const RECORD_SEPARATOR_RE = /\u001E/g;
 
 type ToolFramePayload =
   | { phase: 'call'; id: string; name: string; args?: Record<string, unknown> }
   | { phase: 'result'; id: string; name: string }
   | { phase: 'error'; id: string; name: string; kind?: string; msg?: string };
 
-export function parseChatStreamBuffer(buffer: string): ParsedChatStream {
+export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
+  // The route writes every frame as `\n\u001E__exp_…`. Drop the record
+  // separators first so the frame patterns take the newline with them;
+  // otherwise a stray `\n\u001E` is left where each frame was, and a turn
+  // that ends on a tool call looks like it has an answer after it.
+  const buffer = rawBuffer.replace(RECORD_SEPARATOR_RE, '');
   let displayText = buffer;
   let interactionId: string | undefined;
 

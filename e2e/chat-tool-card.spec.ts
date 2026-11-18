@@ -38,9 +38,10 @@ test.afterAll(async () => {
 /** First hit on a `next dev` route pays the compile cost. */
 const FIRST_PAINT_TIMEOUT = 60_000;
 
+// Frames exactly as the route writes them: newline, U+001E, sentinel.
 const toolFrames = (id: string, name: string) =>
-  `\n__exp_tool__:${JSON.stringify({ phase: "call", id, name, args: {} })}\n` +
-  `\n__exp_tool__:${JSON.stringify({ phase: "result", id, name })}\n`;
+  `\n\u001E__exp_tool__:${JSON.stringify({ phase: "call", id, name, args: {} })}\n` +
+  `\n\u001E__exp_tool__:${JSON.stringify({ phase: "result", id, name })}\n`;
 
 const NARRATION = "Let me get your today's actions to find that German speaking task:";
 const ANSWER = "German speaking practice: one recurring event, 08:30–08:50 every Monday, Wednesday and Friday. Create it?";
@@ -57,7 +58,8 @@ const TURN =
   toolFrames("t3", "checkCalendarConnectionTool") +
   toolFrames("t4", "toolSearch") +
   "\n\n" +
-  ANSWER;
+  ANSWER +
+  `\n\u001E__exp_meta__:${JSON.stringify({ modelId: "e2e" })}\n`;
 
 test("a finished turn folds its steps and narration into one line above the answer", async ({ page }) => {
   await page.route("**/api/chat/stream", (route) =>

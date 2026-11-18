@@ -45,6 +45,42 @@ describe('answerOffset from the stream parser', () => {
   });
 });
 
+// The frames exactly as src/app/api/chat/stream/route.ts writes them: a
+// newline, the U+001E record separator, then the sentinel.
+const routeToolFrame = (payload: Record<string, unknown>) =>
+  `\n\u001E__exp_tool__:${JSON.stringify(payload)}\n`;
+const routeMetaFrame = (payload: Record<string, unknown>) =>
+  `\n\u001E__exp_meta__:${JSON.stringify(payload)}\n`;
+
+describe('the route\'s real frame format', () => {
+  it('leaves no record separator in the rendered text', () => {
+    const parsed = parseChatStreamBuffer(
+      'Looking.' +
+        routeToolFrame({ phase: 'call', id: 't1', name: 'getTodaysActionsTool' }) +
+        routeToolFrame({ phase: 'result', id: 't1', name: 'getTodaysActionsTool' }) +
+        '\n\nThe answer.' +
+        routeMetaFrame({ interactionId: 'i1' }),
+    );
+    expect(parsed.displayText).not.toMatch(/\u001E/);
+    expect(parsed.interactionId).toBe('i1');
+    expect(parsed.displayText.slice(parsed.answerOffset).trim()).toBe('The answer.');
+  });
+
+  it('keeps the reply visible when a finished turn ends on a tool call', () => {
+    const reply = 'Done: German speaking practice is in your calendar.';
+    const parsed = parseChatStreamBuffer(
+      reply +
+        routeToolFrame({ phase: 'call', id: 't1', name: 'updateActionTool' }) +
+        routeToolFrame({ phase: 'result', id: 't1', name: 'updateActionTool' }) +
+        routeMetaFrame({ interactionId: 'i1' }),
+    );
+    expect(splitTurnText(parsed.displayText, parsed.answerOffset, true)).toEqual({
+      answer: reply,
+      working: '',
+    });
+  });
+});
+
 describe('splitTurnText', () => {
   it('leaves a turn without tool calls alone', () => {
     expect(splitTurnText('Hello', undefined, true)).toEqual({ answer: 'Hello', working: '' });
