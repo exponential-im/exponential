@@ -258,6 +258,7 @@ describe("getPillarPage", () => {
     db.resource.findMany.mockResolvedValue([] as never);
     db.epic.findMany.mockResolvedValue([] as never);
     db.pillarPosition.findMany.mockResolvedValue([] as never);
+    db.recurringTask.findMany.mockResolvedValue([] as never);
   });
 
   it("hides a tag that is not a Pillar", async () => {
@@ -459,5 +460,17 @@ describe("getPillarPage", () => {
         holders: [{ id: "u2", name: "Ana", image: null }],
       },
     ]);
+  });
+
+  it("lists running recurring duties the viewer can see, through the project or as creator", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(db.recurringTask.findMany.mock.calls[0]![0]!.where).toEqual({
+      AND: [
+        { workspaceId: WS, pillarTags: { some: { tagId: "tag-devops" } } },
+        { OR: [{ endDate: null }, { endDate: { gte: expect.any(Date) } }] },
+        { OR: [{ createdById: USER }, { project: { projectAccess: true } }] },
+      ],
+    });
   });
 });

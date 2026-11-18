@@ -20,11 +20,13 @@ const RUN = Date.now().toString(36);
 const names = {
   pillar: `E2E Infra ${RUN}`,
   position: `E2E Technical Director ${RUN}`,
+  recurring: `E2E check backups ${RUN}`,
 };
 
 interface Seeded {
   pillarId: string;
   positionId: string;
+  recurringTaskId: string;
 }
 
 test.describe("Pillar accountability", () => {
@@ -60,12 +62,24 @@ test.describe("Pillar accountability", () => {
         holders: { create: { workspaceUserId: membership.id } },
       },
     });
-    seeded = { pillarId: pillar.id, positionId: position.id };
+    // The app has no recurring-task editor; tasks come from the API.
+    const recurring = await db.recurringTask.create({
+      data: {
+        name: names.recurring,
+        repeatPattern: "weekly",
+        repeatDays: [1],
+        startDate: new Date(),
+        workspaceId: workspace.id,
+        createdById: fixture.userId,
+      },
+    });
+    seeded = { pillarId: pillar.id, positionId: position.id, recurringTaskId: recurring.id };
   });
 
   test.afterAll(async () => {
     if (seeded) {
       await db.position.delete({ where: { id: seeded.positionId } });
+      await db.recurringTask.delete({ where: { id: seeded.recurringTaskId } });
       await db.tag.delete({ where: { id: seeded.pillarId } });
     }
     await db?.$disconnect();
@@ -90,5 +104,17 @@ test.describe("Pillar accountability", () => {
     await expect(accountable.getByText("No one accountable")).toHaveCount(0);
     await expect(accountable.getByText("Dev Fixture")).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pillar-accountable.png"), fullPage: true });
+  });
+
+  test("a recurring task filed under the Pillar shows under its recurring duties", async ({ page }) => {
+    const response = await page.request.post("/api/trpc/tag.setEntityTags", {
+      data: { json: { entityType: "recurringTask", entityId: seeded.recurringTaskId, tagIds: [seeded.pillarId] } },
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    const duties = page.getByRole("region", { name: "Recurring duties" });
+    await expect(duties.getByText(names.recurring)).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(duties.getByText("Every week on Mon")).toBeVisible();
   });
 });

@@ -383,6 +383,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     looseTickets,
     inheritedActions,
     inheritedTickets,
+    recurring,
     resources,
   ] = await Promise.all([
     // Who is accountable: Positions and their holders, readable by any member.
@@ -500,6 +501,27 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       select: { ...ticketSelect, epic: { select: { id: true, name: true } } },
       orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     }),
+    // Recurring duties still running: no end date, or one still ahead. Seen
+    // like an Action: through the project, or by their creator.
+    db.recurringTask.findMany({
+      where: {
+        AND: [
+          { workspaceId, pillarTags: carriesTag },
+          { OR: [{ endDate: null }, { endDate: { gte: new Date() } }] },
+          { OR: [{ createdById: userId }, { project: projectAccess }] },
+        ],
+      },
+      select: {
+        id: true,
+        name: true,
+        repeatPattern: true,
+        repeatDays: true,
+        repeatInterval: true,
+        project: { select: { id: true, name: true, slug: true } },
+        createdBy: { select: userSelect },
+      },
+      orderBy: { name: "asc" },
+    }),
     db.resource.findMany({
       where: {
         AND: [resourceAccess, { workspaceId, archivedAt: null }, { pillarTags: carriesTag }],
@@ -539,6 +561,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       tickets: sortUnassignedFirst(looseTickets, (t) => t.assignee !== null),
     } satisfies PillarLooseWork,
     inheritedWork: { actions: inheritedActions, tickets: inheritedTickets },
+    recurring,
     resources,
   };
 }

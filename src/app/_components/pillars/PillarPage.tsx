@@ -22,12 +22,14 @@ import {
   IconStack2,
   IconTarget,
   IconTicket,
+  IconRepeat,
   IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
 import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
+import { describeRecurrence } from "./recurrence";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
@@ -88,8 +90,18 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
     );
   }
 
-  const { pillar, positions, hasNoPosition, goals, projects, epics, looseWork, inheritedWork, resources } =
-    data;
+  const {
+    pillar,
+    positions,
+    hasNoPosition,
+    goals,
+    projects,
+    epics,
+    looseWork,
+    inheritedWork,
+    recurring,
+    resources,
+  } = data;
   const looseCount = looseWork.actions.length + looseWork.tickets.length;
   const inheritedCount = inheritedWork.actions.length + inheritedWork.tickets.length;
   const doneHint = includeCompleted ? "" : "open ";
@@ -304,6 +316,34 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
             </Panel>
           </PageSection>
         )}
+
+        <PageSection label="Recurring duties" icon={<IconRepeat size={14} />} count={recurring.length}>
+          {recurring.length === 0 ? (
+            <EmptyState compact message="No recurring duty is filed under this Pillar." />
+          ) : (
+            <Panel padding="sm">
+              <WorkList>
+                {recurring.map((task) => (
+                  <li key={task.id} className="flex items-center gap-2 py-1">
+                    <span className="inline-flex shrink-0 text-text-muted">
+                      <IconRepeat size={14} />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm text-text-primary">{task.name}</span>
+                    {task.project && (
+                      <Link
+                        href={`/w/${workspaceSlug}/projects/${task.project.slug}-${task.project.id}`}
+                        className="shrink-0 text-xs text-text-muted hover:underline"
+                      >
+                        in {task.project.name}
+                      </Link>
+                    )}
+                    <MetaText>{describeRecurrence(task)}</MetaText>
+                  </li>
+                ))}
+              </WorkList>
+            </Panel>
+          )}
+        </PageSection>
 
         <PageSection label="Resources" icon={<IconBookmark size={14} />} count={resources.length}>
           {resources.length === 0 ? (
