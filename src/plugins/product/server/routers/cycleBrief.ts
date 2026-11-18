@@ -66,6 +66,35 @@ async function loadOutcomeWithAccess(
 }
 
 /**
+ * Feature links must be Features of the brief's product, and the Objective
+ * must be one of the brief's workspace (D-0090).
+ */
+async function assertLinksBelong(
+  db: PrismaClient,
+  brief: { productId: string; workspaceId: string },
+  featureIds: string[] | undefined,
+  goalId: number | null | undefined,
+) {
+  if (featureIds?.length) {
+    const count = await db.feature.count({
+      where: { id: { in: [...new Set(featureIds)] }, productId: brief.productId },
+    });
+    if (count !== new Set(featureIds).size) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "An outcome can only link to Features of the same product",
+      });
+    }
+  }
+  if (goalId !== undefined && goalId !== null) {
+    const goal = await db.goal.findUnique({ where: { id: goalId }, select: { workspaceId: true } });
+    if (goal?.workspaceId !== brief.workspaceId) {
+      throw new TRPCError({ code: "BAD_REQUEST", message: "Objective not found in this workspace" });
+    }
+  }
+}
+
+/**
  * Only a person who is a Product owner of the brief's product signs off
  * (D-0092). An agent never does, even one left in the owner list (ADR-0070).
  */
@@ -191,7 +220,14 @@ export const cycleBriefRouter = createTRPCRouter({
         ctx.db.cycleBrief.findUnique({
           where: { cycleId: cycle.id },
           include: {
-            outcomes: { where: { removedAt: null }, orderBy: [{ position: "asc" }, { createdAt: "asc" }] },
+            outcomes: {
+              where: { removedAt: null },
+              orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+              include: {
+                features: { select: { feature: { select: { id: true, name: true } } } },
+                goal: { select: { id: true, title: true } },
+              },
+            },
           },
         }),
         cycle.productId
@@ -252,33 +288,80 @@ export const cycleBriefRouter = createTRPCRouter({
         outcomeId: z.string().optional(),
         text: requiredText("Outcome", TEXT_LIMITS.SHORT),
         why: requiredText("Why", TEXT_LIMITS.SHORT),
+        /** Features of the same product, for the team. Omit to leave the links as they are. */
+        featureIds: z.array(z.string()).max(20).optional(),
+        /** At most one Objective (D-0090); null clears it. Omit to leave it. */
+        goalId: z.number().int().nullable().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const brief = await loadBriefWithAccess(ctx.db, ctx.session.user.id, input.briefId, "edit");
+      await assertLinksBelong(ctx.db, brief, input.featureIds, input.goalId);
+      const links = {
+        ...(input.goalId !== undefined ? { goalId: input.goalId } : {}),
+      };
+      const featureLinks = (outcomeId: string) =>
+        input.featureIds === undefined
+          ? []
+          : [
+              ctx.db.cycleOutcomeFeature.deleteMany({
+                where: { outcomeId, featureId: { notIn: input.featureIds } },
+              }),
+              ctx.db.cycleOutcomeFeature.createMany({
+                data: input.featureIds.map((featureId) => ({ outcomeId, featureId })),
+                skipDuplicates: true,
+              }),
+            ];
       if (input.outcomeId) {
         const outcome = await loadOutcomeWithAccess(ctx.db, ctx.session.user.id, input.outcomeId, "edit");
         if (outcome.briefId !== brief.id) {
           throw new TRPCError({ code: "NOT_FOUND", message: "Outcome not found" });
         }
-        return ctx.db.cycleOutcome.update({
-          where: { id: outcome.id },
-          data: { draftText: input.text, draftWhy: input.why },
-        });
+        const [updated] = await ctx.db.$transaction([
+          ctx.db.cycleOutcome.update({
+            where: { id: outcome.id },
+            data: { draftText: input.text, draftWhy: input.why, ...links },
+          }),
+          ...featureLinks(outcome.id),
+        ]);
+        return updated;
       }
       const last = await ctx.db.cycleOutcome.findFirst({
         where: { briefId: brief.id },
         orderBy: { position: "desc" },
         select: { position: true },
       });
-      return ctx.db.cycleOutcome.create({
+      const created = await ctx.db.cycleOutcome.create({
         data: {
           briefId: brief.id,
           position: (last?.position ?? -1) + 1,
           draftText: input.text,
           draftWhy: input.why,
+          ...links,
         },
       });
+      if (input.featureIds?.length) await ctx.db.$transaction(featureLinks(created.id));
+      return created;
+    }),
+
+  /** What an outcome may link to: this product's Features and the workspace's Objectives. */
+  linkOptions: protectedProcedure
+    .input(z.object({ briefId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const brief = await loadBriefWithAccess(ctx.db, ctx.session.user.id, input.briefId, "view");
+      const [features, objectives] = await Promise.all([
+        ctx.db.feature.findMany({
+          where: { productId: brief.productId, status: { not: "ARCHIVED" } },
+          select: { id: true, name: true },
+          orderBy: { name: "asc" },
+        }),
+        ctx.db.goal.findMany({
+          where: { workspaceId: brief.workspaceId, status: { not: "archived" } },
+          select: { id: true, title: true },
+          orderBy: { title: "asc" },
+        }),
+      ]);
+      return { features, objectives };
     }),
 
   /**

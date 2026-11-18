@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Button, Group, Select, Stack, Text, Textarea } from "@mantine/core";
+import { Button, Group, MultiSelect, Select, Stack, Text, Textarea } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconExternalLink, IconPlus } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
@@ -26,16 +26,25 @@ const STATUS_OPTIONS = OUTCOME_STATUSES.map((value) => ({ value, label: OUTCOME_
 interface OutcomeDraft {
   text: string;
   why: string;
+  featureIds: string[];
+  goalId: number | null;
+}
+
+interface LinkOptions {
+  features: Array<{ id: string; name: string }>;
+  objectives: Array<{ id: number; title: string }>;
 }
 
 function OutcomeForm({
   initial,
+  options,
   submitLabel,
   isSaving,
   onSubmit,
   onCancel,
 }: {
   initial: OutcomeDraft;
+  options: LinkOptions | undefined;
   submitLabel: string;
   isSaving: boolean;
   onSubmit: (draft: OutcomeDraft) => void;
@@ -43,6 +52,8 @@ function OutcomeForm({
 }) {
   const [text, setText] = useState(initial.text);
   const [why, setWhy] = useState(initial.why);
+  const [featureIds, setFeatureIds] = useState(initial.featureIds);
+  const [goalId, setGoalId] = useState(initial.goalId);
   const canSave = text.trim().length > 0 && why.trim().length > 0;
   return (
     <Stack gap="xs">
@@ -63,8 +74,35 @@ function OutcomeForm({
         autosize
         minRows={1}
       />
+      <Group grow align="flex-start">
+        <MultiSelect
+          size="xs"
+          label="Features"
+          description="For the team; not shown publicly"
+          data={(options?.features ?? []).map((f) => ({ value: f.id, label: f.name }))}
+          value={featureIds}
+          onChange={setFeatureIds}
+          searchable
+          clearable
+        />
+        <Select
+          size="xs"
+          label="Objective"
+          description="At most one; not shown publicly"
+          data={(options?.objectives ?? []).map((g) => ({ value: String(g.id), label: g.title }))}
+          value={goalId === null ? null : String(goalId)}
+          onChange={(v) => setGoalId(v ? Number(v) : null)}
+          searchable
+          clearable
+        />
+      </Group>
       <Group gap="xs">
-        <Button size="xs" disabled={!canSave} loading={isSaving} onClick={() => onSubmit({ text, why })}>
+        <Button
+          size="xs"
+          disabled={!canSave}
+          loading={isSaving}
+          onClick={() => onSubmit({ text, why, featureIds, goalId })}
+        >
           {submitLabel}
         </Button>
         {onCancel && (
@@ -95,6 +133,11 @@ export function CycleBriefPanel({
 }) {
   const utils = api.useUtils();
   const { data } = api.product.cycleBrief.getForCycle.useQuery({ cycleId });
+  const briefId = data?.brief?.id;
+  const { data: linkOptions } = api.product.cycleBrief.linkOptions.useQuery(
+    { briefId: briefId ?? "" },
+    { enabled: !!briefId },
+  );
   const [editingId, setEditingId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [isReviewing, setIsReviewing] = useState(false);
@@ -179,7 +222,13 @@ export function CycleBriefPanel({
           editingId === outcome.id ? (
             <Panel key={outcome.id} variant="muted" padding="sm">
               <OutcomeForm
-                initial={{ text: outcome.draftText, why: outcome.draftWhy }}
+                options={linkOptions}
+                initial={{
+                  text: outcome.draftText,
+                  why: outcome.draftWhy,
+                  featureIds: outcome.features.map((f) => f.feature.id),
+                  goalId: outcome.goalId,
+                }}
                 submitLabel="Save"
                 isSaving={upsertOutcome.isPending}
                 onSubmit={(d) => upsertOutcome.mutate({ briefId: brief.id, outcomeId: outcome.id, ...d })}
@@ -196,6 +245,18 @@ export function CycleBriefPanel({
                   <Text size="xs" className="mt-1 text-text-secondary">
                     Why: {outcome.draftWhy}
                   </Text>
+                  {(outcome.features.length > 0 || outcome.goal) && (
+                    <Text size="xs" className="mt-1 text-text-muted">
+                      {[
+                        outcome.features.length > 0
+                          ? `Features: ${outcome.features.map((f) => f.feature.name).join(", ")}`
+                          : null,
+                        outcome.goal ? `Objective: ${outcome.goal.title}` : null,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </Text>
+                  )}
                 </div>
                 <Group gap={4} wrap="nowrap">
                   {outcome.pendingChange !== "removed" && (
@@ -246,7 +307,13 @@ export function CycleBriefPanel({
         {isAdding ? (
           <Panel variant="muted" padding="sm">
             <OutcomeForm
-              initial={{ text: brief.outcomes.length === 0 ? (cycleGoal ?? "") : "", why: "" }}
+              options={linkOptions}
+              initial={{
+                text: brief.outcomes.length === 0 ? (cycleGoal ?? "") : "",
+                why: "",
+                featureIds: [],
+                goalId: null,
+              }}
               submitLabel="Add outcome"
               isSaving={upsertOutcome.isPending}
               onSubmit={(d) => upsertOutcome.mutate({ briefId: brief.id, ...d })}

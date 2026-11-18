@@ -1,7 +1,15 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { getTestDb } from "~/test/test-db";
 import { createTestCaller, createUnauthenticatedCaller } from "~/test/trpc-helpers";
-import { createUser, createWorkspace, createProduct, createCycle, addWorkspaceMember } from "~/test/factories";
+import {
+  createUser,
+  createWorkspace,
+  createProduct,
+  createCycle,
+  addWorkspaceMember,
+  createFeature,
+  createGoal,
+} from "~/test/factories";
 
 /**
  * Cycle briefs (ADR-0085) through the `cycleBrief` router: the team drafts,
@@ -272,5 +280,61 @@ describe("cycleBrief changes after sign-off", () => {
     const draft = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Idea", why: "Maybe" });
     expect(await caller.product.cycleBrief.requestRemoveOutcome({ outcomeId: draft.id })).toEqual({ deleted: true });
     expect(await db.cycleOutcome.findUnique({ where: { id: draft.id } })).toBeNull();
+  });
+});
+
+describe("cycleBrief outcome links", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("links Features of the same product and one Objective, never shown publicly", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const other = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const feature = await createFeature(db, { productId: product.id, createdById: owner.id, name: "Map exports" });
+    const foreign = await createFeature(db, { productId: other.id, createdById: owner.id });
+    const goal = await createGoal(db, { userId: owner.id, workspaceId: ws.id, title: "Grow active countries" });
+
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    const outcome = await caller.product.cycleBrief.upsertOutcome({
+      briefId: brief.id,
+      text: "Aim",
+      why: "Because",
+      featureIds: [feature.id],
+      goalId: goal.id,
+    });
+
+    await expect(
+      caller.product.cycleBrief.upsertOutcome({
+        briefId: brief.id,
+        outcomeId: outcome.id,
+        text: "Aim",
+        why: "Because",
+        featureIds: [foreign.id],
+      }),
+    ).rejects.toThrow(/same product/i);
+
+    const internal = await caller.product.cycleBrief.getForCycle({ cycleId: cycle.id });
+    expect(internal.brief?.outcomes[0]?.features.map((f) => f.feature.name)).toEqual(["Map exports"]);
+    expect(internal.brief?.outcomes[0]?.goal?.title).toBe("Grow active countries");
+
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+    const json = JSON.stringify(
+      await createUnauthenticatedCaller().product.cycleBrief.publicGet({
+        workspaceSlug: ws.slug,
+        productSlug: product.slug,
+        cycleSlug: cycle.slug,
+      }),
+    );
+    for (const secret of [feature.id, "Map exports", "goal", "Grow active countries"]) {
+      expect(json).not.toContain(secret);
+    }
   });
 });
