@@ -3303,6 +3303,14 @@ export const mastraRouter = createTRPCRouter({
   // id write text into that workspace's feed, or overwrite a window's
   // summary. The gateway's own JWT is the gate (isGatewayCredential): it is
   // minted server-side and handed only to the gateway, never to a browser.
+  // Every place that mints one (checked 2026-11-18): the whatsappGateway,
+  // telegramGateway and matrixGateway routers mint it only to send as the
+  // Authorization header of their own fetch to the gateway URL, and return
+  // none of it; the /api/{whatsapp,telegram,matrix}-gateway/refresh-token
+  // routes return one only behind the X-Gateway-Secret shared secret. No
+  // route takes the token type from its input. The production caller, the
+  // Mastra channel summarizer (proactive/channel-summarizer.ts), sends its
+  // stored `whatsapp-gateway` token, so this gate admits it.
   // The user it names is whoever connected the gateway, and is not checked
   // against the link's workspace: per the ADR the gateway is the trusted
   // party and the link decides where a conversation's summary goes.
