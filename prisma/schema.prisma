@@ -283,6 +283,7 @@ model User {
 
   // Product Management plugin relations
   productsCreated       Product[]             @relation("ProductCreatedBy")
+  productOwnerships     ProductOwner[]
   featuresCreated       Feature[]             @relation("FeatureCreatedBy")
   featureDraftsCreated  MeetingFeatureDraft[] @relation("MeetingFeatureDraftCreatedBy")
   researchesCreated     Research[]            @relation("ResearchCreatedBy")
@@ -685,6 +686,7 @@ model Workspace {
   slackConfig             SlackChannelConfig?
   // Product Management plugin relations
   products                Product[]
+  cycleBriefs             CycleBrief[]
   ticketTemplates         TicketTemplate[]
   retrospectives          Retrospective[]
 
@@ -1179,6 +1181,8 @@ model List {
   // PM Agent sprint tracking
   snapshots      SprintSnapshot[]
   metrics        SprintMetrics?
+  // Its public Cycle brief (ADR-0085), one per cycle
+  cycleBrief     CycleBrief?
 
   @@unique([workspaceId, slug])
   @@index([workspaceId])
@@ -1647,6 +1651,7 @@ model Goal {
   projects          Project[]                   @relation("GoalProjects")
   habits            Habit[] // Habits linked to this goal
   keyResults        KeyResult[] // OKR key results for this goal (objective)
+  cycleOutcomes     CycleOutcome[] // Cycle brief outcomes that roll up to this objective
   comments          GoalComment[] // Discussion comments on this objective
   updates           GoalUpdate[] // Structured status updates with health
   recommendations   WheelOfLifeRecommendation[]
@@ -5295,6 +5300,8 @@ model Product {
   epics             Epic[]
   repositories      WorkspaceRepository[]
   cycles            List[]                @relation("ProductCycles")
+  owners            ProductOwner[]
+  cycleBriefs       CycleBrief[]
   ceremonies        Ceremony[]
   decisions         Decision[]
   overviewSummary   ProductOverviewSummary?
@@ -5398,6 +5405,7 @@ model Feature {
   userStories         UserStory[]
   requirements        Requirement[]
   insights            FeatureInsight[]
+  cycleOutcomes       CycleOutcomeFeature[]
   tickets             Ticket[]
   tags                FeatureTag[]
   comments            FeatureComment[]
@@ -5695,6 +5703,7 @@ model Insight {
   duplicateOf Insight?         @relation("InsightDuplicateOf", fields: [duplicateOfId], references: [id], onDelete: SetNull)
   duplicates  Insight[]        @relation("InsightDuplicateOf")
   features    FeatureInsight[]
+  cycleBriefExclusions CycleBriefExclusion[]
   tags        InsightTag[]
   comments    InsightComment[]
 
@@ -6654,4 +6663,123 @@ model WorkspaceUsagePeriod {
   costMicros  BigInt   @default(0)
 
   @@id([workspaceId, periodStart])
+}
+
+// ---------------------------------------------------------------------------
+// Cycle briefs (ADR-0085): one public, plain-language plan per product Cycle.
+// Each row holds its draft and its signed-off snapshot side by side: sign-off
+// copies draft* to public* in one transaction. Weekly status and close results
+// live outside the snapshot, so they are public at once (D-0097, D-0098).
+// ---------------------------------------------------------------------------
+
+/// A person accountable for what a Product aims for (D-0092). Signs off its
+/// Cycle briefs. Never an agent (User.isAgent), enforced in the router.
+model ProductOwner {
+  productId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([productId, userId])
+  @@index([userId])
+}
+
+/// One per Cycle (D-0088). Only product-scoped SPRINT lists get a brief.
+model CycleBrief {
+  id                String    @id @default(cuid())
+  cycleId           String    @unique
+  productId         String
+  workspaceId       String
+  /// Null = never signed off, so never public.
+  planSignedOffAt   DateTime?
+  planSignedOffById String?
+  /// Set when the cycle moves to COMPLETED; weekly status stops here.
+  closedAt          DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  cycle      List                  @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  product    Product               @relation(fields: [productId], references: [id], onDelete: Cascade)
+  workspace  Workspace             @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  outcomes   CycleOutcome[]
+  exclusions CycleBriefExclusion[]
+
+  @@index([productId])
+  @@index([workspaceId])
+}
+
+/// One aim in a brief's plan (D-0089, D-0090).
+model CycleOutcome {
+  id              String    @id @default(cuid())
+  briefId         String
+  position        Int       @default(0)
+  draftText       String
+  draftWhy        String
+  /// At most one Objective, for the team; never shown publicly.
+  goalId          Int?
+  /// Snapshot at sign-off; null = not public yet.
+  publicText      String?
+  publicWhy       String?
+  /// Set when a sign-off changes an outcome that was already public (D-0091).
+  changedAt       DateTime?
+  /// Removal waits for sign-off; removedAt hides it everywhere.
+  removeRequested Boolean   @default(false)
+  removedAt       DateTime?
+  /// on_track | at_risk | done. Set by a person, live, never derived (D-0097).
+  status          String?
+  statusSetAt     DateTime?
+  /// Stored for the team, never rendered publicly.
+  statusSetById   String?
+  /// achieved | partly | missed, set after the cycle closes (D-0098).
+  result          String?
+  resultNote      String?
+  /// The outcome in an earlier brief this was carried over from.
+  carriedFromId   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  brief       CycleBrief            @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  goal        Goal?                 @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  carriedFrom CycleOutcome?         @relation("CycleOutcomeCarryOver", fields: [carriedFromId], references: [id], onDelete: SetNull)
+  carriedTo   CycleOutcome[]        @relation("CycleOutcomeCarryOver")
+  features    CycleOutcomeFeature[]
+
+  @@index([briefId])
+  @@index([goalId])
+  @@index([carriedFromId])
+}
+
+model CycleOutcomeFeature {
+  outcomeId String
+  featureId String
+
+  outcome CycleOutcome @relation(fields: [outcomeId], references: [id], onDelete: Cascade)
+  feature Feature      @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@id([outcomeId, featureId])
+  @@index([featureId])
+}
+
+/// A "Not this cycle" item (D-0095): signed off with the plan.
+model CycleBriefExclusion {
+  id              String    @id @default(cuid())
+  briefId         String
+  position        Int       @default(0)
+  draftText       String
+  draftReason     String
+  insightId       String?
+  publicText      String?
+  publicReason    String?
+  removeRequested Boolean   @default(false)
+  removedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  brief   CycleBrief @relation(fields: [briefId], references: [id], onDelete: Cascade)
+  insight Insight?   @relation(fields: [insightId], references: [id], onDelete: SetNull)
+
+  @@index([briefId])
+  @@index([insightId])
 }
