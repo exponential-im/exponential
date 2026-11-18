@@ -108,7 +108,13 @@ export function CapturePlacement({
           value={value.projectId}
           onChange={(projectId) => {
             const project = projects.find((p) => p.id === projectId) ?? null;
-            onChange({ tagIds: pillarsAfterProjectChoice(value.tagIds, project), projectId });
+            // Only Pillars this picker offers can be ticked, so only those come
+            // with the project: a hidden tick could not be removed.
+            const offerable = project && {
+              ...project,
+              pillarTagIds: project.pillarTagIds.filter((id) => pillarIds.has(id)),
+            };
+            onChange({ tagIds: pillarsAfterProjectChoice(value.tagIds, offerable), projectId });
           }}
           comboboxProps={{ withinPortal: true }}
         />

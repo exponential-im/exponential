@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PILLAR_CATEGORY } from "~/types/tag";
 import { syncProjectCeremonies } from "~/server/services/ceremonies/projectCeremonies";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
@@ -79,7 +80,12 @@ export const projectRouter = createTRPCRouter({
           id: true,
           name: true,
           slug: true,
-          pillarTags: { select: { tagId: true } },
+          // Active Pillars only: an inactive one stays on the project, but a
+          // capture must never tick it (the save would be refused).
+          pillarTags: {
+            where: { tag: { category: PILLAR_CATEGORY, archivedAt: null } },
+            select: { tagId: true },
+          },
         },
         orderBy: {
           name: "asc",
