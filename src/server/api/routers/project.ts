@@ -54,7 +54,8 @@ async function assertProductInWorkspace(
 }
 
 export const projectRouter = createTRPCRouter({
-  // API endpoint for browser plugin - uses API key authentication
+  // Projects for capture pickers: the browser plugin (API key) and the app's
+  // own capture row (session; apiKeyMiddleware accepts a session first).
   getUserProjects: apiKeyMiddleware
     .input(z.object({
       workspaceId: z.string().optional(),
