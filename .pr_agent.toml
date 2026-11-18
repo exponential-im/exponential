@@ -54,7 +54,7 @@ design tokens: semantic Tailwind classes (bg-background-primary, text-text-prima
 border-border-primary) or CSS variables declared in src/styles/globals.css. A
 pre-commit hook rejects these, so catching them in review saves a round-trip.
 
-Shape (ADR-0073) — radius and shadow come from the tokens on :root
+Shape (ADR-0084) — radius and shadow come from the tokens on :root
 (--radius-xs|sm|md|lg|xl|2xl|full, --shadow-sm|md|lg|xl); Tailwind `rounded-*`,
 Mantine `radius="…"` and `var(--radius-*)` are the same scale. Flag arbitrary
 `rounded-[10px]` / `shadow-[…]`, numeric `radius={12}` or `borderRadius: 8`, raw
