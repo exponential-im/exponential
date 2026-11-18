@@ -145,8 +145,9 @@ export async function commitLines(db: PrismaClient, window: ActivityWindow): Pro
 }
 
 /**
- * The participant's GitHub username: their own integration's, else the one a
- * workspace admin set for them (see `resolveGithubLogins`).
+ * The participant's GitHub username: the account they linked (their GitHub
+ * identity claim), else their own integration's, else the one a workspace
+ * admin set for them (see `resolveGithubLogins`).
  */
 export async function resolveGithubLogin(
   db: PrismaClient,

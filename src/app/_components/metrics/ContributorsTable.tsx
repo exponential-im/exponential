@@ -1,7 +1,9 @@
 'use client';
 
 import { useMemo, useState } from 'react';
+import Link from 'next/link';
 import {
+  Anchor,
   Avatar,
   Button,
   Card,
@@ -123,9 +125,13 @@ export function ContributorsTable({
 
         <Text size="xs" className="text-text-muted">
           Tickets count toward their assignee. PRs and commits are matched on
-          each member&apos;s GitHub username, from their connected GitHub
-          account or set by a workspace admin (— means none is known); time is
-          confirmed time logged inside the cycle window.
+          each member&apos;s GitHub username: the account they linked in{' '}
+          <Anchor component={Link} href="/settings/profile" size="xs">
+            Settings → Profile
+          </Anchor>
+          , their connected GitHub account, or one a workspace admin set (—
+          means none is known); time is confirmed time logged inside the cycle
+          window.
         </Text>
       </Stack>
     </Card>
@@ -193,7 +199,11 @@ function ContributorTableRow({
                 userId={userId}
                 memberName={label}
                 login={row.githubLogin}
-                editable={canSetGithub && row.githubLoginSource !== 'account'}
+                editable={
+                  canSetGithub &&
+                  row.githubLoginSource !== 'account' &&
+                  row.githubLoginSource !== 'claim'
+                }
               />
             )}
           </div>
@@ -243,8 +253,8 @@ function ContributorTableRow({
 
 /**
  * The member's GitHub username under their name. Admins get a popover to set,
- * change or clear it; a login from the member's own connected account is shown
- * read-only. Saving refetches the Metrics queries so the counts update.
+ * change or clear it; a login the member verified themselves (a linked GitHub
+ * identity or their own connected account) is shown read-only. Saving refetches the Metrics queries so the counts update.
  */
 function GithubLogin({
   workspaceId,
