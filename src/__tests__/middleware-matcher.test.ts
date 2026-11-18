@@ -238,6 +238,8 @@ describe('middleware matcher', () => {
       '/p/published-page',
       '/updates/acme',
       '/updates/acme/feed.xml',
+      '/briefs/acme/clear',
+      '/briefs/acme/clear/cycle-21',
       '/f/intake-form',
       '/',
       '/privacy',
