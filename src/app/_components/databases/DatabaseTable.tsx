@@ -22,7 +22,7 @@ import { CSS } from "@dnd-kit/utilities";
 import type { PropertyValue } from "~/lib/databases/properties";
 import type { DatabaseView, PropertyDef } from "~/lib/databases/schema";
 import { computedValue, displayValue, type DisplayContext } from "~/lib/databases/display";
-import { IconPlus } from "@tabler/icons-react";
+import { IconFile, IconPlus } from "@tabler/icons-react";
 import { TextCell } from "./cells/TextCell";
 import { CheckboxCell } from "./cells/CheckboxCell";
 import { SelectCell } from "./cells/SelectCell";
@@ -32,6 +32,7 @@ import { RelationCell } from "./cells/RelationCell";
 import type { RelationTarget, RowRelations } from "~/lib/databases/relations";
 import type { PickerUser } from "~/app/_components/shared/PersonPicker";
 import { PropertyEditorPopover, type PropertyDraft, type RelatableDatabase } from "./PropertyEditorPopover";
+import { ADD_COLUMN_WIDTH, PROPERTY_TYPE_ICONS, columnWidth } from "./propertyMeta";
 import styles from "./DatabaseBlock.module.css";
 
 /** The slice of a database the table needs. */
@@ -90,6 +91,8 @@ interface DatabaseTableProps {
   hasMore?: boolean;
   isLoadingMore?: boolean;
   onLoadMore?: () => void;
+  /** Open this row's title for typing once it is in `rows` (the toolbar's "New"). */
+  editTitleOf?: string | null;
 }
 
 /** A header cell that drags to reorder and whose right edge drags to resize. */
@@ -102,7 +105,7 @@ function HeaderCell({
   className,
 }: {
   def: PropertyDef;
-  width?: number;
+  width: number;
   sortable: boolean;
   onResize?: (width: number) => void;
   children: React.ReactNode;
@@ -121,10 +124,14 @@ function HeaderCell({
     e.stopPropagation();
     const startX = e.clientX;
     const startWidth = thRef.current.getBoundingClientRect().width;
+    // The table is as wide as its columns, so it grows and shrinks with the drag.
+    const table = thRef.current.closest("table");
+    const startTableWidth = table?.getBoundingClientRect().width ?? 0;
     setResizing(true);
     const move = (ev: PointerEvent) => {
       const next = Math.max(40, Math.min(1200, Math.round(startWidth + ev.clientX - startX)));
       if (thRef.current) thRef.current.style.width = `${next}px`;
+      if (table) table.style.width = `${startTableWidth + next - startWidth}px`;
     };
     const up = (ev: PointerEvent) => {
       window.removeEventListener("pointermove", move);
@@ -147,7 +154,7 @@ function HeaderCell({
       data-property-id={def.id}
       data-dragging={isDragging ? "true" : "false"}
       style={{
-        width: width ? `${width}px` : undefined,
+        width: `${width}px`,
         transform: CSS.Translate.toString(transform),
         transition,
       }}
@@ -217,6 +224,7 @@ export function DatabaseTable({
   hasMore = false,
   isLoadingMore = false,
   onLoadMore,
+  editTitleOf,
 }: DatabaseTableProps) {
   const byId = new Map(database.properties.map((p) => [p.id, p]));
   const visible = columns.map((id) => byId.get(id)).filter((p): p is PropertyDef => !!p);
@@ -250,6 +258,16 @@ export function DatabaseTable({
     },
     ...display,
   };
+
+  // The toolbar's "New" made a row: open its title once it has arrived,
+  // once — later row updates must not reopen it.
+  const openedTitleRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!editTitleOf || openedTitleRef.current === editTitleOf) return;
+    if (!rows.some((r) => r.id === editTitleOf)) return;
+    openedTitleRef.current = editTitleOf;
+    setEditing({ rowId: editTitleOf, propertyId: database.titlePropertyId });
+  }, [editTitleOf, rows, database.titlePropertyId]);
 
   // A row that vanished (deleted, filtered out) ends any edit on it.
   useEffect(() => {
@@ -414,12 +432,17 @@ export function DatabaseTable({
       );
     }
     if (isTitle) {
-      return rowHref ? (
-        <Link href={rowHref(row.id)} onClick={(e) => e.stopPropagation()}>
-          {text}
-        </Link>
-      ) : (
-        <span className={styles.cellText}>{text}</span>
+      return (
+        <span className={styles.titleInner}>
+          <IconFile size={16} stroke={1.5} aria-hidden />
+          {rowHref ? (
+            <Link href={rowHref(row.id)} onClick={(e) => e.stopPropagation()}>
+              {text}
+            </Link>
+          ) : (
+            <span className={styles.cellText}>{text}</span>
+          )}
+        </span>
       );
     }
     if (TEXT_EDITED.has(def.type)) {
@@ -437,10 +460,28 @@ export function DatabaseTable({
     return <span className={styles.cellText}>{text}</span>;
   };
 
+  const hasAddColumn = canEditSchema && !!onAddProperty;
+  const tableWidth =
+    visible.reduce((sum, def) => sum + columnWidth(def, view), 0) + (hasAddColumn ? ADD_COLUMN_WIDTH : 0);
+  const headerLabel = (def: PropertyDef) => {
+    const TypeIcon = PROPERTY_TYPE_ICONS[def.type];
+    return (
+      <span className={styles.headerLabel}>
+        <TypeIcon size={16} stroke={1.5} aria-hidden />
+        <span>{def.name}</span>
+      </span>
+    );
+  };
+
   return (
     <div className={styles.tableWrap}>
       <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-      <table ref={tableRef} className={styles.table} data-editable={canEdit ? "true" : "false"}>
+      <table
+        ref={tableRef}
+        className={styles.table}
+        style={{ width: `${tableWidth}px` }}
+        data-editable={canEdit ? "true" : "false"}
+      >
         <thead>
           <tr>
             <SortableContext items={visible.map((p) => p.id)} strategy={horizontalListSortingStrategy} disabled={!canReorder}>
@@ -448,31 +489,27 @@ export function DatabaseTable({
               <HeaderCell
                 key={def.id}
                 def={def}
-                width={view?.columnWidths?.[def.id]}
+                width={columnWidth(def, view)}
                 sortable={canReorder}
                 onResize={editable && onResizeColumn ? (w) => onResizeColumn(def.id, w) : undefined}
               >
                 {canEditSchema ? (
                   <PropertyEditorPopover
                     property={def}
-                    target={<span>{def.name}</span>}
+                    target={headerLabel(def)}
                     onSubmit={(draft) => onUpdateProperty?.(def, draft)}
                     onRemove={onRemoveProperty && def.type !== "title" ? () => onRemoveProperty(def) : undefined}
                   />
                 ) : (
-                  def.name
+                  headerLabel(def)
                 )}
               </HeaderCell>
             ))}
             </SortableContext>
             {canEditSchema && onAddProperty ? (
-              <th scope="col" className={styles.addColumn}>
+              <th scope="col" className={styles.addColumn} style={{ width: `${ADD_COLUMN_WIDTH}px` }}>
                 <PropertyEditorPopover
-                  target={
-                    <span className="inline-flex items-center gap-1">
-                      <IconPlus size={12} /> Property
-                    </span>
-                  }
+                  target={<IconPlus size={16} stroke={1.5} aria-hidden />}
                   onSubmit={(draft) => onAddProperty(draft)}
                   relatableDatabases={relatableDatabases}
                 />
@@ -529,8 +566,12 @@ export function DatabaseTable({
           {canEdit && onCreateRow ? (
             <tr className={styles.newRow}>
               <td colSpan={Math.max(visible.length, 1) + (canEditSchema && onAddProperty ? 1 : 0)}>
-                <button type="button" className={styles.newRowButton} onClick={() => void handleCreateRow()}>
-                  + New
+                <button
+                  type="button"
+                  className={styles.newRowButton}
+                  onClick={() => void handleCreateRow()}
+                >
+                  <IconPlus size={16} stroke={1.5} aria-hidden /> New page
                 </button>
               </td>
             </tr>

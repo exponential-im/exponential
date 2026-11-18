@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react";
 import { MultiSelect, Select, UnstyledButton } from "@mantine/core";
-import { pillTint } from "~/app/_components/listPage/pillTint";
 import type { PropertyDef, SelectOption } from "~/lib/databases/schema";
 import styles from "../DatabaseBlock.module.css";
 
@@ -21,9 +20,25 @@ interface SelectCellProps {
   onCreateOption?: (name: string) => Promise<string | null>;
 }
 
+/**
+ * A database option's colours, as Notion draws them: the palette's light
+ * tint behind text that is mostly the page's own text colour, so the label
+ * stays readable in both themes (the list pages' `pillTint` puts the
+ * palette's filled shade on its own tint, which washes out at 14px).
+ */
+export function databasePillTint(color: string): React.CSSProperties {
+  return {
+    backgroundColor: `var(--mantine-color-${color}-light)`,
+    color:
+      color === "gray"
+        ? "var(--color-text-primary)"
+        : `color-mix(in srgb, var(--mantine-color-${color}-filled) 40%, var(--color-text-primary))`,
+  };
+}
+
 function Pill({ option }: { option: SelectOption }) {
   return (
-    <span className={styles.pill} style={pillTint(option.color)}>
+    <span className={styles.pill} style={databasePillTint(option.color)} title={option.name}>
       {option.name}
     </span>
   );

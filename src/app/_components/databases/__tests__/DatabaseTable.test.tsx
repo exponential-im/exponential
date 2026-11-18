@@ -161,7 +161,7 @@ describe("DatabaseTable — editing", () => {
   it("+ New appends a row and opens its title for editing", async () => {
     const onCreateRow = vi.fn().mockResolvedValue("row-2");
     const { onCreateRow: created } = renderEditable({ onCreateRow });
-    fireEvent.click(screen.getByRole("button", { name: "+ New" }));
+    fireEvent.click(screen.getByRole("button", { name: "New page" }));
     expect(created).toHaveBeenCalledTimes(1);
     // The new row (mocked as row-2, which is rendered) gets its title cell open.
     expect(await screen.findByRole("textbox", { name: "Name" })).toBeTruthy();
@@ -221,7 +221,7 @@ describe("DatabaseTable — editing", () => {
 
   it("read-only tables have no + New line and no focusable cells", () => {
     const { container } = render(<DatabaseTable database={database} rows={rows} columns={[TITLE, STATUS]} />);
-    expect(screen.queryByRole("button", { name: "+ New" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "New page" })).toBeNull();
     expect(container.querySelector("td[tabindex]")).toBeNull();
   });
 });
