@@ -39,6 +39,8 @@ import {
   applyActionUpdate,
   assertAssignableUsers,
   assertCanWriteToWorkspace,
+  resolveAssigneeEmails,
+  assigneeIdsForEmails,
   blockedByInclude,
   createAction,
   isActionSource,
@@ -474,10 +476,30 @@ export const actionRouter = createTRPCRouter({
     // The shared write shape plus the optional attachments: the app sends
     // tags, assignees and sprint with the create and gets them in one
     // transaction; an external caller may still create and then attach.
-    .input(actionWriteSchema.merge(actionCreateAttachmentsSchema))
+    .input(
+      actionWriteSchema.merge(actionCreateAttachmentsSchema).extend({
+        /**
+         * Assignees by email, for callers that know a colleague's address but
+         * not their id (the CLI, MCP, agents). Resolved to ids and merged with
+         * `assigneeIds`; the same containment check then applies to both.
+         */
+        assigneeEmails: z.array(z.string().email()).optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
+      // Emails become ids without throwing: `createAction` authorises the
+      // caller before its containment check, and an unknown email must fail
+      // there, after authorisation, like any non-assignable user. Refusing it
+      // here would leak whether an address has an account.
+      const { assigneeEmails, ...createInput } = input;
+      const emailAssigneeIds = assigneeEmails?.length
+        ? await assigneeIdsForEmails(ctx.db, assigneeEmails)
+        : [];
       const created = await createAction(actionWriteDeps(ctx), {
-        ...input,
+        ...createInput,
+        ...(emailAssigneeIds.length > 0
+          ? { assigneeIds: Array.from(new Set([...(createInput.assigneeIds ?? []), ...emailAssigneeIds])) }
+          : {}),
         // The *who* is createdById (for an agent, its shadow user; ADR-0049),
         // the *how* is source, named from the verified principal.
         source: actionSourceForPrincipal(await resolvePrincipal(ctx)),
@@ -1478,16 +1500,26 @@ export const actionRouter = createTRPCRouter({
       };
     }),
 
-  // Assign users to an action
+  /**
+   * Add assignees to an action. Additive and idempotent: users already
+   * assigned stay, and nobody is removed (`unassign` removes). Pass users by
+   * id, by email, or both; every one must be assignable in the action's
+   * project, team or workspace (`assertAssignableUsers`), or the whole call
+   * is NOT_FOUND and nothing changes.
+   */
   assign: protectedProcedure
     .input(z.object({
       actionId: z.string(),
-      userIds: z.array(z.string()),
+      userIds: z.array(z.string()).default([]),
+      /** Resolved case-insensitively to user ids, then checked like `userIds`. */
+      emails: z.array(z.string().email()).optional(),
+    }).refine((i) => i.userIds.length > 0 || (i.emails?.length ?? 0) > 0, {
+      message: "Pass at least one of userIds or emails",
     }))
-    .mutation(async ({ ctx, input }) => {
+    .mutation(async ({ ctx, input: rawInput }) => {
       // Verify the action exists and user has permission to modify it
       const action = await ctx.db.action.findUnique({
-        where: { id: input.actionId },
+        where: { id: rawInput.actionId },
         select: { id: true, projectId: true, teamId: true, workspaceId: true },
       });
 
@@ -1498,7 +1530,7 @@ export const actionRouter = createTRPCRouter({
       // Check if user has permission to modify this action (creator, assignee, or project editor)
       const hasPermission = await ctx.db.action.findFirst({
         where: {
-          id: input.actionId,
+          id: rawInput.actionId,
           ...buildActionEditWhere(ctx.session.user.id),
         },
         select: { id: true },
@@ -1508,19 +1540,23 @@ export const actionRouter = createTRPCRouter({
         throw new Error("You don't have permission to modify this action");
       }
 
+      const scope = {
+        projectId: action.projectId,
+        teamId: action.teamId,
+        workspaceId: action.workspaceId,
+      };
+      const emailUserIds = rawInput.emails?.length
+        ? await resolveAssigneeEmails(ctx.db, scope, rawInput.emails)
+        : [];
+      const input = {
+        actionId: rawInput.actionId,
+        userIds: Array.from(new Set([...rawInput.userIds, ...emailUserIds])),
+      };
+
       // Same containment rule `createAction` applies to assignees attached on
       // create, so attaching later cannot reach further than attaching at
       // creation. Rejects with NOT_FOUND and never names the rejected user.
-      await assertAssignableUsers(
-        ctx.db,
-        ctx.session.user.id,
-        {
-          projectId: action.projectId,
-          teamId: action.teamId,
-          workspaceId: action.workspaceId,
-        },
-        input.userIds,
-      );
+      await assertAssignableUsers(ctx.db, ctx.session.user.id, scope, input.userIds);
 
       // Snapshot existing assignees so we can compute the diff for activity logging.
       const priorAssignees = await ctx.db.actionAssignee.findMany({
@@ -1604,13 +1640,42 @@ export const actionRouter = createTRPCRouter({
       return { ...updated, agentRunsQueued: runs.length };
     }),
 
-  // Unassign users from an action
+  /**
+   * Remove assignees from an action, by id, by email, or `all: true` to clear
+   * every assignee. Users who are not assigned are ignored. An email is only
+   * matched against the action's current assignees, so an unknown address is
+   * a no-op rather than an error that would reveal whether it is registered.
+   */
   unassign: protectedProcedure
     .input(z.object({
       actionId: z.string(),
-      userIds: z.array(z.string()),
+      userIds: z.array(z.string()).default([]),
+      emails: z.array(z.string().email()).optional(),
+      /** Remove every current assignee. */
+      all: z.boolean().optional(),
+    }).refine((i) => i.all === true || i.userIds.length > 0 || (i.emails?.length ?? 0) > 0, {
+      message: "Pass userIds, emails, or all: true",
     }))
-    .mutation(async ({ ctx, input }) => {
+    .mutation(async ({ ctx, input: rawInput }) => {
+      // `all` and emails resolve against the current assignees only.
+      const needsLookup = rawInput.all === true || (rawInput.emails?.length ?? 0) > 0;
+      const current = needsLookup
+        ? await ctx.db.actionAssignee.findMany({
+            where: { actionId: rawInput.actionId },
+            select: { userId: true, user: { select: { email: true } } },
+          })
+        : [];
+      const wantedEmails = new Set((rawInput.emails ?? []).map((e) => e.trim().toLowerCase()));
+      const resolvedIds = rawInput.all
+        ? current.map((a) => a.userId)
+        : current
+            .filter((a) => a.user.email && wantedEmails.has(a.user.email.toLowerCase()))
+            .map((a) => a.userId);
+      const input = {
+        actionId: rawInput.actionId,
+        userIds: Array.from(new Set([...rawInput.userIds, ...resolvedIds])),
+      };
+
       // Check if user is removing themselves (self-removal should always be allowed)
       const isSelfRemoval = input.userIds.length === 1 && input.userIds[0] === ctx.session.user.id;
 

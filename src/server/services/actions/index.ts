@@ -62,6 +62,8 @@ export {
   canAssignUserToAction,
   assertAssignableUsers,
   assertListMembership,
+  resolveAssigneeEmails,
+  assigneeIdsForEmails,
   type AssignmentScope,
 } from "./containment";
 export {
