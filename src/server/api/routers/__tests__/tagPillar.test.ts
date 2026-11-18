@@ -227,6 +227,34 @@ describe("tag.setEntityTags on a project", () => {
     });
   });
 
+  it("keeps a tag that was demoted after the project was filed under it, while adding a Pillar", async () => {
+    stubEditableProject();
+    dbMock.project.findUnique.mockResolvedValue({
+      workspaceId,
+      pillarTags: [{ tagId: "tag-demoted" }],
+      createdById: callerId,
+      teamId: null,
+      isPublic: false,
+      isRestricted: false,
+    } as never);
+    dbMock.tag.findMany.mockResolvedValue([
+      { id: "tag-demoted", category: null, workspaceId, archivedAt: null },
+      { id: "tag-devops", category: "pillar", workspaceId, archivedAt: null },
+    ] as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setEntityTags({
+      entityType: "project",
+      entityId: "proj-1",
+      tagIds: ["tag-demoted", "tag-devops"],
+    });
+
+    expect(dbMock.projectTag.createMany).toHaveBeenCalledWith({
+      data: [{ projectId: "proj-1", tagId: "tag-devops" }],
+      skipDuplicates: true,
+    });
+  });
+
   it("refuses an ordinary label", async () => {
     stubEditableProject();
     dbMock.tag.findMany.mockResolvedValue([

@@ -62,9 +62,15 @@ export function EntityPillars({
 
   const currentTags = current.data ?? [];
   const currentIds = currentTags.map((t) => t.id);
-  const offered = (pillars.data?.workspaceTags ?? []).filter(
+  const activePillars = (pillars.data?.workspaceTags ?? []).filter(
     (t) => !t.archivedAt || currentIds.includes(t.id),
   );
+  // A tag the item still carries but that is no longer a Pillar (turned back
+  // into a label) stays offered, so it can be unticked.
+  const offered = [
+    ...activePillars,
+    ...currentTags.filter((t) => !activePillars.some((p) => p.id === t.id)),
+  ];
 
   // Nothing filed and nothing to file under (or no right to): say nothing.
   if (

@@ -274,8 +274,9 @@ async function requireWorkspaceAccess(
 
 /**
  * Every tag must be global or belong to the entity's workspace. A Pillar-only
- * entity takes only this workspace's Pillars. An inactive (archived) Pillar is
- * never newly added, but one already on the entity stays.
+ * entity is newly filed only under this workspace's Pillars. An inactive
+ * (archived) Pillar is never newly added. Tags already on the entity stay
+ * either way.
  */
 async function validateTagsForWorkspace(
   db: PrismaClient,
@@ -298,9 +299,14 @@ async function validateTagsForWorkspace(
       message: "One or more tags are not available in this workspace",
     });
   }
+  const current = new Set(currentTagIds);
   if (PILLAR_ONLY_ENTITY_TYPES.has(entityType)) {
+    // Only what is being added must be a Pillar. A tag already on the item
+    // may since have been turned back into a label; it can stay until removed,
+    // or it would block every other change to the item's Pillars.
     const nonPillar = validTags.some(
-      (t) => t.category !== PILLAR_CATEGORY || t.workspaceId !== workspaceId,
+      (t) =>
+        !current.has(t.id) && (t.category !== PILLAR_CATEGORY || t.workspaceId !== workspaceId),
     );
     if (nonPillar) {
       throw new TRPCError({
@@ -309,7 +315,6 @@ async function validateTagsForWorkspace(
       });
     }
   }
-  const current = new Set(currentTagIds);
   if (validTags.some((t) => t.archivedAt && !current.has(t.id))) {
     throw new TRPCError({
       code: "BAD_REQUEST",
