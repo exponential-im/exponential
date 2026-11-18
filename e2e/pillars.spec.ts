@@ -23,6 +23,11 @@ const names = {
   ticket: `E2E alert on failed backups ${RUN}`,
   goal: `E2E zero unplanned downtime ${RUN}`,
   resource: `E2E incident runbook ${RUN}`,
+  epic: `E2E observability ${RUN}`,
+  epicTicket: `E2E add tracing to the API ${RUN}`,
+  otherEpic: `E2E onboarding revamp ${RUN}`,
+  inheritedTicket: `E2E rotate the deploy key ${RUN}`,
+  doneAction: `E2E renew the TLS certificate ${RUN}`,
 };
 
 interface Seeded {
@@ -33,6 +38,9 @@ interface Seeded {
   ticketId: string;
   goalId: number;
   resourceId: string;
+  epicIds: string[];
+  extraTicketIds: string[];
+  doneActionId: string;
 }
 
 async function trpc(request: APIRequestContext, procedure: string, input: unknown) {
@@ -109,7 +117,54 @@ test.describe("Pillars", () => {
         readStatus: "read",
       },
     });
+    // An epic under the Pillar with an untagged ticket; an untagged epic holding a
+    // ticket that carries the Pillar itself; a finished loose action.
+    const epic = await db.epic.create({
+      data: {
+        name: names.epic,
+        workspaceId: workspace.id,
+        productId: product.id,
+        ownerId: fixture.userId,
+        tags: { create: { tagId: tag.id } },
+      },
+    });
+    const otherEpic = await db.epic.create({
+      data: { name: names.otherEpic, workspaceId: workspace.id, productId: product.id, ownerId: fixture.userId },
+    });
+    const ticketNumber = () => 90_000 + Math.floor(Math.random() * 9_000);
+    const epicTicket = await db.ticket.create({
+      data: {
+        productId: product.id,
+        number: ticketNumber(),
+        title: names.epicTicket,
+        createdById: fixture.userId,
+        epicId: epic.id,
+      },
+    });
+    const inheritedTicket = await db.ticket.create({
+      data: {
+        productId: product.id,
+        number: ticketNumber(),
+        title: names.inheritedTicket,
+        createdById: fixture.userId,
+        epicId: otherEpic.id,
+        tags: { create: { tagId: tag.id } },
+      },
+    });
+    const doneAction = await db.action.create({
+      data: {
+        name: names.doneAction,
+        workspaceId: workspace.id,
+        createdById: fixture.userId,
+        status: "COMPLETED",
+        priority: "Quick",
+        tags: { create: { tagId: tag.id } },
+      },
+    });
     seeded = {
+      epicIds: [epic.id, otherEpic.id],
+      extraTicketIds: [epicTicket.id, inheritedTicket.id],
+      doneActionId: doneAction.id,
       tagId: tag.id,
       projectId: project.id,
       projectSlug,
@@ -123,6 +178,9 @@ test.describe("Pillars", () => {
   test.afterAll(async () => {
     if (seeded) {
       await db.ticket.delete({ where: { id: seeded.ticketId } });
+      for (const id of seeded.extraTicketIds) await db.ticket.delete({ where: { id } });
+      for (const id of seeded.epicIds) await db.epic.delete({ where: { id } });
+      await db.action.delete({ where: { id: seeded.doneActionId } });
       await db.goal.delete({ where: { id: seeded.goalId } });
       await db.resource.delete({ where: { id: seeded.resourceId } });
       await db.action.delete({ where: { id: seeded.actionId } });
@@ -191,5 +249,29 @@ test.describe("Pillars", () => {
       page.getByRole("region", { name: "Resources" }).getByRole("link", { name: names.resource }),
     ).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pillar-page-goals-resources.png"), fullPage: true });
+  });
+
+  test("epics, work filed from other containers, and finished work behind the toggle", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+
+    const epics = page.getByRole("region", { name: "Epics" });
+    await expect(epics.getByRole("link", { name: names.epic })).toBeVisible();
+    await expect(epics.getByRole("link", { name: names.epicTicket })).toBeVisible();
+
+    const inherited = page.getByRole("region", { name: "Filed here from other work" });
+    await expect(inherited.getByRole("link", { name: names.inheritedTicket })).toBeVisible();
+    await expect(inherited.getByText(`in ${names.otherEpic}`)).toBeVisible();
+    // The untagged epic itself is not under the Pillar.
+    await expect(epics.getByText(names.otherEpic)).toHaveCount(0);
+
+    const loose = page.getByRole("region", { name: "Loose work" });
+    await expect(loose.getByRole("link", { name: names.doneAction })).toHaveCount(0);
+    await page.getByText("Show completed", { exact: true }).click();
+    await expect(page.getByRole("switch", { name: "Show completed" })).toBeChecked();
+    await expect(loose.getByRole("link", { name: names.doneAction })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("pillar-page-complete.png"), fullPage: true });
   });
 });

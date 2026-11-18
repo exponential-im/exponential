@@ -138,6 +138,7 @@ describe("getPillarPage", () => {
     db.ticket.findMany.mockResolvedValue([] as never);
     db.goal.findMany.mockResolvedValue([] as never);
     db.resource.findMany.mockResolvedValue([] as never);
+    db.epic.findMany.mockResolvedValue([] as never);
   });
 
   it("hides a tag that is not a Pillar", async () => {
@@ -190,12 +191,12 @@ describe("getPillarPage", () => {
   });
 
   it("puts unassigned loose work first, keeping the query order otherwise", async () => {
-    db.action.findMany.mockResolvedValue([
+    db.action.findMany.mockResolvedValueOnce([
       action("a-assigned", true),
       action("a-free-1", false),
       action("a-free-2", false),
     ] as never);
-    db.ticket.findMany.mockResolvedValue([ticket("t-assigned", true), ticket("t-free", false)] as never);
+    db.ticket.findMany.mockResolvedValueOnce([ticket("t-assigned", true), ticket("t-free", false)] as never);
 
     const page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
 
@@ -231,6 +232,58 @@ describe("getPillarPage", () => {
         { workspaceId: WS, archivedAt: null },
         { pillarTags: { some: { tagId: "tag-devops" } } },
       ],
+    });
+  });
+
+  it("lists the workspace's open epics under the Pillar", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(db.epic.findMany.mock.calls[0]![0]!.where).toEqual({
+      workspaceId: WS,
+      tags: { some: { tagId: "tag-devops" } },
+      status: { notIn: ["DONE", "CANCELLED"] },
+    });
+  });
+
+  it("collects tagged work sitting in a project or epic that does not carry the Pillar", async () => {
+    const inherited = { ...action("in-untagged-project", false), project: { id: "p", name: "Other" }, epic: null };
+    db.action.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce([inherited] as never);
+
+    const page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(page.inheritedWork.actions).toEqual([inherited]);
+    const carries = { some: { tagId: "tag-devops" } };
+    expect(db.action.findMany.mock.calls[1]![0]!.where!.AND).toEqual(
+      expect.arrayContaining([
+        { tags: carries },
+        { OR: [{ projectId: { not: null } }, { epicId: { not: null } }] },
+        { NOT: [{ project: { pillarTags: carries } }, { epic: { tags: carries } }] },
+      ]),
+    );
+    expect(db.ticket.findMany.mock.calls[1]![0]!.where!.AND).toEqual(
+      expect.arrayContaining([{ epicId: { not: null } }, { NOT: { epic: { tags: carries } } }]),
+    );
+  });
+
+  it("hides finished items unless show completed is on", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(db.project.findMany.mock.calls[0]![0]!.where!.AND).toContainEqual({ status: "ACTIVE" });
+    expect(db.ticket.findMany.mock.calls[0]![0]!.where!.AND).toContainEqual({
+      status: { notIn: ["DONE", "DEPLOYED", "ARCHIVED"] },
+    });
+
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops", includeCompleted: true });
+
+    // The second call of each: project, goal, epic once per page; tickets twice.
+    expect(db.project.findMany.mock.calls[1]![0]!.where!.AND).not.toContainEqual({ status: "ACTIVE" });
+    expect(db.ticket.findMany.mock.calls[2]![0]!.where!.AND).not.toContainEqual({
+      status: { notIn: ["DONE", "DEPLOYED", "ARCHIVED"] },
+    });
+    expect(db.goal.findMany.mock.calls[1]![0]!.where).not.toHaveProperty("status");
+    expect(db.epic.findMany.mock.calls[1]![0]!.where).not.toHaveProperty("status");
+    // Deleted and draft actions never show.
+    expect(db.action.findMany.mock.lastCall![0]!.where!.AND).toContainEqual({
+      status: { notIn: ["DELETED", "DRAFT"] },
     });
   });
 });

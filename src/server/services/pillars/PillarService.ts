@@ -26,10 +26,14 @@ import { PILLAR_CATEGORY } from "~/types/tag";
 /** Workspace roles that may promote, demote or archive a Pillar. */
 export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
 
+/** Action statuses never shown on a Pillar page: gone, or not yet real. */
+const HIDDEN_ACTION_STATUSES = ["DELETED", "DRAFT"];
 /** Action statuses that count as finished (or gone) on a Pillar page. */
-const CLOSED_ACTION_STATUSES = ["COMPLETED", "CANCELLED", "DELETED", "DRAFT"];
+const CLOSED_ACTION_STATUSES = ["COMPLETED", "CANCELLED", ...HIDDEN_ACTION_STATUSES];
 /** Ticket statuses that count as finished on a Pillar page. */
 const CLOSED_TICKET_STATUSES = ["DONE", "DEPLOYED", "ARCHIVED"] as const;
+/** Epic statuses that count as finished on a Pillar page. */
+const CLOSED_EPIC_STATUSES = ["DONE", "CANCELLED"] as const;
 /** Objective statuses that count as finished on a Pillar page. */
 const CLOSED_GOAL_STATUSES = ["completed", "archived"];
 /** How many open Actions to list under each Project on the page. */
@@ -71,6 +75,8 @@ export interface PillarPageInput {
   db: PrismaClient;
   userId: string;
   tagId: string;
+  /** Show finished goals, projects, epics and work too. */
+  includeCompleted?: boolean;
 }
 
 function pillarNotFound(): TRPCError {
@@ -140,18 +146,21 @@ function sortUnassignedFirst<T>(items: T[], isAssigned: (item: T) => boolean): T
 
 /**
  * Everything a Pillar page shows, in display order. See the module comment
- * for the membership rule.
+ * for the membership rule. Finished items are left out unless
+ * `includeCompleted` is set.
  */
-export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
+export async function getPillarPage({ db, userId, tagId, includeCompleted = false }: PillarPageInput) {
   const pillar = await loadReadablePillar(db, userId, tagId);
   const workspaceId = pillar.workspaceId;
   const actionAccess = buildActionAccessWhere(userId);
-  const openAction: Prisma.ActionWhereInput = {
-    status: { notIn: CLOSED_ACTION_STATUSES },
+  const ticketAccess = buildTicketAccessWhere(userId);
+  const actionStatus: Prisma.ActionWhereInput = {
+    status: { notIn: includeCompleted ? HIDDEN_ACTION_STATUSES : CLOSED_ACTION_STATUSES },
   };
-  const openTicket: Prisma.TicketWhereInput = {
-    status: { notIn: [...CLOSED_TICKET_STATUSES] },
-  };
+  const ticketStatus: Prisma.TicketWhereInput = includeCompleted
+    ? {}
+    : { status: { notIn: [...CLOSED_TICKET_STATUSES] } };
+  const carriesTag = { some: { tagId } };
   const [projectAccess, sharedResources] = await Promise.all([
     buildWorkspaceProjectAccessWhere(db, userId, workspaceId),
     buildSharedResourceWhere(db, userId, { workspaceId }),
@@ -160,14 +169,34 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
   const resourceAccess: Prisma.ResourceWhereInput = {
     OR: [{ userId }, ...(sharedResources ? [sharedResources] : [])],
   };
+  const containerActions = {
+    where: { AND: [actionAccess, actionStatus] },
+    select: actionSelect,
+    orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
+    take: CONTAINER_WORK_LIMIT,
+  } satisfies Prisma.Project$actionsArgs;
+  // Work that carries the Pillar itself inside a Project or Epic that does not:
+  // listed on its own so it is not lost.
+  const outsideTaggedContainers = {
+    NOT: [{ project: { pillarTags: carriesTag } }, { epic: { tags: carriesTag } }],
+  } satisfies Prisma.ActionWhereInput;
 
-  const [goals, projects, looseActions, looseTickets, resources] = await Promise.all([
+  const [
+    goals,
+    projects,
+    epics,
+    looseActions,
+    looseTickets,
+    inheritedActions,
+    inheritedTickets,
+    resources,
+  ] = await Promise.all([
     // Objectives in a workspace are readable by every member of it.
     db.goal.findMany({
       where: {
         workspaceId,
-        pillarTags: { some: { tagId } },
-        status: { notIn: CLOSED_GOAL_STATUSES },
+        pillarTags: carriesTag,
+        ...(includeCompleted ? {} : { status: { notIn: CLOSED_GOAL_STATUSES } }),
       },
       select: {
         id: true,
@@ -183,8 +212,8 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
       where: {
         AND: [
           projectAccess,
-          { pillarTags: { some: { tagId } } },
-          { status: "ACTIVE" },
+          { pillarTags: carriesTag },
+          includeCompleted ? {} : { status: "ACTIVE" },
         ],
       },
       select: {
@@ -194,47 +223,80 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
         status: true,
         progress: true,
         endDate: true,
-        actions: {
-          where: { AND: [actionAccess, openAction] },
-          select: actionSelect,
-          orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
+        actions: containerActions,
+      },
+      orderBy: { name: "asc" },
+    }),
+    // Epics are workspace content: membership (checked above) reads them.
+    db.epic.findMany({
+      where: {
+        workspaceId,
+        tags: carriesTag,
+        ...(includeCompleted ? {} : { status: { notIn: [...CLOSED_EPIC_STATUSES] } }),
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        product: { select: { slug: true } },
+        tickets: {
+          where: { AND: [ticketAccess, ticketStatus] },
+          select: ticketSelect,
+          orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
           take: CONTAINER_WORK_LIMIT,
         },
+        actions: containerActions,
       },
       orderBy: { name: "asc" },
     }),
     db.action.findMany({
       where: {
-        AND: [
-          actionAccess,
-          openAction,
-          { tags: { some: { tagId } } },
-          { projectId: null, epicId: null },
-        ],
+        AND: [actionAccess, actionStatus, { tags: carriesTag }, { projectId: null, epicId: null }],
       },
       select: actionSelect,
       orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     }),
     db.ticket.findMany({
       where: {
-        AND: [
-          buildTicketAccessWhere(userId),
-          openTicket,
-          { product: { workspaceId } },
-          { tags: { some: { tagId } } },
-          { epicId: null },
-        ],
+        AND: [ticketAccess, ticketStatus, { product: { workspaceId } }, { tags: carriesTag }, { epicId: null }],
       },
       select: ticketSelect,
       orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
     }),
-    db.resource.findMany({
+    db.action.findMany({
       where: {
         AND: [
-          resourceAccess,
-          { workspaceId, archivedAt: null },
-          { pillarTags: { some: { tagId } } },
+          actionAccess,
+          actionStatus,
+          { tags: carriesTag },
+          { OR: [{ projectId: { not: null } }, { epicId: { not: null } }] },
+          outsideTaggedContainers,
         ],
+      },
+      select: {
+        ...actionSelect,
+        project: { select: { id: true, name: true } },
+        epic: { select: { id: true, name: true } },
+      },
+      orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
+    }),
+    db.ticket.findMany({
+      where: {
+        AND: [
+          ticketAccess,
+          ticketStatus,
+          { product: { workspaceId } },
+          { tags: carriesTag },
+          { epicId: { not: null } },
+          { NOT: { epic: { tags: carriesTag } } },
+        ],
+      },
+      select: { ...ticketSelect, epic: { select: { id: true, name: true } } },
+      orderBy: [{ priority: { sort: "asc", nulls: "last" } }, { createdAt: "asc" }],
+    }),
+    db.resource.findMany({
+      where: {
+        AND: [resourceAccess, { workspaceId, archivedAt: null }, { pillarTags: carriesTag }],
       },
       select: {
         id: true,
@@ -248,11 +310,6 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
     }),
   ]);
 
-  const looseWork: PillarLooseWork = {
-    actions: sortUnassignedFirst(looseActions, (a) => a.assignees.length > 0),
-    tickets: sortUnassignedFirst(looseTickets, (t) => t.assignee !== null),
-  };
-
   return {
     pillar: {
       id: pillar.id,
@@ -264,7 +321,12 @@ export async function getPillarPage({ db, userId, tagId }: PillarPageInput) {
     },
     goals,
     projects,
-    looseWork,
+    epics,
+    looseWork: {
+      actions: sortUnassignedFirst(looseActions, (a) => a.assignees.length > 0),
+      tickets: sortUnassignedFirst(looseTickets, (t) => t.assignee !== null),
+    } satisfies PillarLooseWork,
+    inheritedWork: { actions: inheritedActions, tickets: inheritedTickets },
     resources,
   };
 }
