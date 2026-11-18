@@ -157,6 +157,26 @@ const ISSUE_PATH_RE = new RegExp(
 const OUTPUT_SCHEMA_RE = /output failed its schema/i;
 
 /**
+ * What a Mastra `{ error: true, message }` tool result means.
+ *
+ * Mastra returns two different failures in that same shape, both as a
+ * "successful" result:
+ *  - `output`: the tool ran and its answer failed the tool's own output
+ *    schema. Ours to fix, and it fails on every call.
+ *  - `input`: the MODEL sent arguments the tool's input schema rejects. The
+ *    tool never ran; the model reads the message and retries. A slip, not a
+ *    fault, and filing each one buries the real ones.
+ * Treating every such result as `output` filed a bug that sent its reader to
+ * the wrong schema (auto-filed ticket 968).
+ */
+export function mastraResultFault(message: string | undefined | null): 'output' | 'input' | 'other' {
+  const text = (message ?? '').toLowerCase();
+  if (text.includes('output validation failed')) return 'output';
+  if (text.includes('input validation failed')) return 'input';
+  return 'other';
+}
+
+/**
  * A short, stable line naming the fault: which tool, which app procedure,
  * which field. Stable matters more than complete: the Bug ticket's dedup
  * fingerprint is built from this text, so it must not carry ids or the query.
