@@ -138,6 +138,12 @@ async function reconcileCycleStatuses(
     data: { status: "COMPLETED" },
   });
 
+  // A completed cycle closes its brief: weekly status stops, results begin.
+  await db.cycleBrief.updateMany({
+    where: { workspaceId, closedAt: null, cycle: { status: "COMPLETED" } },
+    data: { closedAt: new Date() },
+  });
+
   // Activate any planned cycles whose start date has arrived but end date hasn't
   await db.list.updateMany({
     where: {
@@ -585,10 +591,25 @@ export const cycleRouter = createTRPCRouter({
       }
 
       const { id, ...data } = input;
-      return ctx.db.list.update({
+      const updated = await ctx.db.list.update({
         where: { id },
         data,
       });
+
+      // Marking the cycle completed closes its brief (ADR-0085); reopening it
+      // reopens the brief. Results are a person's step, never written here.
+      if (input.status === "COMPLETED") {
+        await ctx.db.cycleBrief.updateMany({
+          where: { cycleId: id, closedAt: null },
+          data: { closedAt: new Date() },
+        });
+      } else if (input.status) {
+        await ctx.db.cycleBrief.updateMany({
+          where: { cycleId: id, closedAt: { not: null } },
+          data: { closedAt: null },
+        });
+      }
+      return updated;
     }),
 
   delete: protectedProcedure

@@ -75,6 +75,8 @@ export function CycleDetailClient() {
     onSuccess: async () => {
       await utils.product.cycle.getById.invalidate({ id: cycleId });
       await utils.product.cycle.list.invalidate();
+      // Completing the cycle closes its brief and asks for results.
+      await utils.product.cycleBrief.getForCycle.invalidate({ cycleId });
     },
   });
 

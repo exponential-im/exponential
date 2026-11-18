@@ -16,3 +16,17 @@ export const OUTCOME_STATUS_LABELS: Record<OutcomeStatus, string> = {
 export function isOutcomeStatus(value: string | null | undefined): value is OutcomeStatus {
   return (OUTCOME_STATUSES as readonly string[]).includes(value ?? "");
 }
+
+/** A Cycle outcome's final result, given by a person after the cycle closes (D-0098). */
+export const OUTCOME_RESULTS = ["achieved", "partly", "missed"] as const;
+export type OutcomeResult = (typeof OUTCOME_RESULTS)[number];
+
+export const OUTCOME_RESULT_LABELS: Record<OutcomeResult, string> = {
+  achieved: "Achieved",
+  partly: "Partly",
+  missed: "Missed",
+};
+
+export function isOutcomeResult(value: string | null | undefined): value is OutcomeResult {
+  return (OUTCOME_RESULTS as readonly string[]).includes(value ?? "");
+}

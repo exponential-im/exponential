@@ -7,6 +7,7 @@ import { getPublicBaseUrl } from "~/lib/urls";
 import { listPublicBriefs, publicBriefPath, publicBriefsPath } from "~/server/services/cycleBriefs/public";
 import { BriefShell, formatBriefDate, formatCycleWindow } from "../../_components/BriefShell";
 import { OutcomeStatusPill } from "../../_components/OutcomeStatusPill";
+import { OutcomeResultPill } from "../../_components/OutcomeResultPill";
 
 /** Never cached: a sign-off or a status change must show at once. */
 export const dynamic = "force-dynamic";
@@ -60,10 +61,14 @@ export default async function PublicBriefsIndexPage({ params }: Params) {
                 {brief.outcomes.map((outcome, index) => (
                   <li key={index} className="flex flex-col gap-1">
                     <span className="text-base text-text-primary">{outcome.text}</span>
-                    <OutcomeStatusPill
-                      status={outcome.status}
-                      asOf={outcome.statusSetAt ? formatBriefDate(outcome.statusSetAt) : null}
-                    />
+                    {brief.closed ? (
+                      <OutcomeResultPill result={outcome.result} />
+                    ) : (
+                      <OutcomeStatusPill
+                        status={outcome.status}
+                        asOf={outcome.statusSetAt ? formatBriefDate(outcome.statusSetAt) : null}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>

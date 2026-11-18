@@ -6,6 +6,7 @@ import { getPublicBaseUrl } from "~/lib/urls";
 import { getPublicBrief, publicBriefPath, publicBriefsPath } from "~/server/services/cycleBriefs/public";
 import { BriefShell, formatBriefDate, formatCycleWindow } from "../../../_components/BriefShell";
 import { OutcomeStatusPill } from "../../../_components/OutcomeStatusPill";
+import { OutcomeResultPill } from "../../../_components/OutcomeResultPill";
 
 /** Never cached: a sign-off or a status change must show at once. */
 export const dynamic = "force-dynamic";
@@ -41,21 +42,33 @@ export default async function PublicBriefPage({ params }: Params) {
         <h1 className="mb-2 text-3xl font-bold text-text-primary">{brief.cycleName}</h1>
         <p className="mb-8 text-sm text-text-muted">Signed off {formatBriefDate(brief.signedOffAt)}</p>
 
-        <h2 className="mb-4 text-lg font-semibold text-text-primary">What this cycle aims for</h2>
+        <h2 className="mb-4 text-lg font-semibold text-text-primary">
+          {brief.closed ? "What this cycle aimed for, and how it went" : "What this cycle aims for"}
+        </h2>
         <ol className="space-y-6">
           {brief.outcomes.map((outcome, index) => (
             <li key={index} className="border-l-2 border-border-primary pl-4">
               <div className="mb-1">
-                <OutcomeStatusPill
-                  status={outcome.status}
-                  asOf={outcome.statusSetAt ? formatBriefDate(outcome.statusSetAt) : null}
-                />
+                {brief.closed ? (
+                  <OutcomeResultPill result={outcome.result} />
+                ) : (
+                  <OutcomeStatusPill
+                    status={outcome.status}
+                    asOf={outcome.statusSetAt ? formatBriefDate(outcome.statusSetAt) : null}
+                  />
+                )}
               </div>
               <p className="text-base font-medium text-text-primary">{outcome.text}</p>
               <p className="mt-1 text-sm text-text-secondary">
                 <span className="text-text-muted">Why: </span>
                 {outcome.why}
               </p>
+              {brief.closed && outcome.resultNote && (
+                <p className="mt-1 text-sm text-text-secondary">
+                  <span className="text-text-muted">Result: </span>
+                  {outcome.resultNote}
+                </p>
+              )}
               {outcome.changedAt && (
                 <p className="mt-1 text-xs text-text-muted">Changed on {formatBriefDate(outcome.changedAt)}</p>
               )}

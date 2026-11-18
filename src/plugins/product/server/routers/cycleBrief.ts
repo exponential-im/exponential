@@ -5,7 +5,7 @@ import { createTRPCRouter, protectedProcedure, publicProcedure } from "~/server/
 import { TEXT_LIMITS } from "~/lib/text-limits";
 import { getWorkspaceMembership } from "~/server/services/access";
 import { getPublicBrief, listPublicBriefs } from "~/server/services/cycleBriefs/public";
-import { OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
+import { OUTCOME_RESULTS, OUTCOME_STATUSES } from "~/server/services/cycleBriefs/types";
 import { pendingChange } from "~/server/services/cycleBriefs/changes";
 import { assertWorkspaceAccess, type WorkspaceAccessLevel } from "./product";
 
@@ -210,7 +210,7 @@ export const cycleBriefRouter = createTRPCRouter({
     .query(async ({ ctx, input }) => {
       const cycle = await ctx.db.list.findUnique({
         where: { id: input.cycleId },
-        select: { id: true, workspaceId: true, productId: true, listType: true, cycleGoal: true },
+        select: { id: true, workspaceId: true, productId: true, listType: true, cycleGoal: true, status: true },
       });
       if (!cycle || cycle.listType !== "SPRINT") {
         throw new TRPCError({ code: "NOT_FOUND", message: "Cycle not found" });
@@ -257,6 +257,8 @@ export const cycleBriefRouter = createTRPCRouter({
         /** No Product owner means nobody can sign off (open decision 2): the UI prompts to set one. */
         hasProductOwner: ownerCount > 0,
         cycleGoal: cycle.cycleGoal,
+        /** Results replace weekly status once the cycle is completed. */
+        isCycleCompleted: cycle.status === "COMPLETED",
         brief: brief ? { ...brief, outcomes, exclusions } : null,
         /** Something the next sign-off would change on the public brief. */
         hasPendingChanges:
@@ -591,6 +593,41 @@ export const cycleBriefRouter = createTRPCRouter({
         where: { id: outcome.id },
         data: { status: input.status, statusSetAt: new Date(), statusSetById: ctx.session.user.id },
         select: { id: true, status: true, statusSetAt: true },
+      });
+    }),
+
+  /**
+   * An outcome's final result once the cycle is COMPLETED: Achieved, Partly
+   * or Missed, with an optional note (D-0098). A person's step, public at
+   * once like status; nothing writes it automatically.
+   */
+  setResult: protectedProcedure
+    .input(
+      z.object({
+        outcomeId: z.string(),
+        result: z.enum(OUTCOME_RESULTS),
+        note: z.string().trim().max(TEXT_LIMITS.SHORT).nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      const outcome = await loadOutcomeWithAccess(ctx.db, ctx.session.user.id, input.outcomeId, "edit");
+      const cycle = await ctx.db.list.findUnique({
+        where: { id: outcome.brief.cycleId },
+        select: { status: true },
+      });
+      if (cycle?.status !== "COMPLETED") {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "A final result can only be given once the cycle is completed",
+        });
+      }
+      return ctx.db.cycleOutcome.update({
+        where: { id: outcome.id },
+        data: {
+          result: input.result,
+          ...(input.note !== undefined ? { resultNote: input.note ? input.note : null } : {}),
+        },
+        select: { id: true, result: true, resultNote: true },
       });
     }),
 

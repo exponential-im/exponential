@@ -55,6 +55,8 @@ describe("projectPublicBrief", () => {
       status: "at_risk",
       statusSetAt: new Date("2030-03-09T10:00:00Z"),
       changedAt: null,
+      result: null,
+      resultNote: null,
     });
   });
 
@@ -78,6 +80,17 @@ describe("projectPublicBrief", () => {
 
   it("shows only signed-off Not this cycle items, with their reason", () => {
     expect(projectPublicBrief(row())?.exclusions).toEqual([{ text: "Arabic UI", reason: "Not enough users yet" }]);
+  });
+
+  it("shows a final result and its note once the cycle closes", () => {
+    const base = row();
+    const brief = projectPublicBrief({
+      ...base,
+      closedAt: new Date("2030-03-16"),
+      outcomes: base.outcomes.map((o) => ({ ...o, result: "partly", resultNote: "Two of three regions" })),
+    });
+    expect(brief?.closed).toBe(true);
+    expect(brief?.outcomes[0]).toMatchObject({ result: "partly", resultNote: "Two of three regions" });
   });
 
   it("hides outcomes that were never signed off or whose removal was signed off", () => {

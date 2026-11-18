@@ -423,3 +423,63 @@ describe("cycleBrief public index", () => {
     expect(result?.briefs.map((b) => b.cycleName)).toEqual(["Cycle 21", "Cycle 19"]);
   });
 });
+
+describe("cycleBrief close and results", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("closes the brief when the cycle completes and takes results only then", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, { workspaceId: ws.id, createdById: owner.id, productId: product.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    const outcome = await caller.product.cycleBrief.upsertOutcome({ briefId: brief.id, text: "Aim", why: "Because" });
+    await caller.product.cycleBrief.signOff({ briefId: brief.id });
+
+    await expect(
+      caller.product.cycleBrief.setResult({ outcomeId: outcome.id, result: "partly" }),
+    ).rejects.toThrow(/completed/i);
+
+    await caller.product.cycle.update({ id: cycle.id, status: "COMPLETED" });
+    const closed = await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } });
+    expect(closed.closedAt).toBeInstanceOf(Date);
+    // Nothing writes a result automatically
+    expect((await db.cycleOutcome.findUniqueOrThrow({ where: { id: outcome.id } })).result).toBeNull();
+
+    await expect(
+      caller.product.cycleBrief.setStatus({ outcomeId: outcome.id, status: "done" }),
+    ).rejects.toThrow(/closed/i);
+
+    await caller.product.cycleBrief.setResult({ outcomeId: outcome.id, result: "partly", note: "Two of three regions" });
+    const result = await createUnauthenticatedCaller().product.cycleBrief.publicGet({
+      workspaceSlug: ws.slug,
+      productSlug: product.slug,
+      cycleSlug: cycle.slug,
+    });
+    expect(result?.brief.closed).toBe(true);
+    expect(result?.brief.outcomes[0]).toMatchObject({ result: "partly", resultNote: "Two of three regions" });
+  });
+
+  it("closes the brief when the cycle completes on its own end date", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    const cycle = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      startDate: new Date("2020-01-06"),
+      endDate: new Date("2020-01-20"),
+    });
+    const caller = createTestCaller(owner.id);
+    const brief = await caller.product.cycleBrief.create({ cycleId: cycle.id });
+    await caller.product.cycle.list({ workspaceId: ws.id, productId: product.id, autoCreate: false });
+    expect((await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } })).closedAt).toBeInstanceOf(Date);
+  });
+});

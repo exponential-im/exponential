@@ -8,8 +8,11 @@ import { IconExternalLink, IconPlus } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
 import { Panel, Pill, SectionHeader } from "~/app/_components/ui";
 import {
+  OUTCOME_RESULTS,
+  OUTCOME_RESULT_LABELS,
   OUTCOME_STATUSES,
   OUTCOME_STATUS_LABELS,
+  isOutcomeResult,
   isOutcomeStatus,
 } from "~/server/services/cycleBriefs/types";
 
@@ -21,6 +24,59 @@ const PENDING_LABEL = {
   reworded: "Change waits for sign-off",
   removed: "Removal waits for sign-off",
 } as const;
+
+const RESULT_OPTIONS = OUTCOME_RESULTS.map((value) => ({ value, label: OUTCOME_RESULT_LABELS[value] }));
+
+/** The final result of one outcome, given once the cycle is completed (D-0098). */
+function ResultEditor({
+  result,
+  note,
+  isSaving,
+  onSave,
+}: {
+  result: string | null;
+  note: string | null;
+  isSaving: boolean;
+  onSave: (result: (typeof OUTCOME_RESULTS)[number], note: string | null) => void;
+}) {
+  const [draftNote, setDraftNote] = useState(note ?? "");
+  const current = isOutcomeResult(result) ? result : null;
+  return (
+    <Group gap="xs" align="flex-end" className="mt-2">
+      <Select
+        size="xs"
+        w={140}
+        label="Final result"
+        placeholder="Pick one"
+        data={RESULT_OPTIONS}
+        value={current}
+        onChange={(value) => {
+          if (isOutcomeResult(value)) onSave(value, draftNote.trim() || null);
+        }}
+      />
+      <Textarea
+        size="xs"
+        label="Note (optional, public)"
+        className="flex-1"
+        autosize
+        minRows={1}
+        value={draftNote}
+        onChange={(e) => setDraftNote(e.currentTarget.value)}
+      />
+      <Button
+        size="xs"
+        variant="light"
+        disabled={!current || draftNote.trim() === (note ?? "")}
+        loading={isSaving}
+        onClick={() => {
+          if (current) onSave(current, draftNote.trim() || null);
+        }}
+      >
+        Save note
+      </Button>
+    </Group>
+  );
+}
 
 const STATUS_OPTIONS = OUTCOME_STATUSES.map((value) => ({ value, label: OUTCOME_STATUS_LABELS[value] }));
 
@@ -170,9 +226,10 @@ export function CycleBriefPanel({
     onError,
   });
   const setStatus = api.product.cycleBrief.setStatus.useMutation({ onSuccess: invalidate, onError });
+  const setResult = api.product.cycleBrief.setResult.useMutation({ onSuccess: invalidate, onError });
 
   if (!data?.canHaveBrief) return null;
-  const { brief, isProductOwner, hasProductOwner, hasPendingChanges, cycleGoal } = data;
+  const { brief, isProductOwner, hasProductOwner, hasPendingChanges, cycleGoal, isCycleCompleted } = data;
   const ownersHref = `/w/${workspaceSlug}/products/${productSlug}/settings?section=owners`;
   const indexHref = `/briefs/${workspaceSlug}/${productSlug}`;
   const publicHref = `${indexHref}/${cycleSlug}`;
@@ -217,6 +274,13 @@ export function CycleBriefPanel({
           )
         }
       />
+
+      {isCycleCompleted && brief.outcomes.some((o) => !isOutcomeResult(o.result)) && (
+        <Text size="sm" className="mb-3 text-text-secondary">
+          This cycle is completed. Give each outcome a final result: Achieved, Partly or Missed. Results show on
+          the public brief at once.
+        </Text>
+      )}
 
       {brief.outcomes.length === 0 && !isAdding && (
         <Text size="sm" className="mb-3 text-text-muted">
@@ -288,25 +352,34 @@ export function CycleBriefPanel({
                   {PENDING_LABEL[outcome.pendingChange]}
                 </Pill>
               )}
-              <Group gap="xs" className="mt-2">
-                <Select
-                  size="xs"
-                  w={140}
-                  placeholder="Set status"
-                  aria-label="Weekly status"
-                  data={STATUS_OPTIONS}
-                  value={isOutcomeStatus(outcome.status) ? outcome.status : null}
-                  disabled={brief.closedAt !== null}
-                  onChange={(value) => {
-                    if (isOutcomeStatus(value)) setStatus.mutate({ outcomeId: outcome.id, status: value });
-                  }}
+              {isCycleCompleted ? (
+                <ResultEditor
+                  result={outcome.result}
+                  note={outcome.resultNote}
+                  isSaving={setResult.isPending}
+                  onSave={(result, note) => setResult.mutate({ outcomeId: outcome.id, result, note })}
                 />
-                <Text size="xs" className="text-text-muted">
-                  {outcome.statusSetAt
-                    ? `as of ${new Date(outcome.statusSetAt).toLocaleDateString()} · public at once`
-                    : "Set weekly; goes public at once, no sign-off"}
-                </Text>
-              </Group>
+              ) : (
+                <Group gap="xs" className="mt-2">
+                  <Select
+                    size="xs"
+                    w={140}
+                    placeholder="Set status"
+                    aria-label="Weekly status"
+                    data={STATUS_OPTIONS}
+                    value={isOutcomeStatus(outcome.status) ? outcome.status : null}
+                    disabled={brief.closedAt !== null}
+                    onChange={(value) => {
+                      if (isOutcomeStatus(value)) setStatus.mutate({ outcomeId: outcome.id, status: value });
+                    }}
+                  />
+                  <Text size="xs" className="text-text-muted">
+                    {outcome.statusSetAt
+                      ? `as of ${new Date(outcome.statusSetAt).toLocaleDateString()} · public at once`
+                      : "Set weekly; goes public at once, no sign-off"}
+                  </Text>
+                </Group>
+              )}
             </Panel>
           ),
         )}

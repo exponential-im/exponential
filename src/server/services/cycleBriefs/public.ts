@@ -10,7 +10,7 @@
  * Objective, Feature or Insight ids, or any person's name (D-0094).
  */
 import type { PrismaClient } from "@prisma/client";
-import { isOutcomeStatus, type OutcomeStatus } from "./types";
+import { isOutcomeResult, isOutcomeStatus, type OutcomeResult, type OutcomeStatus } from "./types";
 
 export interface PublicCycleOutcome {
   text: string;
@@ -21,6 +21,9 @@ export interface PublicCycleOutcome {
   statusSetAt: Date | null;
   /** When a sign-off after the first changed this outcome (D-0091). */
   changedAt: Date | null;
+  /** The final result after close (D-0098), with its optional note. */
+  result: OutcomeResult | null;
+  resultNote: string | null;
 }
 
 /** A "Not this cycle" item (D-0095). The linked Insight is never shown. */
@@ -35,6 +38,8 @@ export interface PublicCycleBrief {
   startDate: Date | null;
   endDate: Date | null;
   signedOffAt: Date;
+  /** The cycle is completed: the page reads as a result, not a plan. */
+  closed: boolean;
   outcomes: PublicCycleOutcome[];
   exclusions: PublicExclusion[];
 }
@@ -49,6 +54,7 @@ export interface PublicProduct {
 /** The row shape the projection reads. Extra fields are ignored, never copied. */
 export interface BriefProjectionInput {
   planSignedOffAt: Date | null;
+  closedAt?: Date | null;
   cycle: { name: string; slug: string; startDate: Date | null; endDate: Date | null };
   outcomes: Array<{
     position: number;
@@ -58,6 +64,8 @@ export interface BriefProjectionInput {
     status: string | null;
     statusSetAt: Date | null;
     changedAt: Date | null;
+    result?: string | null;
+    resultNote?: string | null;
   }>;
   exclusions?: Array<{
     position: number;
@@ -84,6 +92,8 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
         status,
         statusSetAt: status ? o.statusSetAt : null,
         changedAt: o.changedAt,
+        result: isOutcomeResult(o.result) ? o.result : null,
+        resultNote: isOutcomeResult(o.result) ? (o.resultNote ?? null) : null,
       };
     });
   return {
@@ -92,6 +102,7 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
     startDate: brief.cycle.startDate,
     endDate: brief.cycle.endDate,
     signedOffAt: brief.planSignedOffAt,
+    closed: Boolean(brief.closedAt),
     outcomes,
     exclusions: (brief.exclusions ?? [])
       .filter((x) => x.publicText !== null && x.removedAt === null)
@@ -102,6 +113,7 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
 
 const PROJECTION_SELECT = {
   planSignedOffAt: true,
+  closedAt: true,
   cycle: { select: { name: true, slug: true, startDate: true, endDate: true } },
   outcomes: {
     select: {
@@ -112,6 +124,8 @@ const PROJECTION_SELECT = {
       status: true,
       statusSetAt: true,
       changedAt: true,
+      result: true,
+      resultNote: true,
     },
   },
   exclusions: {
