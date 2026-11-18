@@ -23,6 +23,7 @@ import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { reportHandledError } from "~/lib/reportHandledError";
 import { KeyResultGuidanceIcon } from "./KeyResultGuidance";
 import { PersonPicker, type PickerUser } from "~/app/_components/shared/PersonPicker";
+import { getPeriodDisplayName } from "../utils/periodUtils";
 
 // Unit options for key results
 const unitOptions = [
@@ -140,6 +141,7 @@ export function EditKeyResultModal({
   // picker's wider member list (team-derived members) rather than the context.
   const [pickedDriUser, setPickedDriUser] = useState<PickerUser | null>(null);
   const [objectiveId, setObjectiveId] = useState<string | null>(null);
+  const [period, setPeriod] = useState<string | null>(null);
 
   const utils = api.useUtils();
   const queryClient = useQueryClient();
@@ -163,6 +165,12 @@ export function EditKeyResultModal({
   // Fetch objectives (goals) the user owns in this workspace, for reassignment
   const { data: availableObjectives = [] } = api.okr.getAvailableGoals.useQuery(
     { workspaceId: workspace?.id ?? createWorkspaceId },
+    { enabled: !isCreate && opened }
+  );
+
+  // The quarters, halves and years a key result can be moved to.
+  const { data: availablePeriods = [] } = api.okr.getPeriods.useQuery(
+    undefined,
     { enabled: !isCreate && opened }
   );
 
@@ -218,6 +226,7 @@ export function EditKeyResultModal({
           ? String(currentKeyResult.goalId)
           : null
       );
+      setPeriod(currentKeyResult.period ?? null);
 
       // Linked work: the fresh fetch when it has landed, else whatever the
       // caller passed in, so the pickers are right from the first paint.
@@ -248,6 +257,19 @@ export function EditKeyResultModal({
     }
     return byId;
   }, [currentUser, workspace?.members]);
+
+  // The key result's own period stays selectable even when it falls outside
+  // the generated list (a past year), so opening the modal never blanks it.
+  const periodOptions = useMemo(() => {
+    const current = currentKeyResult?.period;
+    if (!current || availablePeriods.some((p) => p.value === current)) {
+      return availablePeriods;
+    }
+    return [
+      { value: current, label: getPeriodDisplayName(current) },
+      ...availablePeriods,
+    ];
+  }, [availablePeriods, currentKeyResult?.period]);
 
   const objectiveOptions = useMemo(
     () =>
@@ -443,11 +465,14 @@ export function EditKeyResultModal({
       const nextGoalId = objectiveId ? Number(objectiveId) : undefined;
       const movesObjective =
         nextGoalId != null && nextGoalId !== currentKeyResult.goalId;
+      const nextPeriod =
+        period && period !== currentKeyResult.period ? period : undefined;
 
       // Paint the edit into the cached cards before the request leaves.
-      // A key result moving to another objective is left to the refetch:
-      // that changes which card owns it, not just what the row says.
-      if (!movesObjective) {
+      // A key result moving to another objective or period is left to the
+      // refetch: that changes which card or page lists it, not just what
+      // the row says.
+      if (!movesObjective && nextPeriod === undefined) {
         patchCachedKeyResult(keyResultId, buildOptimisticKeyResult);
       }
 
@@ -482,6 +507,7 @@ export function EditKeyResultModal({
           confidence: confidence ?? undefined,
           driUserId: driUserId ?? currentUser?.id,
           goalId: nextGoalId,
+          period: nextPeriod,
         }),
         ...(projectsChanged
           ? [
@@ -647,6 +673,18 @@ export function EditKeyResultModal({
               onChange={(value) => setObjectiveId(value)}
               searchable
               nothingFoundMessage="No objectives found"
+              styles={selectStyles}
+            />
+          )}
+
+          {!isCreate && (
+            <Select
+              label="Period"
+              description="The quarter, half or year this key result is measured in"
+              data={periodOptions}
+              value={period}
+              onChange={(value) => setPeriod(value)}
+              allowDeselect={false}
               styles={selectStyles}
             />
           )}
