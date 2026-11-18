@@ -157,8 +157,25 @@ export async function runDueChangelogDrafts(
   db: PrismaClient,
   now: Date,
 ): Promise<{ cycleId: string; outcome: string; error?: string }[]> {
+  // Shared cycles in multi-product workspaces never get a draft. Leave them
+  // out of the query, or they would fill the candidate limit on every sweep
+  // and starve later cycles.
+  const multiProduct = await db.product.groupBy({
+    by: ["workspaceId"],
+    having: { id: { _count: { gt: 1 } } },
+  });
+  const sharedExcluded =
+    multiProduct.length > 0
+      ? {
+          NOT: {
+            productId: null,
+            workspaceId: { in: multiProduct.map((w) => w.workspaceId) },
+          },
+        }
+      : {};
   const due = await db.list.findMany({
     where: {
+      ...sharedExcluded,
       listType: "SPRINT",
       status: { in: ["ACTIVE", "COMPLETED"] },
       endDate: {

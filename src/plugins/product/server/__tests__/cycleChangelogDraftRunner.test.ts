@@ -11,7 +11,7 @@ vi.mock("../cycleChangelogDraft", () => ({
 
 import { loadChangelogInputs } from "../cycleChangelogLoader";
 import { writeChangelogDraft } from "../cycleChangelogDraft";
-import { draftCycleChangelog } from "../cycleChangelogDraftRunner";
+import { draftCycleChangelog, runDueChangelogDrafts } from "../cycleChangelogDraftRunner";
 
 const db = mockDeep<PrismaClient>();
 const editedAt = new Date("2026-11-18T10:00:00.000Z");
@@ -148,5 +148,32 @@ describe("draftCycleChangelog", () => {
     db.cycleChangelogDraft.createMany.mockResolvedValue({ count: 1 });
 
     expect((await draftCycleChangelog(db, { cycleId: "c1" })).outcome).toBe("drafted");
+  });
+});
+
+describe("runDueChangelogDrafts", () => {
+  it("leaves shared cycles of multi-product workspaces out of the candidate query", async () => {
+    db.product.groupBy.mockResolvedValue([{ workspaceId: "w-multi" }] as never);
+    db.list.findMany.mockResolvedValue([]);
+
+    await runDueChangelogDrafts(db, new Date("2026-11-18T12:00:00Z"));
+
+    expect(db.list.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          NOT: { productId: null, workspaceId: { in: ["w-multi"] } },
+        }),
+      }),
+    );
+  });
+
+  it("adds no exclusion when no workspace has several products", async () => {
+    db.product.groupBy.mockResolvedValue([] as never);
+    db.list.findMany.mockResolvedValue([]);
+
+    await runDueChangelogDrafts(db, new Date("2026-11-18T12:00:00Z"));
+
+    const where = db.list.findMany.mock.calls[0]![0]!.where!;
+    expect(where).not.toHaveProperty("NOT");
   });
 });
