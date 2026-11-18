@@ -4,6 +4,7 @@ import {
   classifyToolError,
   isRecoveredToolFailure,
   isReportableToolError,
+  mastraResultFault,
   summarizeToolError,
   toolErrorSentence,
 } from '../toolErrors';
@@ -173,5 +174,17 @@ describe('isRecoveredToolFailure', () => {
   it('a later failure of the same tool recovers nothing, and a success is never a failure', () => {
     expect(isRecoveredToolFailure(failed('a', 'unknown'), [failed('a', 'unknown')])).toBe(false);
     expect(isRecoveredToolFailure(ok('a'), [ok('a')])).toBe(false);
+  });
+});
+
+describe('mastraResultFault', () => {
+  it("tells the tool's bad answer from the model's bad arguments", () => {
+    expect(mastraResultFault('Tool output validation failed for create-calendar-event. ...')).toBe('output');
+    // The model sent the wrong parameter names; the tool never ran.
+    expect(
+      mastraResultFault('Tool input validation failed for create-calendar-event. Please fix the following errors'),
+    ).toBe('input');
+    expect(mastraResultFault('You must show the event details to the user')).toBe('other');
+    expect(mastraResultFault(undefined)).toBe('other');
   });
 });
