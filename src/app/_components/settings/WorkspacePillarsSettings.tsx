@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Badge, Button, Group, Select, Stack, Text, TextInput } from "@mantine/core";
+import { Badge, Button, Group, MultiSelect, Select, Stack, Text, TextInput } from "@mantine/core";
 import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import { IconArchive, IconArrowBackUp, IconPencil, IconPlus } from "@tabler/icons-react";
@@ -42,6 +42,12 @@ export function WorkspacePillarsSettings({
 }) {
   const utils = api.useUtils();
   const { data, isLoading } = api.tag.list.useQuery({ workspaceId });
+  const { data: pillarRows } = api.pillar.list.useQuery({ workspaceId, includeArchived: true });
+  const { data: positionData } = api.position.list.useQuery({ workspaceId });
+  const positionOptions = (positionData?.positions ?? []).map((p) => ({ value: p.id, label: p.title }));
+  const positionIdsByPillar = new Map(
+    (pillarRows ?? []).map((p) => [p.id, p.positions.map((x) => x.positionId)]),
+  );
   const workspaceTags = data?.workspaceTags ?? [];
   const pillars = workspaceTags.filter((t) => t.category === PILLAR_CATEGORY);
   const active = pillars.filter((t) => !t.archivedAt);
@@ -96,6 +102,8 @@ export function WorkspacePillarsSettings({
                 tag={tag}
                 workspaceSlug={workspaceSlug}
                 onSaved={refresh}
+                positionOptions={positionOptions}
+                positionIds={positionIdsByPillar.get(tag.id) ?? []}
                 actions={
                   <>
                     <Button
@@ -194,12 +202,21 @@ function PillarRow({
   workspaceSlug,
   actions,
   onSaved,
+  positionOptions,
+  positionIds,
 }: {
   tag: WorkspaceTag;
   workspaceSlug: string;
   actions: React.ReactNode;
   onSaved: () => Promise<void>;
+  /** When given, the Positions accountable for this Pillar can be chosen. */
+  positionOptions?: { value: string; label: string }[];
+  positionIds?: string[];
 }) {
+  const setPositions = api.tag.setPillarPositions.useMutation({
+    onSuccess: onSaved,
+    onError: onError("Positions not saved"),
+  });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tag.description ?? "");
   const update = api.tag.update.useMutation({
@@ -270,6 +287,22 @@ function PillarRow({
         <Text size="sm" className="text-text-muted">
           No description yet.
         </Text>
+      )}
+      {positionOptions && (
+        <MultiSelect
+          mt="sm"
+          size="xs"
+          label="Accountable Positions"
+          description="Shown on the Pillar's page as who to ask. Work is never routed through them."
+          placeholder={positionOptions.length === 0 ? "This workspace has no Positions yet" : "Choose Positions"}
+          data={positionOptions}
+          value={positionIds ?? []}
+          disabled={positionOptions.length === 0 || setPositions.isPending}
+          searchable
+          clearable
+          onChange={(next) => setPositions.mutate({ tagId: tag.id, positionIds: next })}
+          comboboxProps={{ withinPortal: true }}
+        />
       )}
     </Panel>
   );

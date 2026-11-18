@@ -518,6 +518,7 @@ export function ActionModalForm({
           <CapturePlacement
             workspaceId={workspaceId}
             value={{ tagIds: selectedTagIds, projectId: projectId ?? null }}
+            suggestFrom={name}
             onChange={({ tagIds, projectId: nextProjectId }) => {
               onTagChange(tagIds);
               setProjectId(nextProjectId ?? undefined);

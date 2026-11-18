@@ -20,7 +20,8 @@ export type TagEntityType =
   | "epic"
   | "project"
   | "goal"
-  | "resource";
+  | "resource"
+  | "recurringTask";
 
 /**
  * Entities that take Pillars only, never ordinary labels (ADR-0085): a
@@ -30,6 +31,7 @@ const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set([
   "project",
   "goal",
   "resource",
+  "recurringTask",
 ]);
 
 interface EntityResolution {
@@ -216,6 +218,37 @@ async function resolveEntity(
       return {
         workspaceId,
         currentTagIds: resource.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "recurringTask": {
+      const task = await db.recurringTask.findUnique({
+        where: { id: entityId },
+        select: {
+          workspaceId: true,
+          createdById: true,
+          projectId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!task) throwNotFound("Recurring task");
+      // Like an Action: a project's recurring task follows the project's
+      // access; one with no project is its creator's.
+      if (task.projectId) {
+        const access = await getProjectAccess(db, userId, task.projectId);
+        if (!hasProjectAccess(access)) throwNotFound("Recurring task");
+        if (level === "edit" && !canEditProject(access)) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You don't have permission to change this recurring task's Pillars",
+          });
+        }
+      } else if (task.createdById !== userId) {
+        throwNotFound("Recurring task");
+      }
+      await requireWorkspaceAccess(db, userId, task.workspaceId, level);
+      return {
+        workspaceId: task.workspaceId,
+        currentTagIds: task.pillarTags.map((t) => t.tagId),
       };
     }
   }
@@ -430,6 +463,19 @@ async function applyTagSet(
           });
         }
         return;
+      case "recurringTask":
+        if (toRemove.length > 0) {
+          await tx.recurringTaskTag.deleteMany({
+            where: { recurringTaskId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.recurringTaskTag.createMany({
+            data: toAdd.map((tagId) => ({ recurringTaskId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
     }
   });
 }
@@ -491,6 +537,14 @@ async function loadTagsForEntity(
     case "resource": {
       const rows = await db.resourceTag.findMany({
         where: { resourceId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "recurringTask": {
+      const rows = await db.recurringTaskTag.findMany({
+        where: { recurringTaskId: entityId },
         include: { tag: true },
         orderBy: { createdAt: "asc" },
       });
