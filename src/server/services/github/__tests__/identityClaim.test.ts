@@ -29,6 +29,11 @@ describe("safeReturnPath", () => {
     ["//evil.test/x"],
     ["/\\evil.test"],
     ["javascript:alert(1)"],
+    // Control characters the URL parser strips: `/\t/evil.test` → `//evil.test`.
+    ["/\t/evil.test"],
+    ["/\n/evil.test"],
+    ["/\r\n/evil.test/x"],
+    ["/\u0000/evil.test"],
     [""],
     [null],
     [undefined],

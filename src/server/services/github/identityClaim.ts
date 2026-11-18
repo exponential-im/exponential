@@ -42,16 +42,33 @@ export function isGithubIdentityConfigured(): boolean {
   return getGithubIdentityClient() !== null;
 }
 
+/** A placeholder origin to resolve return paths against; never fetched. */
+const RETURN_PATH_BASE = "http://return-path.invalid";
+
 /**
  * Only same-origin relative paths are allowed back — anything else (absolute
- * URLs, protocol-relative `//host`, backslash tricks) falls back to the
- * profile page, so the flow can't be used as an open redirect.
+ * URLs, protocol-relative `//host`, backslash tricks, control characters that
+ * the URL parser strips, as in `/\t/evil.test`) falls back to the profile
+ * page, so the flow can't be used as an open redirect. The path is resolved
+ * the way the redirect will resolve it and must keep the same origin; the
+ * normalised path and query are what's returned.
  */
 export function safeReturnPath(raw: string | null | undefined): string {
   if (!raw?.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) {
     return DEFAULT_RETURN_PATH;
   }
-  return raw;
+  for (const char of raw) {
+    const code = char.charCodeAt(0);
+    if (code < 0x20 || code === 0x7f) return DEFAULT_RETURN_PATH;
+  }
+  let url: URL;
+  try {
+    url = new URL(raw, RETURN_PATH_BASE);
+  } catch {
+    return DEFAULT_RETURN_PATH;
+  }
+  if (url.origin !== RETURN_PATH_BASE) return DEFAULT_RETURN_PATH;
+  return `${url.pathname}${url.search}`;
 }
 
 /** Append `github_link=<outcome>` to a relative path, keeping its query. */
