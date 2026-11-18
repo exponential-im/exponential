@@ -18,6 +18,11 @@
 export type ToolErrorKind =
   /** The app rejected the shape of the tool's request, or the method. Tool and app disagree. */
   | 'contract'
+  /**
+   * The model called a tool the agent does not have. Nothing ran. Always ours:
+   * a prompt or an instruction names a tool that does not exist.
+   */
+  | 'no-such-tool'
   | 'not-found'
   | 'forbidden'
   | 'rate-limit'
@@ -28,6 +33,7 @@ export type ToolErrorKind =
 
 const KINDS: readonly ToolErrorKind[] = [
   'contract',
+  'no-such-tool',
   'not-found',
   'forbidden',
   'rate-limit',
@@ -73,6 +79,10 @@ export function classifyToolError(message: string | undefined | null): ToolError
     if (code >= 400 && code <= 499) return 'unknown';
   }
 
+  // Before `not-found`: "tool X not found" is a missing tool, not missing data.
+  if (/unavailable tool|no such tool|nosuchtool|tool\b.{0,80}\b(not found|does not exist|is not available)|not a valid tool/.test(text)) {
+    return 'no-such-tool';
+  }
   if (/not_found|not found/.test(text)) return 'not-found';
   if (/forbidden|unauthorized|access denied|permission denied/.test(text)) return 'forbidden';
   if (/too_many_requests|rate limit|rate-limit/.test(text)) return 'rate-limit';
@@ -89,6 +99,7 @@ export function classifyToolError(message: string | undefined | null): ToolError
 const SENTENCES: Record<ToolErrorKind, string> = {
   contract: "This step isn't working right now. The problem is on our side, not something you did.",
   server: 'Something went wrong on our side while doing this. It is not something you did.',
+  'no-such-tool': 'The assistant reached for a tool it does not have. Nothing was changed.',
   'not-found': "Couldn't find that, or you don't have access to it.",
   forbidden: "You don't have access to this.",
   'rate-limit': 'Too many requests just now. Try again in a minute.',
@@ -107,7 +118,28 @@ export function toolErrorSentence(kind: ToolErrorKind | undefined): string {
  * of a person's or the model's request; filing them would bury the real ones.
  */
 export function isReportableToolError(kind: ToolErrorKind): boolean {
-  return kind === 'contract' || kind === 'server';
+  return kind === 'contract' || kind === 'server' || kind === 'no-such-tool';
+}
+
+/**
+ * Whether a failed call is noise to the person chatting: the assistant got
+ * past it within the same turn, so the turn's outcome is not in doubt.
+ *
+ *  - A call to a tool that does not exist never ran anything.
+ *  - A call that failed and was then retried successfully on the SAME tool
+ *    (wrong parameter names, a transient error) did its job the second time.
+ *
+ * A failure followed by a different tool succeeding is NOT recovered: the
+ * answer may rest on a fallback, and the person should see that a step failed.
+ * Still reported and still in the trace; this only governs the chat's tool row.
+ */
+export function isRecoveredToolFailure(
+  call: { name: string; status: string; errorKind?: ToolErrorKind },
+  laterCalls: ReadonlyArray<{ name: string; status: string }>,
+): boolean {
+  if (call.status !== 'error') return false;
+  if (call.errorKind === 'no-such-tool') return laterCalls.some((c) => c.status === 'success');
+  return laterCalls.some((c) => c.status === 'success' && c.name === call.name);
 }
 
 // The raw text is JSON nested inside JSON strings, so quotes arrive with any
@@ -152,6 +184,10 @@ export function summarizeToolError(toolName: string, message: string | undefined
     const where = fields.size > 0 ? ` at ${[...fields].sort().join(', ')}` : '';
     const detail = code || where ? ` (${code ?? 'invalid input'}${where})` : '';
     return `${toolName}: ${procedure ?? 'the app'} rejected the request${detail}`;
+  }
+
+  if (kind === 'no-such-tool') {
+    return `${toolName}: the assistant called a tool that does not exist`;
   }
 
   if (kind === 'server') {

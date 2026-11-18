@@ -542,7 +542,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - Status: ${projectData.status}
       - Priority: ${projectData.priority}
       - Progress: ${projectData.progress || 0}%${slackChannelContext}
-      - Active Tasks Shown: ${projectActions.length} (use retrieveActionsTool for complete history)
+      - Active Tasks Shown: ${projectActions.length} (call `get-project-actions` for the complete list)
       ${projectActions.length > 0 ?
         projectActions.map(action => `  • ${action.name} (${action.status}, ${action.priority})`).join('\n      ') :
         '  • No active tasks'}
@@ -551,7 +551,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - When creating actions: automatically assign to project ID: ${projectId}
       - When asked about tasks: refer to context above or use tools for complete data
       - Always specify project ID in tool calls for security
-      - For historical data beyond current context, explicitly use retrieveActionsTool
+      - For tasks beyond the ones shown above, call `get-project-actions`
       - When asked about meetings or transcriptions: refer to the meeting context above${projectSlackConfig?.slackChannel ? `\n      - When asked about Slack or project communications: search in channel${projectSlackConfig.slackChannelId ? ` ID "${projectSlackConfig.slackChannelId}"` : ` "${projectSlackConfig.slackChannel}"`}` : ''}
     ` : '';
 
@@ -598,48 +598,13 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
                   - If a failure limits your answer, say so in one plain sentence: what you could not check, and what the answer is based on instead. Never guess at the technical cause and never paste error text.
                   - A truncated transcript is a partial read. Never conclude that something was not said from one; fetch the full transcript by transcriptionId first, or say that you only read part of it.
                   - Context shows current/recent data only - use tools for historical/complete data
-                  - Available tools: createAction, updateAction, retrieveActions, createGitHubIssue, get_project_context, get-meeting-transcriptions, query-meeting-context, get-meeting-insights, firefliesCheckExisting, firefliesTestApiKey, firefliesCreateIntegration, firefliesGenerateWebhookToken, firefliesGetWebhookUrl
-                  - For project goals: use get_project_context tool with the project ID
+                  - Use only the tools you were actually given, by their exact names. Never call a tool because a name sounds right; if no tool fits, say what you cannot do.
+                  - For project goals: call `get-project-context` with the project ID
                   - If authentication fails, inform user and suggest checking token validity
 
-                  🔧 FIREFLIES INTEGRATION WIZARD:
-                  When user wants to connect Fireflies, set up meeting transcription, or asks about Fireflies configuration:
-
-                  1. CHECK EXISTING: First use firefliesCheckExisting tool to see if they already have Fireflies
-                     - If exists: Inform them and ask if they want to set up a new integration or configure webhooks
-
-                  2. GUIDE API KEY SETUP: If no integration exists, guide user to get their API key:
-                     - Tell them: "To connect Fireflies, you'll need your API key from the Fireflies dashboard"
-                     - Provide link: https://app.fireflies.ai/integrations/custom
-                     - Wait for them to share the key
-
-                  3. TEST THE KEY: When user provides an API key (long string, often starts with "ff_"):
-                     - Use firefliesTestApiKey tool to validate it
-                     - CRITICAL: NEVER echo the API key back to the user - this is a security requirement
-                     - On success: Proceed to integration creation
-                     - On failure: Explain the error and ask them to check the key
-
-                  4. CREATE INTEGRATION: After successful test:
-                     - Ask user to name their integration (suggest: "My Fireflies" or their workspace name)
-                     - Ask about scope: "Should this be just for you (personal), or available workspace-wide?"
-                     - Use firefliesCreateIntegration with the tested key, name, and scope
-
-                  5. WEBHOOK SETUP (after integration created):
-                     - Use firefliesGenerateWebhookToken to create a webhook secret
-                     - Use firefliesGetWebhookUrl to get the correct webhook URL
-                     - Provide CLEAR step-by-step instructions:
-                       a. Go to https://app.fireflies.ai/integrations/custom
-                       b. Click "Add Webhook" or find the webhook settings
-                       c. Enter the webhook URL provided
-                       d. Set authentication method to "Signature"
-                       e. Use the secret token provided
-                       f. Select event: "Transcription completed"
-                       g. Save the webhook
-
-                  6. CONFIRMATION: After setup, explain:
-                     - New meeting transcriptions will automatically appear in the app
-                     - They can test by having a short meeting or triggering a test from Fireflies
-                     - Offer to help with anything else
+                  🔧 CONNECTING FIREFLIES:
+                  - You cannot connect Fireflies from the chat. When the user asks to connect it or set up meeting transcription, send them to Settings → Integrations (/settings/integrations), where they add their Fireflies API key and webhook.
+                  - If the user pastes an API key into the chat, do not repeat it back, and tell them to enter it on that settings page instead.
 
                   📝 TRANSCRIPTION SEARCH (RAG):
                   - The transcription summaries in context show recent meetings - use them for quick reference
@@ -652,7 +617,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
 
                   📊 CONTEXT LIMITATIONS:
                   - Project data: Current snapshot only (real-time via tools)
-                  - Actions: Active actions shown (use retrieveActionsTool for historical)
+                  - Actions: Active actions shown (call `get-project-actions` for the rest)
                   - Transcriptions: Summaries shown in context (use search tools for full text and specific topics)
                   - For complete datasets or older data, explicitly use tools
                   - Always mention when working with limited context vs complete data
