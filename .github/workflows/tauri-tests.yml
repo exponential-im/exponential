@@ -1,0 +1,44 @@
+name: Tauri tests
+
+# The Tauri shell's Rust tests. Worth running in CI rather than leaving to whoever
+# remembers `cargo test` locally: the wiki commands are reachable from a remote
+# page, so the path-jail tests here are what stands between a model-supplied path
+# and the user's filesystem. They are dependency-free (temp dirs and the git
+# binary, which the runner has).
+#
+# A workflow of its own, filtered to src-tauri, so that a PR which doesn't touch
+# the shell never asks for a macOS runner. It used to be a job in Tests (test.yml)
+# that checked for changes as its first step, which meant every PR waited for a
+# Mac to start just to decide there was nothing to do. Mac runners are the scarce
+# kind: on 2026-11-18 none was free for over ten minutes, the Tests run never
+# completed, and the merge gate (pr-agent-automerge.yml, which re-checks a PR when
+# a Tests run completes) never merged PRs whose required checks had all passed.
+#
+# Not a required check, which is why a path filter is safe here: a skipped
+# required check stays "pending" and blocks merging, a skipped optional one does
+# not. Keep it out of branch protection's required checks.
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/tauri-tests.yml"
+
+# A new push cancels the PR's still-running run: only the newest commit matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tauri-tests:
+    name: Tauri (Rust) Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test
