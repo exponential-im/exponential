@@ -119,7 +119,11 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
           </div>
         ) : (
           <Text size="sm" className="text-text-muted">
-            No description yet. Say what good looks like for this area in workspace settings.
+            No description yet. Say what good looks like for this area in{" "}
+            <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+              workspace settings
+            </Link>
+            .
           </Text>
         )}
       </header>

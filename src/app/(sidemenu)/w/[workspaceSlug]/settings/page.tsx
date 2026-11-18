@@ -93,6 +93,8 @@ import {
   type SidebarGroup,
 } from '~/app/_components/settings/SettingsShell';
 import { WorkspaceUpdatesSettings } from '~/app/_components/settings/WorkspaceUpdatesSettings';
+import { WorkspacePillarsSettings } from '~/app/_components/settings/WorkspacePillarsSettings';
+import { PillarIcon } from '~/app/_components/pillars/PillarIcon';
 import { AiFeaturesSettings } from '~/app/_components/settings/AiFeaturesSettings';
 import { BillingSettings } from '~/app/_components/settings/BillingSettings';
 
@@ -100,6 +102,7 @@ const SECTION_IDS = [
   'general',
   'members',
   'teams',
+  'pillars',
   'features',
   'integrations',
   'plugins',
@@ -720,6 +723,9 @@ export default function WorkspaceSettingsPage() {
         { id: 'general', label: 'General', icon: IconFolder },
         { id: 'members', label: 'Members', icon: IconUsers, badge: memberCount },
         { id: 'teams', label: 'Teams', icon: IconUsers },
+        ...(userRole === 'owner' || userRole === 'admin'
+          ? [{ id: 'pillars' as const, label: 'Pillars', icon: PillarIcon }]
+          : []),
       ],
     },
     {
@@ -1758,6 +1764,10 @@ export default function WorkspaceSettingsPage() {
               description="Define recurring meetings from templates, set cadence, owner and participants, and link recordings to occurrences."
             />
           </SettingsSection>
+        )}
+
+        {section === 'pillars' && (userRole === 'owner' || userRole === 'admin') && (
+          <WorkspacePillarsSettings workspaceId={workspace.id} workspaceSlug={workspace.slug} />
         )}
 
         {section === 'updates' && (userRole === 'owner' || userRole === 'admin') && (

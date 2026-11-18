@@ -193,7 +193,15 @@ test.describe("Pillars", () => {
   test("a promoted tag gets a page listing its project, the project's work and the tagged ticket", async ({
     page,
   }) => {
-    await trpc(page.request, "tag.setPillar", { tagId: seeded.tagId, isPillar: true });
+    // Promote the existing tag in workspace settings.
+    await page.goto(`/w/${fixture.workspaceSlug}/settings?section=pillars`);
+    const tagToPromote = page.getByRole("textbox", { name: "Tag to promote" });
+    await expect(tagToPromote).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await tagToPromote.click();
+    await page.getByRole("option", { name: names.pillar }).click();
+    await page.getByRole("button", { name: "Promote", exact: true }).click();
+    await expect(page.getByRole("link", { name: names.pillar })).toBeVisible();
+    await page.screenshot({ path: test.info().outputPath("settings-pillars.png"), fullPage: true });
 
     // File the project under the Pillar from the project page.
     await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.projectSlug}-${seeded.projectId}`);
@@ -283,11 +291,30 @@ test.describe("Pillars", () => {
     await expect(page.getByLabel("Pillar").first()).toBeVisible();
 
     // The Labels property row (the first badge is the header strip).
-    await page.getByText(names.pillar, { exact: true }).filter({ visible: true }).last().click();
+    // A click before hydration opens nothing; retry until the dropdown shows.
     const listbox = page.getByRole("listbox");
-    await expect(listbox.getByText("Pillars", { exact: true })).toBeVisible();
+    await expect(async () => {
+      await page.getByText(names.pillar, { exact: true }).filter({ visible: true }).last().click();
+      await expect(listbox.getByText("Pillars", { exact: true })).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 30_000 });
     await expect(listbox.getByText("Labels", { exact: true })).toBeVisible();
     await expect(listbox.getByRole("option", { name: names.pillar })).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("ticket-label-picker.png"), fullPage: true });
+  });
+
+  test("an inactive Pillar keeps its items but leaves the pickers", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/settings?section=pillars`);
+    const row = page.getByLabel(`Pillar ${names.pillar}`);
+    await expect(row).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await row.getByRole("button", { name: "Make inactive" }).click();
+    await expect(page.getByText("Inactive Pillars")).toBeVisible();
+
+    // The project still carries it, and its page still opens, marked inactive.
+    await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.projectSlug}-${seeded.projectId}`);
+    await expect(page.getByRole("link", { name: names.pillar })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await expect(page.getByText("Inactive", { exact: true })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+
+    await trpc(page.request, "tag.setPillarArchived", { tagId: seeded.tagId, archived: false });
   });
 });

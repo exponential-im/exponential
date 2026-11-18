@@ -8,7 +8,11 @@ import {
   listForEntity as listForEntityService,
   setEntityTags as setEntityTagsService,
 } from "~/server/services/tags/TagAssignmentService";
-import { setPillar as setPillarService } from "~/server/services/pillars/PillarService";
+import {
+  createPillar as createPillarService,
+  setPillar as setPillarService,
+  setPillarArchived as setPillarArchivedService,
+} from "~/server/services/pillars/PillarService";
 import { PILLAR_CATEGORY } from "~/types/tag";
 
 const tagEntityTypeSchema = z.enum([
@@ -35,6 +39,9 @@ function assertNotPillarCategory(category: string | null | undefined): void {
 }
 
 const tagColorSchema = z.enum(TAG_COLORS);
+
+/** Room for a Pillar's "what good looks like" (Markdown); a label's stays short in practice. */
+const TAG_DESCRIPTION_MAX = 2000;
 
 export const tagRouter = createTRPCRouter({
   // List all tags available for a workspace (global + workspace-specific)
@@ -138,7 +145,7 @@ export const tagRouter = createTRPCRouter({
       z.object({
         name: z.string().min(1).max(50),
         color: tagColorSchema,
-        description: z.string().max(200).optional(),
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
         category: z.string().max(50).nullable().optional(),
         workspaceId: z.string(), // Required - users create workspace-specific tags
       })
@@ -191,7 +198,7 @@ export const tagRouter = createTRPCRouter({
         id: z.string(),
         name: z.string().min(1).max(50).optional(),
         color: tagColorSchema.optional(),
-        description: z.string().max(200).optional(),
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
         category: z.string().max(50).nullable().optional(),
       })
     )
@@ -276,6 +283,32 @@ export const tagRouter = createTRPCRouter({
         userId: ctx.session.user.id,
         tagId: input.tagId,
         isPillar: input.isPillar,
+      }),
+    ),
+
+  // Create a workspace tag that is a Pillar from the start. Admins only.
+  createPillar: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        name: z.string().trim().min(1).max(50),
+        color: tagColorSchema,
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
+      }),
+    )
+    .mutation(({ ctx, input }) =>
+      createPillarService({ db: ctx.db, userId: ctx.session.user.id, ...input }),
+    ),
+
+  // Mark a Pillar inactive (or active again). Admins only; no item loses its tag.
+  setPillarArchived: protectedProcedure
+    .input(z.object({ tagId: z.string(), archived: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      setPillarArchivedService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        archived: input.archived,
       }),
     ),
 

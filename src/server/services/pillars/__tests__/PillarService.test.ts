@@ -19,7 +19,7 @@ vi.mock("~/server/services/access", () => ({
 }));
 
 import { assertWorkspaceMembership, assertWorkspaceRole } from "~/server/services/access";
-import { getPillarPage, setPillar } from "../PillarService";
+import { createPillar, getPillarPage, setPillar, setPillarArchived } from "../PillarService";
 
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
 const membershipMock = vi.mocked(assertWorkspaceMembership);
@@ -127,6 +127,57 @@ describe("setPillar", () => {
       where: { id: "tag-devops" },
       data: { category: null, archivedAt: null },
     });
+  });
+});
+
+describe("createPillar", () => {
+  it("creates a workspace tag that is a Pillar, for an admin", async () => {
+    db.tag.findFirst.mockResolvedValue(null as never);
+    db.tag.create.mockResolvedValue(tagRow() as never);
+
+    await createPillar({ db, userId: USER, workspaceId: WS, name: "Go-to-market", color: "avatar-blue" });
+
+    expect(roleMock).toHaveBeenCalledWith(db, USER, WS, ["owner", "admin"]);
+    expect(db.tag.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        name: "Go-to-market",
+        slug: "go-to-market",
+        category: "pillar",
+        workspaceId: WS,
+        description: null,
+      }),
+    });
+  });
+
+  it("points at promotion when the tag already exists", async () => {
+    db.tag.findFirst.mockResolvedValue({ id: "tag-gtm" } as never);
+    await expect(
+      createPillar({ db, userId: USER, workspaceId: WS, name: "Go-to-market", color: "avatar-blue" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(db.tag.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("setPillarArchived", () => {
+  it("marks a Pillar inactive without touching the items that carry it", async () => {
+    db.tag.findUnique.mockResolvedValue(tagRow() as never);
+    db.tag.update.mockResolvedValue(tagRow() as never);
+
+    await setPillarArchived({ db, userId: USER, tagId: "tag-devops", archived: true });
+
+    expect(roleMock).toHaveBeenCalledWith(db, USER, WS, ["owner", "admin"]);
+    expect(db.tag.update).toHaveBeenCalledWith({
+      where: { id: "tag-devops" },
+      data: { archivedAt: expect.any(Date) },
+    });
+    expect(db.actionTag.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("only applies to Pillars", async () => {
+    db.tag.findUnique.mockResolvedValue(tagRow({ category: null }) as never);
+    await expect(
+      setPillarArchived({ db, userId: USER, tagId: "tag-devops", archived: true }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
 

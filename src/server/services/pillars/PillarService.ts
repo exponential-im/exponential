@@ -139,6 +139,80 @@ export async function setPillar({
   });
 }
 
+/** Slug rule shared with `tag.create`. */
+export function slugifyTagName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/**
+ * Create a new workspace tag that is a Pillar from the start (workspace
+ * settings). Admin-only, like promotion.
+ */
+export async function createPillar({
+  db,
+  userId,
+  workspaceId,
+  name,
+  color,
+  description,
+}: {
+  db: PrismaClient;
+  userId: string;
+  workspaceId: string;
+  name: string;
+  color: string;
+  description?: string;
+}): Promise<Tag> {
+  await assertWorkspaceRole(db, userId, workspaceId, PILLAR_ADMIN_ROLES);
+  const slug = slugifyTagName(name);
+  const existing = await db.tag.findFirst({ where: { slug, workspaceId }, select: { id: true } });
+  if (existing) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message: "A tag with this name already exists in this workspace. Promote it instead.",
+    });
+  }
+  return db.tag.create({
+    data: {
+      name,
+      slug,
+      color,
+      description: description?.trim() ? description : null,
+      category: PILLAR_CATEGORY,
+      workspaceId,
+      createdById: userId,
+      isSystem: false,
+    },
+  });
+}
+
+/**
+ * Mark a Pillar inactive, or active again. Admin-only. Its tag stays on every
+ * item; an inactive Pillar is hidden from pickers and the sidebar.
+ */
+export async function setPillarArchived({
+  db,
+  userId,
+  tagId,
+  archived,
+}: {
+  db: PrismaClient;
+  userId: string;
+  tagId: string;
+  archived: boolean;
+}): Promise<Tag> {
+  const tag = await db.tag.findUnique({ where: { id: tagId } });
+  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) throw pillarNotFound();
+  await assertWorkspaceRole(db, userId, tag.workspaceId, PILLAR_ADMIN_ROLES);
+  return db.tag.update({
+    where: { id: tagId },
+    data: { archivedAt: archived ? (tag.archivedAt ?? new Date()) : null },
+  });
+}
+
 function sortUnassignedFirst<T>(items: T[], isAssigned: (item: T) => boolean): T[] {
   // Array.prototype.sort is stable, so the query's order holds within each half.
   return [...items].sort((a, b) => Number(isAssigned(a)) - Number(isAssigned(b)));
