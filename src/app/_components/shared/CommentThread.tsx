@@ -143,7 +143,7 @@ export function CommentThread({
             className={itemClassName}
           >
             <Group justify="space-between" align="flex-start" wrap="nowrap">
-              <Group gap="sm" align="flex-start" wrap="nowrap">
+              <Group gap="sm" align="flex-start" wrap="nowrap" className="min-w-0 flex-1">
                 <Avatar
                   size="sm"
                   src={author.image}
