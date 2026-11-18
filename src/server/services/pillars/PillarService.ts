@@ -161,7 +161,14 @@ export async function listPillars({
       category: PILLAR_CATEGORY,
       ...(includeArchived ? {} : { archivedAt: null }),
     },
-    select: { id: true, name: true, color: true, description: true, archivedAt: true },
+    select: {
+      id: true,
+      name: true,
+      color: true,
+      description: true,
+      archivedAt: true,
+      positions: { select: { positionId: true } },
+    },
     orderBy: { name: "asc" },
   });
 }
@@ -197,6 +204,47 @@ export async function resolveCapturePillars(
     });
   }
   return workspaceId;
+}
+
+/**
+ * Set the Positions shown as accountable for a Pillar (replace-all).
+ * Admin-only, like the rest of a Pillar's settings. Display only: nothing
+ * assigns or routes work through them (ADR-0085).
+ */
+export async function setPillarPositions({
+  db,
+  userId,
+  tagId,
+  positionIds,
+}: {
+  db: PrismaClient;
+  userId: string;
+  tagId: string;
+  positionIds: string[];
+}): Promise<{ positionIds: string[] }> {
+  const tag = await db.tag.findUnique({ where: { id: tagId } });
+  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) throw pillarNotFound();
+  await assertWorkspaceRole(db, userId, tag.workspaceId, PILLAR_ADMIN_ROLES);
+  const ids = [...new Set(positionIds)];
+  if (ids.length > 0) {
+    const found = await db.position.count({
+      where: { id: { in: ids }, workspaceId: tag.workspaceId },
+    });
+    if (found !== ids.length) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "Every Position must belong to the Pillar's workspace",
+      });
+    }
+  }
+  await db.$transaction([
+    db.pillarPosition.deleteMany({ where: { tagId, positionId: { notIn: ids } } }),
+    db.pillarPosition.createMany({
+      data: ids.map((positionId) => ({ tagId, positionId })),
+      skipDuplicates: true,
+    }),
+  ]);
+  return { positionIds: ids };
 }
 
 /** Slug rule shared with `tag.create`. */
@@ -327,6 +375,7 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
   } satisfies Prisma.ActionWhereInput;
 
   const [
+    positions,
     goals,
     projects,
     epics,
@@ -336,6 +385,23 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     inheritedTickets,
     resources,
   ] = await Promise.all([
+    // Who is accountable: Positions and their holders, readable by any member.
+    db.pillarPosition.findMany({
+      where: { tagId },
+      select: {
+        position: {
+          select: {
+            id: true,
+            title: true,
+            remit: true,
+            holders: {
+              select: { workspaceUser: { select: { user: { select: userSelect } } } },
+            },
+          },
+        },
+      },
+      orderBy: { position: { title: "asc" } },
+    }),
     // Objectives in a workspace are readable by every member of it.
     db.goal.findMany({
       where: {
@@ -459,6 +525,12 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
       archivedAt: pillar.archivedAt,
       workspaceId,
     },
+    positions: positions.map(({ position: { holders, ...position } }) => ({
+      ...position,
+      holders: holders.map((h) => h.workspaceUser.user),
+    })),
+    // A Pillar nobody is accountable for is flagged on its page.
+    hasNoPosition: positions.length === 0,
     goals,
     projects,
     epics,

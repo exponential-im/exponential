@@ -22,6 +22,7 @@ import {
   IconStack2,
   IconTarget,
   IconTicket,
+  IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
 import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
@@ -87,7 +88,8 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
     );
   }
 
-  const { pillar, goals, projects, epics, looseWork, inheritedWork, resources } = data;
+  const { pillar, positions, hasNoPosition, goals, projects, epics, looseWork, inheritedWork, resources } =
+    data;
   const looseCount = looseWork.actions.length + looseWork.tickets.length;
   const inheritedCount = inheritedWork.actions.length + inheritedWork.tickets.length;
   const doneHint = includeCompleted ? "" : "open ";
@@ -129,6 +131,51 @@ export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
       </header>
 
       <div className="flex flex-col gap-8">
+        <PageSection label="Accountable" icon={<IconUserCheck size={14} />} count={positions.length}>
+          {hasNoPosition ? (
+            <Panel padding="sm" className="flex items-center gap-2">
+              <Pill tone="warning">No one accountable</Pill>
+              <Text size="sm" className="text-text-secondary">
+                No Position is accountable for this Pillar yet, so nobody knows who to ask.{" "}
+                <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+                  Add one in workspace settings
+                </Link>
+                .
+              </Text>
+            </Panel>
+          ) : (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              {positions.map((position) => (
+                <Panel key={position.id} padding="sm">
+                  <Group justify="space-between" wrap="nowrap" mb={4}>
+                    <Text fw={600} size="sm" className="truncate text-text-primary">
+                      {position.title}
+                    </Text>
+                    {position.holders.length === 0 ? (
+                      <Pill size="xs" tone="warning">
+                        Vacant
+                      </Pill>
+                    ) : (
+                      <Avatar.Group spacing="xs">
+                        {position.holders.slice(0, 4).map((holder) => (
+                          <Tooltip key={holder.id} label={holder.name ?? "Someone"}>
+                            <Avatar src={holder.image} size={22} radius="xl" alt={holder.name ?? ""}>
+                              {holder.name?.charAt(0) ?? "?"}
+                            </Avatar>
+                          </Tooltip>
+                        ))}
+                      </Avatar.Group>
+                    )}
+                  </Group>
+                  <Text size="xs" className="text-text-muted">
+                    {position.holders.map((h) => h.name ?? "Someone").join(", ") || "Nobody holds it"}
+                  </Text>
+                </Panel>
+              ))}
+            </div>
+          )}
+        </PageSection>
+
         <PageSection label="Goals" icon={<IconTarget size={14} />} count={goals.length}>
           {goals.length === 0 ? (
             <EmptyState compact message={`No ${doneHint}goal is filed under this Pillar.`} />

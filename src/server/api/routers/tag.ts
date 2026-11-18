@@ -12,6 +12,7 @@ import {
   createPillar as createPillarService,
   setPillar as setPillarService,
   setPillarArchived as setPillarArchivedService,
+  setPillarPositions as setPillarPositionsService,
 } from "~/server/services/pillars/PillarService";
 import { PILLAR_CATEGORY } from "~/types/tag";
 
@@ -309,6 +310,18 @@ export const tagRouter = createTRPCRouter({
         userId: ctx.session.user.id,
         tagId: input.tagId,
         archived: input.archived,
+      }),
+    ),
+
+  // The Positions shown as accountable for a Pillar (replace-all). Admins only.
+  setPillarPositions: protectedProcedure
+    .input(z.object({ tagId: z.string(), positionIds: z.array(z.string()).max(50) }))
+    .mutation(({ ctx, input }) =>
+      setPillarPositionsService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        positionIds: input.positionIds,
       }),
     ),
 

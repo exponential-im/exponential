@@ -19,7 +19,14 @@ vi.mock("~/server/services/access", () => ({
 }));
 
 import { assertWorkspaceMembership, assertWorkspaceRole } from "~/server/services/access";
-import { createPillar, getPillarPage, listPillars, setPillar, setPillarArchived } from "../PillarService";
+import {
+  createPillar,
+  getPillarPage,
+  listPillars,
+  setPillar,
+  setPillarArchived,
+  setPillarPositions,
+} from "../PillarService";
 
 const db: DeepMockProxy<PrismaClient> = mockDeep<PrismaClient>();
 const membershipMock = vi.mocked(assertWorkspaceMembership);
@@ -147,6 +154,49 @@ describe("listPillars", () => {
   });
 });
 
+describe("setPillarPositions", () => {
+  beforeEach(() => {
+    db.tag.findUnique.mockResolvedValue(tagRow() as never);
+    db.$transaction.mockResolvedValue([] as never);
+  });
+
+  it("sets the Positions shown for a Pillar, for an admin, from its own workspace", async () => {
+    db.position.count.mockResolvedValue(2);
+
+    await setPillarPositions({ db, userId: USER, tagId: "tag-devops", positionIds: ["pos-td", "pos-sre", "pos-td"] });
+
+    expect(roleMock).toHaveBeenCalledWith(db, USER, WS, ["owner", "admin"]);
+    expect(db.position.count).toHaveBeenCalledWith({
+      where: { id: { in: ["pos-td", "pos-sre"] }, workspaceId: WS },
+    });
+    expect(db.pillarPosition.deleteMany).toHaveBeenCalledWith({
+      where: { tagId: "tag-devops", positionId: { notIn: ["pos-td", "pos-sre"] } },
+    });
+    expect(db.pillarPosition.createMany).toHaveBeenCalledWith({
+      data: [
+        { tagId: "tag-devops", positionId: "pos-td" },
+        { tagId: "tag-devops", positionId: "pos-sre" },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("refuses a Position from another workspace", async () => {
+    db.position.count.mockResolvedValue(0);
+    await expect(
+      setPillarPositions({ db, userId: USER, tagId: "tag-devops", positionIds: ["elsewhere"] }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.$transaction).not.toHaveBeenCalled();
+  });
+
+  it("refuses a member who is not an admin", async () => {
+    roleMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+    await expect(
+      setPillarPositions({ db, userId: USER, tagId: "tag-devops", positionIds: [] }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
 describe("createPillar", () => {
   it("creates a workspace tag that is a Pillar, for an admin", async () => {
     db.tag.findFirst.mockResolvedValue(null as never);
@@ -207,6 +257,7 @@ describe("getPillarPage", () => {
     db.goal.findMany.mockResolvedValue([] as never);
     db.resource.findMany.mockResolvedValue([] as never);
     db.epic.findMany.mockResolvedValue([] as never);
+    db.pillarPosition.findMany.mockResolvedValue([] as never);
   });
 
   it("hides a tag that is not a Pillar", async () => {
@@ -381,5 +432,32 @@ describe("getPillarPage", () => {
     expect(db.action.findMany.mock.lastCall![0]!.where!.AND).toContainEqual({
       status: { notIn: ["DELETED", "DRAFT"] },
     });
+  });
+
+  it("lists accountable Positions with their holders, and flags a Pillar with none", async () => {
+    let page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(page.positions).toEqual([]);
+    expect(page.hasNoPosition).toBe(true);
+
+    db.pillarPosition.findMany.mockResolvedValue([
+      {
+        position: {
+          id: "pos-td",
+          title: "Technical Director",
+          remit: "Production",
+          holders: [{ workspaceUser: { user: { id: "u2", name: "Ana", image: null } } }],
+        },
+      },
+    ] as never);
+    page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(page.hasNoPosition).toBe(false);
+    expect(page.positions).toEqual([
+      {
+        id: "pos-td",
+        title: "Technical Director",
+        remit: "Production",
+        holders: [{ id: "u2", name: "Ana", image: null }],
+      },
+    ]);
   });
 });
