@@ -29,14 +29,26 @@ export const TAG_COLORS = [
 
 export type TagColor = (typeof TAG_COLORS)[number];
 
+/**
+ * `Tag.category` of a Pillar: a workspace tag promoted to have its own page
+ * (ADR-0085). Every other category value, null included, is an ordinary label.
+ */
+export const PILLAR_CATEGORY = 'pillar';
+
+/** True when the tag is a Pillar (active or not). */
+export function isPillarTag(tag: { category: string | null }): boolean {
+  return tag.category === PILLAR_CATEGORY;
+}
+
 export interface Tag {
   id: string;
   name: string;
   slug: string;
   color: TagColor;
   description: string | null;
-  category: string | null; // e.g. "label", "area" - null treated as general "label"
+  category: string | null; // "pillar" = a Pillar (ADR-0085); null or "label" = an ordinary label
   isSystem: boolean;
+  archivedAt?: Date | null; // set on an inactive Pillar
   workspaceId: string | null;
   createdById: string | null;
   createdAt: Date;

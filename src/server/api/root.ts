@@ -67,6 +67,7 @@ import { listAutomationRouter } from "./routers/listAutomation";
 import { broadcastRouter } from "./routers/broadcast";
 import { workspaceUpdateRouter } from "./routers/workspaceUpdate";
 import { tagRouter } from "./routers/tag";
+import { pillarRouter } from "./routers/pillar";
 import { schedulingRouter } from "./routers/scheduling";
 import { taskScheduleRouter } from "./routers/taskSchedule";
 import { timeEntryRouter } from "./routers/timeEntry";
@@ -179,6 +180,7 @@ export const appRouter = createTRPCRouter({
   broadcast: broadcastRouter,
   workspaceUpdate: workspaceUpdateRouter,
   tag: tagRouter,
+  pillar: pillarRouter,
   scheduling: schedulingRouter,
   taskSchedule: taskScheduleRouter,
   timeEntry: timeEntryRouter,

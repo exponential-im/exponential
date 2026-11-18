@@ -8,8 +8,23 @@ import {
   listForEntity as listForEntityService,
   setEntityTags as setEntityTagsService,
 } from "~/server/services/tags/TagAssignmentService";
+import { setPillar as setPillarService } from "~/server/services/pillars/PillarService";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
-const tagEntityTypeSchema = z.enum(["action", "ticket", "feature", "epic"]);
+const tagEntityTypeSchema = z.enum(["action", "ticket", "feature", "epic", "project"]);
+
+/**
+ * `tag.create` and `tag.update` may not make or unmake a Pillar: promotion has
+ * one entry point, `tag.setPillar`, which needs a workspace admin.
+ */
+function assertNotPillarCategory(category: string | null | undefined): void {
+  if (category === PILLAR_CATEGORY) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Use tag.setPillar to promote a tag to a Pillar",
+    });
+  }
+}
 
 const tagColorSchema = z.enum(TAG_COLORS);
 
@@ -121,6 +136,7 @@ export const tagRouter = createTRPCRouter({
       })
     )
     .mutation(async ({ ctx, input }) => {
+      assertNotPillarCategory(input.category);
       // A tag is workspace content: membership alone (a read-only viewer)
       // is not permission to create one.
       await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, input.workspaceId);
@@ -196,6 +212,17 @@ export const tagRouter = createTRPCRouter({
         await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, tag.workspaceId);
       }
 
+      // Neither setting nor clearing the Pillar category goes through here.
+      if (input.category !== undefined) {
+        assertNotPillarCategory(input.category);
+        if (tag.category === PILLAR_CATEGORY) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Use tag.setPillar to turn a Pillar back into a label",
+          });
+        }
+      }
+
       // If name is changing, update slug and check for conflicts
       let slug = tag.slug;
       if (input.name && input.name !== tag.name) {
@@ -231,6 +258,18 @@ export const tagRouter = createTRPCRouter({
         },
       });
     }),
+
+  // Promote a workspace tag to a Pillar, or demote it (ADR-0085). Admins only.
+  setPillar: protectedProcedure
+    .input(z.object({ tagId: z.string(), isPillar: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      setPillarService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        isPillar: input.isPillar,
+      }),
+    ),
 
   // Delete a tag
   delete: protectedProcedure

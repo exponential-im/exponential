@@ -70,6 +70,7 @@ import { ProjectResourcesTab } from "~/app/_components/knowledge-base/ProjectRes
 import { daysLeftLabel, daysUntil, resolveProjectTargetDate } from "~/lib/projectTargetDate";
 import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { EntityPillars } from "./pillars/EntityPillars";
 import { notifications } from "@mantine/notifications";
 import Link from "next/link";
 import { useMemo } from "react";
@@ -464,6 +465,20 @@ export function ProjectContent({
                   {ownerFirstName}
                 </div>
               </div>
+            )}
+            {workspace && project.workspaceId === workspace.id && (
+              <EntityPillars
+                entityType="project"
+                entityId={project.id}
+                workspaceId={workspace.id}
+                workspaceSlug={workspace.slug}
+                wrapper={(content) => (
+                  <div className={overviewStyles.stat}>
+                    <div className={overviewStyles.statLabel}>Pillars</div>
+                    <div className={overviewStyles.statValue}>{content}</div>
+                  </div>
+                )}
+              />
             )}
           </div>
         </div>

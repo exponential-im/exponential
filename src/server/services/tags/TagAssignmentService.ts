@@ -4,10 +4,20 @@ import {
   assertWorkspaceMembership,
   assertWorkspaceWriteRole,
   canEditAction,
+  canEditProject,
   getActionAccess,
+  getProjectAccess,
+  hasProjectAccess,
 } from "~/server/services/access";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
-export type TagEntityType = "action" | "ticket" | "feature" | "epic";
+export type TagEntityType = "action" | "ticket" | "feature" | "epic" | "project";
+
+/**
+ * Entities that take Pillars only, never ordinary labels (ADR-0085): a
+ * Project, Goal or Resource is filed under a standing area, not labelled.
+ */
+const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set(["project"]);
 
 interface EntityResolution {
   workspaceId: string;
@@ -125,7 +135,42 @@ async function resolveEntity(
         currentTagIds: epic.tags.map((t) => t.tagId),
       };
     }
+    case "project": {
+      const project = await db.project.findUnique({
+        where: { id: entityId },
+        select: {
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!project) throwNotFound("Project");
+      const access = await getProjectAccess(db, userId, entityId);
+      const allowed = level === "edit" ? canEditProject(access) : hasProjectAccess(access);
+      if (!allowed) {
+        // A project the caller cannot see stays hidden.
+        if (!hasProjectAccess(access)) throwNotFound("Project");
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You don't have permission to change this project's Pillars",
+        });
+      }
+      return {
+        workspaceId: requireEntityWorkspace(project.workspaceId, "Project"),
+        currentTagIds: project.pillarTags.map((t) => t.tagId),
+      };
+    }
   }
+}
+
+/** A tag is workspace-scoped, so an entity with no workspace carries none. */
+function requireEntityWorkspace(workspaceId: string | null, label: string): string {
+  if (!workspaceId) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `${label} has no workspace; cannot validate tag scope`,
+    });
+  }
+  return workspaceId;
 }
 
 function throwNotFound(label: string): never {
@@ -147,10 +192,17 @@ async function requireWorkspaceAccess(
   else await assertWorkspaceMembership(db, userId, workspaceId);
 }
 
+/**
+ * Every tag must be global or belong to the entity's workspace. A Pillar-only
+ * entity takes only this workspace's Pillars. An inactive (archived) Pillar is
+ * never newly added, but one already on the entity stays.
+ */
 async function validateTagsForWorkspace(
   db: PrismaClient,
+  entityType: TagEntityType,
   workspaceId: string,
   tagIds: string[],
+  currentTagIds: string[],
 ): Promise<void> {
   if (tagIds.length === 0) return;
   const validTags = await db.tag.findMany({
@@ -158,12 +210,30 @@ async function validateTagsForWorkspace(
       id: { in: tagIds },
       OR: [{ workspaceId: null }, { workspaceId }],
     },
-    select: { id: true },
+    select: { id: true, category: true, workspaceId: true, archivedAt: true },
   });
   if (validTags.length !== tagIds.length) {
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: "One or more tags are not available in this workspace",
+    });
+  }
+  if (PILLAR_ONLY_ENTITY_TYPES.has(entityType)) {
+    const nonPillar = validTags.some(
+      (t) => t.category !== PILLAR_CATEGORY || t.workspaceId !== workspaceId,
+    );
+    if (nonPillar) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `A ${entityType} can only be filed under this workspace's Pillars`,
+      });
+    }
+  }
+  const current = new Set(currentTagIds);
+  if (validTags.some((t) => t.archivedAt && !current.has(t.id))) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "An inactive Pillar cannot be added",
     });
   }
 }
@@ -236,6 +306,19 @@ async function applyTagSet(
           });
         }
         return;
+      case "project":
+        if (toRemove.length > 0) {
+          await tx.projectTag.deleteMany({
+            where: { projectId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.projectTag.createMany({
+            data: toAdd.map((tagId) => ({ projectId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
     }
   });
 }
@@ -278,6 +361,14 @@ async function loadTagsForEntity(
       });
       return rows.map((r) => r.tag);
     }
+    case "project": {
+      const rows = await db.projectTag.findMany({
+        where: { projectId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
   }
 }
 
@@ -298,7 +389,7 @@ export async function setEntityTags({
     "edit",
   );
 
-  await validateTagsForWorkspace(db, workspaceId, uniqueTagIds);
+  await validateTagsForWorkspace(db, entityType, workspaceId, uniqueTagIds, currentTagIds);
   await applyTagSet(db, entityType, entityId, uniqueTagIds, currentTagIds);
 
   const tags = await loadTagsForEntity(db, entityType, entityId);
