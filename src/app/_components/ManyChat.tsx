@@ -542,7 +542,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - Status: ${projectData.status}
       - Priority: ${projectData.priority}
       - Progress: ${projectData.progress || 0}%${slackChannelContext}
-      - Active Tasks Shown: ${projectActions.length} (call `get-project-actions` for the complete list)
+      - Active Tasks Shown: ${projectActions.length} (call \`get-project-actions\` for the complete list)
       ${projectActions.length > 0 ?
         projectActions.map(action => `  • ${action.name} (${action.status}, ${action.priority})`).join('\n      ') :
         '  • No active tasks'}
@@ -551,7 +551,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
       - When creating actions: automatically assign to project ID: ${projectId}
       - When asked about tasks: refer to context above or use tools for complete data
       - Always specify project ID in tool calls for security
-      - For tasks beyond the ones shown above, call `get-project-actions`
+      - For tasks beyond the ones shown above, call \`get-project-actions\`
       - When asked about meetings or transcriptions: refer to the meeting context above${projectSlackConfig?.slackChannel ? `\n      - When asked about Slack or project communications: search in channel${projectSlackConfig.slackChannelId ? ` ID "${projectSlackConfig.slackChannelId}"` : ` "${projectSlackConfig.slackChannel}"`}` : ''}
     ` : '';
 
@@ -599,7 +599,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
                   - A truncated transcript is a partial read. Never conclude that something was not said from one; fetch the full transcript by transcriptionId first, or say that you only read part of it.
                   - Context shows current/recent data only - use tools for historical/complete data
                   - Use only the tools you were actually given, by their exact names. Never call a tool because a name sounds right; if no tool fits, say what you cannot do.
-                  - For project goals: call `get-project-context` with the project ID
+                  - For project goals: call \`get-project-context\` with the project ID
                   - If authentication fails, inform user and suggest checking token validity
 
                   🔧 CONNECTING FIREFLIES:
@@ -617,7 +617,7 @@ export default function ManyChat({ initialMessages, githubSettings, buttons, pro
 
                   📊 CONTEXT LIMITATIONS:
                   - Project data: Current snapshot only (real-time via tools)
-                  - Actions: Active actions shown (call `get-project-actions` for the rest)
+                  - Actions: Active actions shown (call \`get-project-actions\` for the rest)
                   - Transcriptions: Summaries shown in context (use search tools for full text and specific topics)
                   - For complete datasets or older data, explicitly use tools
                   - Always mention when working with limited context vs complete data
