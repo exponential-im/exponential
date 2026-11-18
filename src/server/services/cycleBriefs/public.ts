@@ -24,6 +24,8 @@ export interface PublicCycleOutcome {
   /** The final result after close (D-0098), with its optional note. */
   result: OutcomeResult | null;
   resultNote: string | null;
+  /** The cycle a Product owner carried this outcome over from (D-0098). */
+  carriedFromCycle: string | null;
 }
 
 /** A "Not this cycle" item (D-0095). The linked Insight is never shown. */
@@ -66,6 +68,7 @@ export interface BriefProjectionInput {
     changedAt: Date | null;
     result?: string | null;
     resultNote?: string | null;
+    carriedFrom?: { brief: { cycle: { name: string } } } | null;
   }>;
   exclusions?: Array<{
     position: number;
@@ -94,6 +97,7 @@ export function projectPublicBrief(brief: BriefProjectionInput): PublicCycleBrie
         changedAt: o.changedAt,
         result: isOutcomeResult(o.result) ? o.result : null,
         resultNote: isOutcomeResult(o.result) ? (o.resultNote ?? null) : null,
+        carriedFromCycle: o.carriedFrom?.brief.cycle.name ?? null,
       };
     });
   return {
@@ -126,6 +130,7 @@ const PROJECTION_SELECT = {
       changedAt: true,
       result: true,
       resultNote: true,
+      carriedFrom: { select: { brief: { select: { cycle: { select: { name: true } } } } } },
     },
   },
   exclusions: {

@@ -59,6 +59,9 @@ export default async function PublicBriefPage({ params }: Params) {
                 )}
               </div>
               <p className="text-base font-medium text-text-primary">{outcome.text}</p>
+              {outcome.carriedFromCycle && (
+                <p className="text-xs text-text-muted">Carried over from {outcome.carriedFromCycle}</p>
+              )}
               <p className="mt-1 text-sm text-text-secondary">
                 <span className="text-text-muted">Why: </span>
                 {outcome.why}

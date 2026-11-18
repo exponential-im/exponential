@@ -226,6 +226,7 @@ export const cycleBriefRouter = createTRPCRouter({
               include: {
                 features: { select: { feature: { select: { id: true, name: true } } } },
                 goal: { select: { id: true, title: true } },
+                carriedFrom: { select: { brief: { select: { cycle: { select: { name: true } } } } } },
               },
             },
             exclusions: {
@@ -628,6 +629,111 @@ export const cycleBriefRouter = createTRPCRouter({
           ...(input.note !== undefined ? { resultNote: input.note ? input.note : null } : {}),
         },
         select: { id: true, result: true, resultNote: true },
+      });
+    }),
+
+  /**
+   * The previous brief of the same product, with its outcomes, for the
+   * Product owner to carry over or drop at planning. Nothing rolls over on
+   * its own (D-0098).
+   */
+  carryOverCandidates: protectedProcedure
+    .input(z.object({ briefId: z.string() }))
+    .query(async ({ ctx, input }) => {
+      const brief = await loadBriefWithAccess(ctx.db, ctx.session.user.id, input.briefId, "view");
+      const cycle = await ctx.db.list.findUniqueOrThrow({
+        where: { id: brief.cycleId },
+        select: { startDate: true, createdAt: true },
+      });
+      const previous = await ctx.db.cycleBrief.findFirst({
+        where: {
+          productId: brief.productId,
+          id: { not: brief.id },
+          cycle: cycle.startDate ? { startDate: { lt: cycle.startDate } } : { createdAt: { lt: cycle.createdAt } },
+        },
+        orderBy: cycle.startDate ? { cycle: { startDate: "desc" } } : { cycle: { createdAt: "desc" } },
+        select: {
+          id: true,
+          cycle: { select: { name: true } },
+          outcomes: {
+            where: { removedAt: null },
+            orderBy: [{ position: "asc" }, { createdAt: "asc" }],
+            select: { id: true, draftText: true, publicText: true, result: true, status: true },
+          },
+        },
+      });
+      if (!previous) return null;
+      const carried = await ctx.db.cycleOutcome.findMany({
+        where: { briefId: brief.id, carriedFromId: { in: previous.outcomes.map((o) => o.id) } },
+        select: { carriedFromId: true },
+      });
+      const carriedIds = new Set(carried.map((c) => c.carriedFromId));
+      return {
+        cycleName: previous.cycle.name,
+        outcomes: previous.outcomes.map((o) => ({
+          id: o.id,
+          text: o.publicText ?? o.draftText,
+          result: o.result,
+          status: o.status,
+          isCarried: carriedIds.has(o.id),
+        })),
+      };
+    }),
+
+  /**
+   * The Product owner carries an outcome of an earlier brief of the same
+   * product into this one, as a new draft (it goes public at the next
+   * sign-off) marked "carried over from <cycle>". Never automatic (D-0098).
+   */
+  carryOver: protectedProcedure
+    .input(z.object({ outcomeId: z.string(), toBriefId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const userId = ctx.session.user.id;
+      const target = await loadBriefWithAccess(ctx.db, userId, input.toBriefId, "view");
+      await assertProductOwner(ctx.db, userId, target.productId);
+      const source = await ctx.db.cycleOutcome.findUnique({
+        where: { id: input.outcomeId },
+        select: {
+          id: true,
+          draftText: true,
+          draftWhy: true,
+          publicText: true,
+          publicWhy: true,
+          goalId: true,
+          removedAt: true,
+          features: { select: { featureId: true } },
+          brief: { select: { id: true, productId: true } },
+        },
+      });
+      if (!source || source.removedAt || source.brief.productId !== target.productId) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Outcome not found in this product" });
+      }
+      if (source.brief.id === target.id) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Carry an outcome over from an earlier cycle" });
+      }
+      const already = await ctx.db.cycleOutcome.findFirst({
+        where: { briefId: target.id, carriedFromId: source.id, removedAt: null },
+        select: { id: true },
+      });
+      if (already) {
+        throw new TRPCError({ code: "CONFLICT", message: "This outcome is already carried over" });
+      }
+      const last = await ctx.db.cycleOutcome.findFirst({
+        where: { briefId: target.id },
+        orderBy: { position: "desc" },
+        select: { position: true },
+      });
+      return ctx.db.cycleOutcome.create({
+        data: {
+          briefId: target.id,
+          position: (last?.position ?? -1) + 1,
+          // The wording readers last saw, so the carried aim reads the same.
+          draftText: source.publicText ?? source.draftText,
+          draftWhy: source.publicWhy ?? source.draftWhy,
+          goalId: source.goalId,
+          carriedFromId: source.id,
+          features: { create: source.features.map((f) => ({ featureId: f.featureId })) },
+        },
       });
     }),
 

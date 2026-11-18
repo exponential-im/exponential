@@ -57,6 +57,7 @@ describe("projectPublicBrief", () => {
       changedAt: null,
       result: null,
       resultNote: null,
+      carriedFromCycle: null,
     });
   });
 
@@ -91,6 +92,21 @@ describe("projectPublicBrief", () => {
     });
     expect(brief?.closed).toBe(true);
     expect(brief?.outcomes[0]).toMatchObject({ result: "partly", resultNote: "Two of three regions" });
+  });
+
+  it("names the cycle an outcome was carried over from, and nothing else of it", () => {
+    const base = row();
+    const brief = projectPublicBrief({
+      ...base,
+      outcomes: base.outcomes.map((o) => ({
+        ...o,
+        carriedFrom: { id: "outcome_cuid_old", brief: { id: "brief_cuid_old", cycle: { name: "Cycle 20" } } },
+      })),
+    } as BriefProjectionInput);
+    expect(brief?.outcomes[0]?.carriedFromCycle).toBe("Cycle 20");
+    const json = JSON.stringify(brief);
+    expect(json).not.toContain("outcome_cuid_old");
+    expect(json).not.toContain("brief_cuid_old");
   });
 
   it("hides outcomes that were never signed off or whose removal was signed off", () => {

@@ -483,3 +483,76 @@ describe("cycleBrief close and results", () => {
     expect((await db.cycleBrief.findUniqueOrThrow({ where: { id: brief.id } })).closedAt).toBeInstanceOf(Date);
   });
 });
+
+describe("cycleBrief carry-over", () => {
+  let db: ReturnType<typeof getTestDb>;
+
+  beforeEach(() => {
+    db = getTestDb();
+  });
+
+  it("copies nothing on its own, and lets only a Product owner carry an outcome over", async () => {
+    const owner = await createUser(db);
+    const ws = await createWorkspace(db, { ownerId: owner.id });
+    const product = await createProduct(db, { workspaceId: ws.id, createdById: owner.id });
+    await db.productOwner.create({ data: { productId: product.id, userId: owner.id } });
+    const member = await createUser(db);
+    await addWorkspaceMember(db, ws.id, member.id, "member");
+    const caller = createTestCaller(owner.id);
+
+    const c20 = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      name: "Cycle 20",
+      startDate: new Date("2030-02-02"),
+    });
+    const c21 = await createCycle(db, {
+      workspaceId: ws.id,
+      createdById: owner.id,
+      productId: product.id,
+      name: "Cycle 21",
+      slug: `cycle-21-${product.id.slice(-6)}`,
+      startDate: new Date("2030-02-16"),
+    });
+    const b20 = await caller.product.cycleBrief.create({ cycleId: c20.id });
+    const unfinished = await caller.product.cycleBrief.upsertOutcome({
+      briefId: b20.id,
+      text: "Sudan uses it weekly",
+      why: "Decides the next country",
+    });
+    await caller.product.cycleBrief.signOff({ briefId: b20.id });
+    await caller.product.cycle.update({ id: c20.id, status: "COMPLETED" });
+    await caller.product.cycleBrief.setResult({ outcomeId: unfinished.id, result: "missed" });
+
+    const b21 = await caller.product.cycleBrief.create({ cycleId: c21.id });
+    // Nothing rolled over
+    expect(await db.cycleOutcome.count({ where: { briefId: b21.id } })).toBe(0);
+
+    const candidates = await caller.product.cycleBrief.carryOverCandidates({ briefId: b21.id });
+    expect(candidates?.cycleName).toBe("Cycle 20");
+    expect(candidates?.outcomes.map((o) => o.id)).toEqual([unfinished.id]);
+
+    await expect(
+      createTestCaller(member.id).product.cycleBrief.carryOver({ outcomeId: unfinished.id, toBriefId: b21.id }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+
+    await caller.product.cycleBrief.carryOver({ outcomeId: unfinished.id, toBriefId: b21.id });
+    await expect(
+      caller.product.cycleBrief.carryOver({ outcomeId: unfinished.id, toBriefId: b21.id }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    await caller.product.cycleBrief.signOff({ briefId: b21.id });
+    const result = await createUnauthenticatedCaller().product.cycleBrief.publicGet({
+      workspaceSlug: ws.slug,
+      productSlug: product.slug,
+      cycleSlug: c21.slug,
+    });
+    expect(result?.brief.outcomes[0]).toMatchObject({
+      text: "Sudan uses it weekly",
+      carriedFromCycle: "Cycle 20",
+      result: null,
+      status: null,
+    });
+  });
+});

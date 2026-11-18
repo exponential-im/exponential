@@ -18,6 +18,7 @@ import {
 
 import { SignOffReviewModal } from "./SignOffReviewModal";
 import { NotThisCycleSection } from "./NotThisCycleSection";
+import { CarryOverSection } from "./CarryOverSection";
 
 const PENDING_LABEL = {
   new: "Not public yet",
@@ -316,6 +317,11 @@ export function CycleBriefPanel({
                   <Text size="xs" className="mt-1 text-text-secondary">
                     Why: {outcome.draftWhy}
                   </Text>
+                  {outcome.carriedFrom && (
+                    <Text size="xs" className="mt-1 text-text-muted">
+                      Carried over from {outcome.carriedFrom.brief.cycle.name}
+                    </Text>
+                  )}
                   {(outcome.features.length > 0 || outcome.goal) && (
                     <Text size="xs" className="mt-1 text-text-muted">
                       {[
@@ -408,6 +414,8 @@ export function CycleBriefPanel({
           </Group>
         )}
       </Stack>
+
+      {isProductOwner && !isCycleCompleted && <CarryOverSection briefId={brief.id} onCarried={invalidate} />}
 
       <NotThisCycleSection
         rows={brief.exclusions}
