@@ -253,6 +253,7 @@ This is a productivity management application built with the T3 Stack (Next.js 1
 - **CRM**: Contact/organization management, deal pipeline (Kanban), Gmail/Calendar import. See `/dev-docs/CRM_ARCHITECTURE.md`
 - **Notifications**: Multi-channel notification system (email, push, WhatsApp). See `/dev-docs/NOTIFICATION_ARCHITECTURE.md`
 - **Agent runs**: assigning an Action to an Assistant starts a hosted run (ADR-0067). See `/dev-docs/AGENT_RUNS.md` before touching `services/agentRuns/`, the `mastra.*` run callbacks, or the Assign modal
+- **Agent quality**: every report of a bad assistant answer follows one pattern (capture, name the cause, one `agent-quality` bug, fix plus a check, verify live). See `/dev-docs/AGENT_QUALITY.md` before working on a chat that went wrong, or changing an agent tool, an agent prompt, or a procedure an agent tool calls
 
 ## Directory Structure
 
