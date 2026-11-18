@@ -545,6 +545,45 @@ describe("resource router — reading list (mocked)", () => {
         expect(dbMock.resource.create).not.toHaveBeenCalled();
       });
 
+      it("files under a Project and its workspace's Pillars together", async () => {
+        dbMock.tag.findMany.mockResolvedValue([pillar("devops")] as never);
+        dbMock.workspace.findMany.mockResolvedValue([{ id: "w1" }] as never);
+        dbMock.project.findUnique.mockResolvedValue({
+          createdById: callerId,
+          teamId: null,
+          workspaceId: "w1",
+          isPublic: false,
+          isRestricted: false,
+        } as never);
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "r2", projectId: "p1", workspaceId: "w1" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({ title: "Runbook", projectId: "p1", tagIds: ["devops"] });
+
+        expect(dbMock.resource.create.mock.calls[0]![0].data).toMatchObject({ projectId: "p1", workspaceId: "w1" });
+        expect(dbMock.resourceTag.createMany).toHaveBeenCalledWith({
+          data: [{ resourceId: "r2", tagId: "devops" }],
+          skipDuplicates: true,
+        });
+      });
+
+      it("refuses Pillars of another workspace than the Project's", async () => {
+        dbMock.tag.findMany.mockResolvedValue([pillar("devops", "w2")] as never);
+        dbMock.project.findUnique.mockResolvedValue({
+          createdById: callerId,
+          teamId: null,
+          workspaceId: "w1",
+          isPublic: false,
+          isRestricted: false,
+        } as never);
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await expect(
+          caller.resource.create({ title: "Runbook", projectId: "p1", tagIds: ["devops"] }),
+        ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+        expect(dbMock.resource.create).not.toHaveBeenCalled();
+      });
+
       it("adds nothing when the save names no Pillars", async () => {
         dbMock.resource.create.mockResolvedValue(fakeResource());
         const caller = createMockCaller({ userId: callerId, db: dbMock });

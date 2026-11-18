@@ -122,4 +122,34 @@ test.describe("Capture with Pillars", () => {
       page.getByRole("region", { name: "Resources" }).getByRole("link", { name: names.savedHost }),
     ).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
   });
+
+  test("ticking a Pillar narrows the projects; choosing a project ticks its Pillars", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/knowledge-base`);
+    const save = page.getByRole("button", { name: "Save", exact: true });
+    await expect(save).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await save.click();
+    const placement = page.getByLabel("Where this goes");
+    const project = placement.getByRole("textbox", { name: "Project" });
+
+    // No Pillar ticked: both projects are offered.
+    await project.click();
+    await expect(page.getByRole("option", { name: names.pillarProject })).toBeVisible();
+    await expect(page.getByRole("option", { name: names.otherProject })).toBeVisible();
+    await page.keyboard.press("Escape");
+
+    // Tick the Ops Pillar: only the project under it remains.
+    await placement.locator("label", { hasText: names.pillar }).click();
+    await project.click();
+    await expect(page.getByRole("option", { name: names.pillarProject })).toBeVisible();
+    await expect(page.getByRole("option", { name: names.otherProject })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+
+    // Untick, then choose the Growth project: its Pillar is ticked for you.
+    await placement.locator("label", { hasText: names.pillar }).click();
+    await project.click();
+    await page.getByRole("option", { name: names.otherProject }).click();
+    await expect(placement.getByRole("checkbox", { name: names.otherPillar })).toBeChecked();
+    await expect(placement.getByRole("checkbox", { name: names.pillar })).not.toBeChecked();
+    await page.screenshot({ path: test.info().outputPath("project-ticks-pillar.png"), fullPage: true });
+  });
 });
