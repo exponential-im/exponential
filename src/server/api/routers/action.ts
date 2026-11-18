@@ -40,6 +40,7 @@ import {
   assertAssignableUsers,
   assertCanWriteToWorkspace,
   resolveAssigneeEmails,
+  assigneeIdsForEmails,
   blockedByInclude,
   createAction,
   isActionSource,
@@ -484,22 +485,18 @@ export const actionRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
+      // Emails become ids without throwing: `createAction` authorises the
+      // caller before its containment check, and an unknown email must fail
+      // there, after authorisation, like any non-assignable user. Refusing it
+      // here would leak whether an address has an account.
       const { assigneeEmails, ...createInput } = input;
       const emailAssigneeIds = assigneeEmails?.length
-        ? await resolveAssigneeEmails(
-            ctx.db,
-            {
-              projectId: createInput.projectId ?? null,
-              teamId: null,
-              workspaceId: createInput.workspaceId ?? null,
-            },
-            assigneeEmails,
-          )
+        ? await assigneeIdsForEmails(ctx.db, assigneeEmails)
         : [];
       const created = await createAction(actionWriteDeps(ctx), {
         ...createInput,
         ...(emailAssigneeIds.length > 0
-          ? { assigneeIds: [...(createInput.assigneeIds ?? []), ...emailAssigneeIds] }
+          ? { assigneeIds: Array.from(new Set([...(createInput.assigneeIds ?? []), ...emailAssigneeIds])) }
           : {}),
         // The *who* is createdById (for an agent, its shadow user; ADR-0049),
         // the *how* is source, named from the verified principal.

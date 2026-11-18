@@ -63,6 +63,7 @@ export {
   assertAssignableUsers,
   assertListMembership,
   resolveAssigneeEmails,
+  assigneeIdsForEmails,
   type AssignmentScope,
 } from "./containment";
 export {

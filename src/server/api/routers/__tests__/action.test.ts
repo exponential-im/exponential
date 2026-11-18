@@ -1853,16 +1853,15 @@ describe("action router (mocked)", () => {
         teamId: null, team: null, workspaceId,
       } as never);
       dbMock.action.findFirst.mockResolvedValue({ id: actionId } as never);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      dbMock.workspaceUser.findUnique.mockImplementation((args: any) => {
-        const key = args?.where?.userId_workspaceId as { userId?: string; workspaceId?: string } | undefined;
+      type MembershipArgs = { where?: { userId_workspaceId?: { userId?: string; workspaceId?: string } } };
+      dbMock.workspaceUser.findUnique.mockImplementation(((args: MembershipArgs) => {
+        const key = args?.where?.userId_workspaceId;
         return Promise.resolve(
           key?.workspaceId === workspaceId && key.userId && members.includes(key.userId)
             ? { userId: key.userId, workspaceId, role: "member", joinedAt: new Date() }
             : null,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ) as any;
-      });
+        );
+      }) as unknown as typeof dbMock.workspaceUser.findUnique);
       dbMock.teamUser.findFirst.mockResolvedValue(null as never);
       dbMock.team.findFirst.mockResolvedValue(null as never);
       dbMock.externalAgent.findMany.mockResolvedValue([] as never);
@@ -1972,6 +1971,27 @@ describe("action router (mocked)", () => {
       await expect(
         caller.action.create({ name: "Follow up", workspaceId, assigneeEmails: ["nobody@example.com"] }),
       ).rejects.toMatchObject({ code: "NOT_FOUND" });
+      expect(dbMock.action.create).not.toHaveBeenCalled();
+    });
+
+    it("create checks workspace access before any assignee email, so it is no oracle", async () => {
+      // The caller is not in the workspace. A registered and an unregistered
+      // email must both get the same authorisation error.
+      stubAction([]);
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+      dbMock.user.findMany.mockResolvedValue([] as never);
+      const unknown = await caller.action
+        .create({ name: "Probe", workspaceId, assigneeEmails: ["nobody@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      dbMock.user.findMany.mockResolvedValue([{ id: jamesId, email: "james@example.com" }] as never);
+      const known = await caller.action
+        .create({ name: "Probe", workspaceId, assigneeEmails: ["james@example.com"] })
+        .catch((e: unknown) => e as { code: string; message: string });
+
+      expect(unknown).toMatchObject({ code: "FORBIDDEN" });
+      expect(known).toMatchObject({ code: unknown.code, message: unknown.message });
       expect(dbMock.action.create).not.toHaveBeenCalled();
     });
 

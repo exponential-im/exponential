@@ -150,6 +150,39 @@ function assigneeNotFound(scope: AssignmentScope): TRPCError {
 }
 
 /**
+ * Prefix for an email that matched no account. No user id has it, so
+ * `assertAssignableUsers` refuses it exactly as it refuses a registered user
+ * who is not assignable here.
+ */
+const UNREGISTERED_EMAIL_PREFIX = "unregistered-email:";
+
+/**
+ * Emails to user ids WITHOUT throwing, for a caller that has not been
+ * authorised yet (`action.create`: the write gate runs inside `createAction`).
+ *
+ * Throwing here, before authorisation, would let anyone probe whether an
+ * address has an account: unknown emails would fail early with NOT_FOUND
+ * while known ones went on to the authorisation error. Instead an unknown
+ * email becomes a placeholder id that can never match a user, and fails
+ * later, after authorisation, at the same `assertAssignableUsers` check and
+ * with the same message as a registered non-member.
+ */
+export async function assigneeIdsForEmails(
+  db: PrismaClient,
+  emails: string[],
+): Promise<string[]> {
+  const wanted = [...new Set(emails.map((e) => e.trim().toLowerCase()))].filter(Boolean);
+  if (wanted.length === 0) return [];
+
+  const users = await db.user.findMany({
+    where: { OR: wanted.map((email) => ({ email: { equals: email, mode: "insensitive" as const } })) },
+    select: { id: true, email: true },
+  });
+  const byEmail = new Map(users.map((u) => [u.email?.toLowerCase(), u.id]));
+  return wanted.map((email) => byEmail.get(email) ?? `${UNREGISTERED_EMAIL_PREFIX}${email}`);
+}
+
+/**
  * Turn assignee emails into user ids, for callers (the CLI, MCP, agents) that
  * know a colleague's email but not their CUID. Case-insensitive.
  *
