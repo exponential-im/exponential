@@ -60,6 +60,8 @@ export interface AiInteractionData {
     errorCode?: string;
     providerExecuted?: boolean;
     argsDropped?: boolean;
+    errorKind?: string;
+    faultSummary?: string;
   }>;
 
   // Additional metadata
@@ -67,6 +69,8 @@ export interface AiInteractionData {
   ipAddress?: string; // For security/analytics (should be hashed)
   anthropicRequestId?: string; // Anthropic API request ID for correlation
   promptVersion?: string; // Prompt-state fingerprint at write time (ADR-0012 decision 7)
+  mastraRunId?: string; // Mastra run id, the key its logs are grepped by
+  pageContextType?: string; // PageContext.pageType the chat was opened on
 }
 
 export interface ConversationContext {
@@ -151,6 +155,8 @@ export class AiInteractionLogger {
             : data.ipAddress,
           anthropicRequestId: data.anthropicRequestId,
           promptVersion: data.promptVersion,
+          mastraRunId: data.mastraRunId,
+          pageContextType: data.pageContextType,
         },
       });
 

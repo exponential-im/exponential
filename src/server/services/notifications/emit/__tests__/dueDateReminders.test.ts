@@ -4,6 +4,7 @@ import type { PrismaClient } from "@prisma/client";
 
 import { generateDueDateReminders } from "~/server/services/notifications/emit/dueDateReminders";
 import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
+import { matchesWhere } from "~/test/prismaWhere";
 
 vi.mock("~/server/services/notifications/emit/emitNotification", () => ({
   emitNotification: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +31,7 @@ beforeEach(() => {
   mockReset(db);
   vi.clearAllMocks();
   db.notificationPreference.findMany.mockResolvedValue([]);
+  db.notification.findMany.mockResolvedValue([]);
 });
 
 describe("generateDueDateReminders", () => {
@@ -153,5 +155,95 @@ describe("generateDueDateReminders", () => {
     expect(db.notificationPreference.findMany).toHaveBeenCalledTimes(1);
     expect(db.notificationPreference.findUnique).not.toHaveBeenCalled();
     expect(result.emitted).toBe(3);
+  });
+
+  it("skips reminders already sent with one lookup, instead of a full emit per reminder", async () => {
+    // Three actions all crossing their 60-min offset this tick; two of the
+    // reminders went out on an earlier tick of the lookback window.
+    db.action.findMany.mockResolvedValue([
+      action({ id: "a1", assignees: [{ userId: "u1" }] }),
+      action({ id: "a2", assignees: [{ userId: "u2" }] }),
+      action({ id: "a3", assignees: [{ userId: "u3" }] }),
+    ] as never);
+    db.notification.findMany.mockResolvedValue([
+      { dedupeKey: "due_date:a1:60", userId: "u1" },
+      { dedupeKey: "due_date:a3:60", userId: "u3" },
+      // The right key for a different owner does not count as sent to u2.
+      { dedupeKey: "due_date:a2:60", userId: "someone-else" },
+    ] as never);
+
+    const result = await generateDueDateReminders(db, NOW);
+
+    expect(db.notification.findMany).toHaveBeenCalledTimes(1);
+    expect(db.notification.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          dedupeKey: { in: ["due_date:a1:60", "due_date:a2:60", "due_date:a3:60"] },
+          userId: { in: ["u1", "u2", "u3"] },
+        },
+      }),
+    );
+    expect(emitNotification).toHaveBeenCalledTimes(1);
+    expect(emitNotification).toHaveBeenCalledWith(
+      expect.objectContaining({ subject: expect.objectContaining({ actionId: "a2", ownerUserId: "u2" }) }),
+    );
+    expect(result.emitted).toBe(1);
+  });
+
+  it("does not query for sent reminders when nothing crosses an offset", async () => {
+    db.action.findMany.mockResolvedValue([action({ dueDate: inMinutes(120) })] as never);
+
+    await generateDueDateReminders(db, NOW);
+
+    expect(db.notification.findMany).not.toHaveBeenCalled();
+  });
+});
+
+// A paused (On hold, Completed, Cancelled) project's actions are off the
+// owner's plate, so their due dates remind nobody. The mocked findMany
+// evaluates the emitter's real `where` against in-memory rows with
+// `matchesWhere`, so these assert which actions it actually reaches.
+describe("generateDueDateReminders: paused projects", () => {
+  function row(id: string, projectStatus: string | null) {
+    return {
+      ...action({ id, assignees: [{ userId: `owner-${id}` }] }),
+      status: "ACTIVE",
+      projectId: projectStatus ? `p-${id}` : null,
+      project: projectStatus
+        ? { status: projectStatus, workspace: { id: "ws1", slug: "acme" } }
+        : null,
+    };
+  }
+
+  const PAUSED = ["ON_HOLD", "COMPLETED", "CANCELLED"];
+
+  beforeEach(() => {
+    const rows = [
+      row("loose", null),
+      row("live", "ACTIVE"),
+      ...PAUSED.map((s) => row(s.toLowerCase(), s)),
+    ];
+    db.action.findMany.mockImplementation(((args: { where?: Record<string, unknown> }) =>
+      Promise.resolve(rows.filter((r) => matchesWhere(r, args.where ?? {})))) as never);
+  });
+
+  it("reminds the owners of project-less and Active-project actions only", async () => {
+    const result = await generateDueDateReminders(db, NOW);
+
+    const remindedActionIds = vi
+      .mocked(emitNotification)
+      .mock.calls.map(([arg]) => (arg.subject as { actionId: string }).actionId)
+      .sort();
+    expect(remindedActionIds).toEqual(["live", "loose"]);
+    expect(result.emitted).toBe(2);
+  });
+
+  it("does not look up sent reminders for a paused project's actions", async () => {
+    await generateDueDateReminders(db, NOW);
+
+    const where = db.notification.findMany.mock.calls[0]?.[0]?.where as {
+      userId: { in: string[] };
+    };
+    expect(where.userId.in.sort()).toEqual(["owner-live", "owner-loose"]);
   });
 });

@@ -48,9 +48,11 @@
     "test:e2e": "playwright test",
     "test:perf": "playwright test --config playwright.perf.config.ts",
     "dev:session": "tsx scripts/dev-session.ts",
+    "dev:agent-token": "tsx scripts/dev-agent-token.ts",
     "dev:seed-fixture": "tsx scripts/seed-dev-fixture.ts",
     "dev:seed-perf": "tsx scripts/seed-perf-fixture.ts",
     "docs:check": "tsx scripts/check-docs.ts",
+    "contracts:generate": "UPDATE_AGENT_CONTRACT=1 vitest run --project unit src/server/agentContract/__tests__/agentProcedureContract.test.ts",
     "tokens:check": "tsx scripts/check-design-tokens.ts",
     "scheduler:selfhost": "tsx scripts/selfhost/scheduler.ts",
     "start:selfhost": "tsx scripts/selfhost/start.ts",
@@ -128,7 +130,7 @@
     "dayjs": "^1.11.13",
     "diff": "^9.0.0",
     "dompurify": "^3.2.6",
-    "exponential-mcp": "^0.14.0",
+    "exponential-mcp": "^0.14.1",
     "exponential-sdk": "^1.33.1",
     "framer-motion": "^12.5.0",
     "fuse.js": "^7.1.0",
@@ -210,7 +212,8 @@
     "typescript": "^5.5.3",
     "vitest": "^4.0.16",
     "vitest-mock-extended": "^4.0.0",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "zod-to-json-schema": "^3.25.2"
   },
   "ct3aMetadata": {
     "initVersion": "7.38.1"

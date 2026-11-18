@@ -9,8 +9,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mockDeep, mockReset, type DeepMockProxy } from "vitest-mock-extended";
 import type { PrismaClient } from "@prisma/client";
 
-const { extractFromTranscript, extractFromNotes, recordActivityMock, emitNotificationMock, accessMock } = vi.hoisted(() => ({
+const { extractFromTranscript, extractFromNotes, reviewCuratedCandidates, recordActivityMock, emitNotificationMock, accessMock } = vi.hoisted(() => ({
   extractFromTranscript: vi.fn(),
+  reviewCuratedCandidates: vi.fn(),
   extractFromNotes: vi.fn(),
   recordActivityMock: vi.fn(async () => true),
   emitNotificationMock: vi.fn(async () => undefined),
@@ -25,7 +26,7 @@ vi.mock("~/server/services/DecisionExtractionService", async (importOriginal) =>
   const actual = await importOriginal<typeof import("~/server/services/DecisionExtractionService")>();
   return {
     ...actual,
-    DecisionExtractionService: { extractFromTranscript, extractFromNotes },
+    DecisionExtractionService: { extractFromTranscript, extractFromNotes, reviewCuratedCandidates },
   };
 });
 vi.mock("~/server/services/activity/recordActivity", () => ({ recordActivity: recordActivityMock }));
@@ -44,6 +45,7 @@ import {
   summaryDecisionText,
 } from "../generateDraftDecisions";
 import type { DecisionCandidate } from "~/server/services/DecisionExtractionService";
+import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
 
 const TRANSCRIPT = [
   "Dev Fixture: Morning. Blockers first - anything stuck?",
@@ -84,8 +86,32 @@ function candidate(overrides: Partial<DecisionCandidate> = {}): DecisionCandidat
   };
 }
 
+/**
+ * A meeting whose notes hold more supported decisions than the notes' share
+ * of the budget. Each statement has words of its own, so none reads as a
+ * rewording of another, and each is said in a transcript turn.
+ */
+const MANY_STATEMENTS = [
+  "Invoices migrate onto Stripe billing",
+  "Onboarding checklist replaces welcome video",
+  "Search indexing switches towards Typesense",
+  "Exports become asynchronous background jobs",
+  "Calendar sync drops Outlook support",
+  "Permissions adopt role based groups",
+  "Webhooks retry using exponential backoff",
+  "Dashboards default onto weekly ranges",
+  "Imports accept spreadsheet uploads only",
+  "Archiving happens after ninety days",
+  "Mentions notify through mobile push",
+  "Templates live inside shared library",
+  "Reminders respect quiet evening hours",
+  "Analytics pipeline moves onto ClickHouse",
+];
+const MANY_TRANSCRIPT = MANY_STATEMENTS.map((statement, i) => `${i % 2 === 0 ? "Dev Fixture" : "Pat Reviewer"}: ${statement}.`).join("\n");
+const manyNotesCandidates = () => MANY_STATEMENTS.map((statement) => candidate({ statement, evidence: [], origin: "notes" }));
+
 /** `extractFromTranscript` returns a run object, not a bare array. */
-function transcriptRun(candidates: unknown[], over: Record<string, number> = {}) {
+function transcriptRun(candidates: unknown[], over: Record<string, number | string[]> = {}) {
   return { candidates, chunksTotal: 1, chunksFailed: 0, chunksSkipped: 0, ...over };
 }
 
@@ -98,6 +124,9 @@ describe("generateDraftDecisions", () => {
     mockReset(db);
     extractFromTranscript.mockReset();
     extractFromNotes.mockReset();
+    // By default the review keeps everything, as it does when it cannot run.
+    reviewCuratedCandidates.mockReset();
+    reviewCuratedCandidates.mockImplementation(async (candidates: unknown[]) => ({ kept: candidates, dropped: [], reviewed: false }));
     recordActivityMock.mockClear();
     emitNotificationMock.mockClear();
     accessMock.canEdit = true;
@@ -289,6 +318,183 @@ describe("generateDraftDecisions", () => {
     // The notes draft carries deterministic evidence from the transcript.
     const notesEvidence = db.decision.create.mock.calls[0]![0].data.evidence as { turnIndex: number }[];
     expect(notesEvidence.length).toBeGreaterThan(0);
+  });
+
+  describe("re-extract (replaceDrafts)", () => {
+    const rows = (...states: Array<[string, string, string?]>) =>
+      states.map(([reviewState, statement, status], i) => ({ id: `d${i}`, reviewState, statement, status: status ?? "ACCEPTED" }));
+
+    it("replaces the unreviewed drafts with the new reading, in the transaction that writes it", async () => {
+      db.decision.findMany
+        .mockResolvedValueOnce(rows(["DRAFT", "An old draft"], ["DRAFT", "Another old draft"]) as never)
+        .mockResolvedValue([] as never);
+      db.decision.deleteMany.mockResolvedValue({ count: 2 } as never);
+      extractFromTranscript.mockResolvedValue(transcriptRun([candidate()]));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev", { replaceDrafts: true });
+
+      expect(db.decision.deleteMany).toHaveBeenCalledWith({
+        where: { transcriptionSessionId: "m1", workspaceId: "w1", reviewState: "DRAFT" },
+      });
+      // Old drafts go before the new ones are written, and inside the transaction.
+      expect(db.$transaction.mock.invocationCallOrder[0]!).toBeLessThan(db.decision.deleteMany.mock.invocationCallOrder[0]!);
+      expect(db.decision.deleteMany.mock.invocationCallOrder[0]!).toBeLessThan(db.decision.create.mock.invocationCallOrder[0]!);
+      expect(result).toMatchObject({ success: true, draftsReplaced: 2, draftsCreated: 1, draftCount: 1, alreadyDrafted: false });
+    });
+
+    it("removes the old drafts when the new reading finds nothing", async () => {
+      db.decision.findMany.mockResolvedValueOnce(rows(["DRAFT", "An old draft"]) as never).mockResolvedValue([] as never);
+      db.decision.deleteMany.mockResolvedValue({ count: 1 } as never);
+      extractFromTranscript.mockResolvedValue(transcriptRun([]));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev", { replaceDrafts: true });
+
+      expect(result).toMatchObject({ success: true, draftsReplaced: 1, draftsCreated: 0, draftCount: 0 });
+      expect(db.decision.create).not.toHaveBeenCalled();
+    });
+
+    it("keeps the old drafts when the new reading failed", async () => {
+      db.decision.findMany.mockResolvedValueOnce(rows(["DRAFT", "An old draft"]) as never).mockResolvedValue([] as never);
+      extractFromTranscript.mockResolvedValue(transcriptRun([], { chunksFailed: 3, chunksTotal: 3 }));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev", { replaceDrafts: true });
+
+      expect(db.decision.deleteMany).not.toHaveBeenCalled();
+      expect(result.draftCount).toBe(1);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("keeps the old drafts when one transcript section failed, even though another returned decisions", async () => {
+      db.decision.findMany.mockResolvedValueOnce(rows(["DRAFT", "An old draft"], ["DRAFT", "Another old draft"]) as never).mockResolvedValue([] as never);
+      extractFromTranscript.mockResolvedValue(transcriptRun([candidate()], { chunksFailed: 1, chunksTotal: 3 }));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev", { replaceDrafts: true });
+
+      expect(db.decision.deleteMany).not.toHaveBeenCalled();
+      expect(db.decision.create).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ success: true, transcriptIncomplete: true, alreadyDrafted: true, draftCount: 2, draftsCreated: 0 });
+      expect(result.warnings.join(" ")).toMatch(/existing drafts were kept/);
+    });
+
+    it("on a first extraction, still drafts what the sections that worked returned", async () => {
+      extractFromTranscript.mockResolvedValue(transcriptRun([candidate()], { chunksFailed: 1, chunksTotal: 3 }));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev");
+
+      expect(result).toMatchObject({ success: true, transcriptIncomplete: true, draftsCreated: 1 });
+    });
+
+    it("reads a meeting that already has confirmed decisions, and does not propose them or the rejected ones again", async () => {
+      db.decision.findMany
+        .mockResolvedValueOnce(rows(["CONFIRMED", "The API stays REST"], ["REJECTED", "Share the onboarding video"], ["CONFIRMED", "Which vendor hosts staging?", "OPEN"]) as never)
+        .mockResolvedValue([] as never);
+      extractFromTranscript.mockResolvedValue(transcriptRun([candidate()]));
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev", { replaceDrafts: true });
+
+      expect(result).toMatchObject({ alreadyPublished: false, draftsCreated: 1 });
+      const options = extractFromTranscript.mock.calls[0]![1] as { existingStatements: string[]; existingQuestions: string[] };
+      expect(options.existingStatements).toEqual(expect.arrayContaining(["The API stays REST", "Share the onboarding video"]));
+      expect(options.existingQuestions).toContain("Which vendor hosts staging?");
+      // Nothing reviewed is ever deleted: there were no drafts to replace.
+      expect(db.decision.deleteMany).not.toHaveBeenCalled();
+    });
+
+    it("without the flag, still leaves existing drafts and confirmed decisions alone", async () => {
+      db.decision.findMany.mockResolvedValueOnce(rows(["DRAFT", "An old draft"]) as never);
+
+      const result = await generateDraftDecisions(db, "m1", "u-dev");
+
+      expect(result).toMatchObject({ alreadyDrafted: true, draftCount: 1 });
+      expect(extractFromTranscript).not.toHaveBeenCalled();
+      expect(db.decision.deleteMany).not.toHaveBeenCalled();
+    });
+  });
+
+  it("drops the notes candidates the review rejects, before they become drafts", async () => {
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, notes: "## Decisions\n- Park prioritisation debates for the prioritisation ceremony" } as never);
+    const kept = candidate({ statement: "Park prioritisation debates for the prioritisation ceremony", evidence: [], origin: "notes" });
+    const task = candidate({ statement: "Pat reviews the accordion PR today", evidence: [], origin: "notes" });
+    extractFromNotes.mockResolvedValue([kept, task]);
+    reviewCuratedCandidates.mockImplementation(async (candidates: Array<{ statement: string }>) => ({
+      kept: candidates.filter((c) => c.statement === kept.statement),
+      dropped: candidates.filter((c) => c.statement === task.statement).map((c) => ({ candidate: c, reason: "task" })),
+      reviewed: true,
+    }));
+    extractFromTranscript.mockResolvedValue(transcriptRun([]));
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    // Reviewed with the transcript evidence already attached.
+    const reviewed = reviewCuratedCandidates.mock.calls[0]![0] as Array<{ evidence: unknown[] }>;
+    expect(reviewed.every((c) => c.evidence.length > 0)).toBe(true);
+    expect(db.decision.create.mock.calls.map((c) => c[0].data.statement)).toEqual([kept.statement]);
+    // A dropped task is not passed to the transcript pass as already captured.
+    expect(extractFromTranscript.mock.calls[0]![1].existingStatements).not.toContain(task.statement);
+  });
+
+  it("keeps a share of the budget for the transcript however much the notes hold", async () => {
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, transcription: MANY_TRANSCRIPT, notes: "## Decisions\n- many" } as never);
+    extractFromNotes.mockResolvedValue(manyNotesCandidates());
+    extractFromTranscript.mockResolvedValue(
+      transcriptRun([1, 2, 3, 4, 5].map((n) => candidate({ statement: ["Zebra", "Quokka", "Narwhal", "Ocelot", "Pangolin"][n - 1] + " mascot chosen" }))),
+    );
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    // Fourteen notes decisions were supported, yet the transcript still got its five slots.
+    expect((extractFromTranscript.mock.calls[0]![1] as { maxDecisions: number }).maxDecisions).toBe(5);
+    const statements = db.decision.create.mock.calls.map((c) => c[0].data.statement);
+    expect(statements).toHaveLength(15);
+    expect(statements.filter((statement) => statement.endsWith("mascot chosen"))).toHaveLength(5);
+  });
+
+  it("gives the transcript's unused slots back to the notes", async () => {
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, transcription: MANY_TRANSCRIPT, notes: "## Decisions\n- many" } as never);
+    extractFromNotes.mockResolvedValue(manyNotesCandidates());
+    // The transcript pass finds nothing, as it does without a model key.
+    extractFromTranscript.mockResolvedValue(transcriptRun([]));
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    // Nothing the notes held is thrown away to keep slots nobody used.
+    expect(db.decision.create).toHaveBeenCalledTimes(MANY_STATEMENTS.length);
+  });
+
+  it("checks a proposal the review turned into a question against the questions already captured", async () => {
+    db.decision.findMany
+      .mockResolvedValueOnce([
+        { id: "d-rej", reviewState: "REJECTED", status: "OPEN", statement: "Should prioritisation debates be parked for the ceremony?" },
+      ] as never)
+      .mockResolvedValue([] as never);
+    db.transcriptionSession.findUnique.mockResolvedValue({ ...MEETING, notes: "## Decisions\n- Parking prioritisation debates proposed" } as never);
+    const proposal = candidate({ statement: "Parking prioritisation debates proposed for the ceremony", evidence: [], origin: "notes" });
+    extractFromNotes.mockResolvedValue([proposal]);
+    reviewCuratedCandidates.mockImplementation(async (candidates: Array<Record<string, unknown>>) => ({
+      kept: candidates.map((c) => ({ ...c, statement: "Should prioritisation debates be parked for the ceremony?", isOpenQuestion: true })),
+      dropped: [],
+      reviewed: true,
+    }));
+    extractFromTranscript.mockResolvedValue(transcriptRun([]));
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    expect(db.decision.create).not.toHaveBeenCalled();
+  });
+
+  it("does not review notes when there is no transcript to check them against", async () => {
+    db.transcriptionSession.findUnique.mockResolvedValue({
+      ...MEETING,
+      transcription: null,
+      sentencesJson: null,
+      notes: "## Decisions\n- Park prioritisation debates",
+    } as never);
+    extractFromNotes.mockResolvedValue([candidate({ statement: "Park prioritisation debates", evidence: [], origin: "notes" })]);
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    expect(reviewCuratedCandidates).not.toHaveBeenCalled();
+    expect(db.decision.create).toHaveBeenCalledTimes(1);
   });
 
   it("excludes statements rejected from this meeting so a re-run does not propose them again", async () => {
@@ -504,6 +710,27 @@ describe("generateDraftDecisions", () => {
     extractFromTranscript.mockResolvedValue(transcriptRun([], { chunksFailed: 3, chunksTotal: 3 }));
     const result = await generateDraftDecisions(db, "m1", "u-dev");
     expect(result.errors.join(" ")).toMatch(/failed to extract/i);
+  });
+
+  it("carries why the sections failed into the report, classified", async () => {
+    vi.mocked(reportHandledErrorServer).mockClear();
+    extractFromTranscript.mockResolvedValue(
+      transcriptRun([], {
+        chunksFailed: 3,
+        chunksTotal: 3,
+        failureReasons: ["401 Incorrect API key provided: sk-proj-****"],
+      }),
+    );
+    await generateDraftDecisions(db, "m1", "u-dev");
+    expect(reportHandledErrorServer).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "All 3 transcript section(s) failed to extract" }),
+      expect.objectContaining({
+        context: expect.objectContaining({
+          failureReasons: "401 Incorrect API key provided: sk-proj-****",
+          providerErrorKind: "auth",
+        }),
+      }),
+    );
   });
 
   it("warns about partial transcript coverage without failing the run", async () => {

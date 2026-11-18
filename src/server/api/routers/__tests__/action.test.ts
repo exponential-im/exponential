@@ -1304,6 +1304,61 @@ describe("action router (mocked)", () => {
       expect(byId.get("u2")?.positions.map((p) => p.title)).toEqual(["Delivery lead"]);
       expect(byId.get(callerId)?.positions).toEqual([]);
     });
+
+    /** A project-less action, e.g. one extracted from a meeting with no project. */
+    function stubLooseAction(workspaceId: string | null) {
+      dbMock.action.findUnique.mockResolvedValue({
+        id: "a1",
+        createdById: callerId,
+        projectId: null,
+        workspaceId,
+        teamId: null,
+        assignees: [],
+        project: null,
+        team: null,
+      } as never);
+      dbMock.workspaceUser.findUnique.mockResolvedValue(
+        workspaceId
+          ? ({ userId: callerId, workspaceId, role: "member", joinedAt: new Date() } as never)
+          : null,
+      );
+      dbMock.teamUser.findFirst.mockResolvedValue(null);
+      dbMock.team.findMany.mockResolvedValue([]);
+      dbMock.workspaceUser.findMany.mockResolvedValue([
+        { user: { id: "u2", name: "Colleague", email: "u2@test.com", image: null } } as never,
+      ]);
+      dbMock.user.findUnique.mockResolvedValue(
+        { id: callerId, name: "Me", email: "caller-1@test.com", image: null } as never,
+      );
+    }
+
+    it("only takes teams from the action's own workspace", async () => {
+      // The caller's teams in other workspaces used to land in the picker
+      // (people from one workspace offered on another's action).
+      stubLooseAction("w1");
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      const result = await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      expect(dbMock.team.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(dbMock.workspaceUser.findMany.mock.calls[0]?.[0]).toMatchObject({
+        where: { workspaceId: "w1" },
+      });
+      expect(result.assignableUsers.map((u) => u.id).sort()).toEqual([callerId, "u2"]);
+    });
+
+    it("keeps every team as the fallback for an action with no workspace", async () => {
+      stubLooseAction(null);
+
+      const caller = createMockCaller({ userId: callerId, db: dbMock });
+      await caller.action.getAssignableUsers({ actionId: "a1" });
+
+      const teamWhere = (dbMock.team.findMany.mock.calls[0]?.[0] as { where: object }).where;
+      expect(teamWhere).not.toHaveProperty("workspaceId");
+      expect(dbMock.workspaceUser.findMany).not.toHaveBeenCalled();
+    });
   });
 
   // ────────────────────────────────────────────────────────────────────
@@ -3386,6 +3441,34 @@ describe("action router (mocked)", () => {
       expect(result.cohortCount).toBe(0);
       expect(result.cohorts).toEqual([]);
       expect(result.loose.map((a) => a.id).sort()).toEqual(["active-overdue", "loose-overdue"]);
+    });
+
+    describe("getByDateRange (home Tomorrow / This week / This month, CLI `actions range`)", () => {
+      const inDays = (n: number) => new Date(now.getFullYear(), now.getMonth(), now.getDate() + n, 9);
+      const thisWeek = { startDate: inDays(1), endDate: inDays(8) };
+
+      beforeEach(() => {
+        rows.push(
+          plateRow("loose-due-soon", null, { dueDate: inDays(3) }),
+          plateRow("active-due-soon", "ACTIVE", { dueDate: inDays(3) }),
+          ...["ON_HOLD", "COMPLETED", "CANCELLED"].map((status) =>
+            plateRow(`${status}-due-soon`, status, { dueDate: inDays(3) }),
+          ),
+        );
+      });
+
+      it("leaves a paused project's actions out of the range", async () => {
+        const result = await caller().action.getByDateRange(thisWeek);
+
+        expect(result.map((a) => a.id).sort()).toEqual(["active-due-soon", "loose-due-soon"]);
+      });
+
+      it("scoped to a workspace, still drops paused projects", async () => {
+        const result = await caller().action.getByDateRange({ ...thisWeek, workspaceId: "ws-1" });
+
+        // Workspace scoping goes through the project, so project-less actions drop out too.
+        expect(result.map((a) => a.id)).toEqual(["active-due-soon"]);
+      });
     });
 
     it("a project set back to Active puts its actions back on the plate", async () => {

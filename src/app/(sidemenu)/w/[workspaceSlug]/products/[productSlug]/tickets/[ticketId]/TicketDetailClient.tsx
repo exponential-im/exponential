@@ -53,6 +53,7 @@ import {
   PropertyRow,
   SearchableSelect,
 } from "~/app/_components/PropertiesSidebar";
+import { TicketTimeRow } from "~/app/_components/TimeLoggedSummary";
 import { generateLinearId, parseTicketUrlId } from "~/lib/fun-ids";
 import { PriorityIcon } from "~/app/_components/product/PriorityIcon";
 import { NotionSyncBadge } from "~/app/_components/product/NotionSyncBadge";
@@ -67,6 +68,7 @@ import { TicketStatusBadge } from "~/app/_components/product/TicketStatusBadge";
 import { TagBadge } from "~/app/_components/TagBadge";
 import { TicketBodyEditor } from "~/app/_components/product/TicketBodyEditor";
 import { CollapsibleSection } from "~/app/_components/product/CollapsibleSection";
+import { invalidateTicketLists } from "~/app/_components/product/invalidateTicketLists";
 import { ActivityTimeline } from "~/app/_components/shared/ActivityTimeline";
 import { PersonPicker } from "~/app/_components/shared/PersonPicker";
 import {
@@ -371,7 +373,7 @@ export function TicketDetailClient() {
   const deleteTicket = api.product.ticket.delete.useMutation({
     onSuccess: async () => {
       if (ticket?.product.id) {
-        await utils.product.ticket.listSummaries.invalidate({ productId: ticket.product.id });
+        await invalidateTicketLists(utils, { productId: ticket.product.id });
       }
       if (workspace) {
         router.push(`/w/${workspace.slug}/products/${productSlug}/tickets`);
@@ -650,6 +652,9 @@ export function TicketDetailClient() {
             styles={{ input: { height: 24, minHeight: 24 } }}
           />
         </PropertyRow>
+
+        {/* Time logged on this ticket's Actions, by anyone */}
+        <TicketTimeRow ticketId={ticketId} />
 
         <PropertyDivider />
 

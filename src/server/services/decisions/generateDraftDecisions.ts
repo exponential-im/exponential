@@ -19,6 +19,7 @@ import { recordActivity } from "~/server/services/activity/recordActivity";
 import {
   DEFAULT_MAX_DECISIONS,
   DecisionExtractionService,
+  TRANSCRIPT_DECISION_RESERVE,
   extractNotesDecisionItems,
   filterNearDuplicateCandidates,
   findSupportingTurns,
@@ -35,6 +36,7 @@ import {
 import { emitNotification } from "~/server/services/notifications/emit/emitNotification";
 import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
+import { classifyProviderError } from "~/server/services/ai/providerError";
 
 /**
  * Budget for the all-or-nothing draft write. Prisma's defaults (5 s / 2 s)
@@ -53,6 +55,13 @@ export interface GenerateDraftDecisionsOptions {
    * in either case, so the owner is notified).
    */
   trigger?: "manual" | "post_summary" | "auto_extract";
+  /**
+   * A re-extract: read the meeting again and put the new drafts in place of
+   * the unreviewed ones. Confirmed and rejected rows are never touched, and
+   * are told to the model as already captured. The old drafts go in the same
+   * transaction that writes the new ones, so a run that fails leaves them.
+   */
+  replaceDrafts?: boolean;
 }
 
 export interface DraftDecisionsResult {
@@ -64,6 +73,14 @@ export interface DraftDecisionsResult {
   /** Drafts now awaiting review (existing or just created). */
   draftCount: number;
   draftsCreated: number;
+  /** Unreviewed drafts a re-extract removed to make way for the new ones. */
+  draftsReplaced: number;
+  /**
+   * A transcript section could not be read on this run (a failed model call,
+   * or the whole pass throwing). What came back is from part of the meeting,
+   * so a re-extract does not let it replace drafts from a fuller reading.
+   */
+  transcriptIncomplete: boolean;
   /** Candidates dropped because no transcript turn supported them. */
   discardedWithoutEvidence: number;
   errors: string[];
@@ -166,6 +183,8 @@ export async function generateDraftDecisions(
     success: false,
     alreadyPublished: false,
     alreadyDrafted: false,
+    draftsReplaced: 0,
+    transcriptIncomplete: false,
     draftCount: 0,
     draftsCreated: 0,
     discardedWithoutEvidence: 0,
@@ -214,14 +233,17 @@ export async function generateDraftDecisions(
       select: { id: true, reviewState: true, statement: true, status: true },
     });
     const existingDraftCount = meetingRows.filter((r) => r.reviewState === "DRAFT").length;
-    if (existingDraftCount > 0) {
+    if (existingDraftCount > 0 && !options.replaceDrafts) {
       console.log(`[generateDraftDecisions] ${meeting.id} already has ${existingDraftCount} draft(s)`);
       result.success = true;
       result.alreadyDrafted = true;
       result.draftCount = existingDraftCount;
       return result;
     }
-    if (meetingRows.some((r) => r.reviewState === "CONFIRMED")) {
+    // A re-extract (`replaceDrafts`) reads the meeting again even when it
+    // already has confirmed decisions: those, and the rejected ones, are told
+    // to the model as already captured, so only what is new comes back.
+    if (!options.replaceDrafts && meetingRows.some((r) => r.reviewState === "CONFIRMED")) {
       console.log(`[generateDraftDecisions] ${meeting.id} already has confirmed decisions`);
       result.success = true;
       result.alreadyPublished = true;
@@ -268,7 +290,11 @@ export async function generateDraftDecisions(
     ]);
     const workspaceDecisions = [...openRows, ...recentConfirmed];
     // A draft someone rejected from this meeting is not proposed again.
-    const rejectedRows = meetingRows.filter((r) => r.reviewState === "REJECTED");
+    // On a re-extract the meeting's own confirmed rows count too: the
+    // workspace read above is bounded, and an older one could fall outside it.
+    const rejectedRows = meetingRows.filter(
+      (r) => r.reviewState === "REJECTED" || (options.replaceDrafts === true && r.reviewState === "CONFIRMED"),
+    );
     // Split by kind (an open question is a Decision in OPEN): a captured item
     // only suppresses candidates of its own kind, so a decision on a topic
     // cannot hide the open question about it, nor an open question the
@@ -332,6 +358,33 @@ export async function generateDraftDecisions(
       backWithEvidence(extractNotesDecisionItems(summaryText), "Summary");
     }
 
+    // Notes and summaries label loosely (most are model-written), and the
+    // passes above copy them near-verbatim. Hold each to the transcript
+    // pass's definition before it can become a draft: follow-up tasks,
+    // status updates and general intentions go, an unagreed proposal becomes
+    // the open question it is. Only with a transcript: without one there is
+    // nothing to check the notes against, and they are the only source.
+    let notesOverflow: DecisionCandidate[] = [];
+    if (turns.length > 0 && notesCandidates.length > 0) {
+      const review = await DecisionExtractionService.reviewCuratedCandidates(notesCandidates);
+      for (const { candidate, reason } of review.dropped) {
+        console.log(`[generateDraftDecisions] Notes candidate dropped on review (${reason}): "${candidate.statement}"`);
+      }
+      // A proposal the review reworded as a question was only ever checked
+      // against the log as a decision: check it again as what it now is, so
+      // it cannot restate a question already captured or already rejected.
+      const kept = filterNearDuplicateCandidates(review.kept, {
+        decisions: existingStatements,
+        questions: existingQuestions,
+      });
+      // The transcript is always read: it keeps a share of the budget. What
+      // the notes hold beyond their share waits, and takes any slot the
+      // transcript pass leaves unused (it found little, or could not run).
+      const curatedShare = DEFAULT_MAX_DECISIONS - TRANSCRIPT_DECISION_RESERVE;
+      notesCandidates.splice(0, notesCandidates.length, ...kept.slice(0, curatedShare));
+      notesOverflow = kept.slice(curatedShare);
+    }
+
     // Transcript second: told what notes and the log already hold.
     let transcriptCandidates: DecisionCandidate[] = [];
     // One budget across both passes: the notes pass and the transcript pass
@@ -355,6 +408,7 @@ export async function generateDraftDecisions(
         if (run.chunksSkipped === 0 && run.chunksFailed < run.chunksTotal) {
           result.actionItems = run.actionItems;
         }
+        if (run.chunksFailed > 0) result.transcriptIncomplete = true;
         if (run.chunksSkipped > 0) {
           result.warnings.push(
             `The transcript was longer than one extraction pass covers, so the last ${run.chunksSkipped} of its ${run.chunksTotal} sections were not read. Decisions made only in those sections will be missing.`,
@@ -365,12 +419,28 @@ export async function generateDraftDecisions(
         if (run.chunksFailed > 0 && run.candidates.length === 0) {
           const message = `All ${run.chunksFailed} transcript section(s) failed to extract`;
           result.errors.push(message);
+          // The reasons are what make this actionable: a provider auth or
+          // billing failure is an ops fix (rotate the key, top up), a timeout
+          // or parse failure is ours. Context, not the message, so recurrences
+          // still dedupe onto one ticket.
+          const reasons = run.failureReasons ?? [];
+          const firstReason = reasons[0];
           reportHandledErrorServer(new Error(message), {
             area: "generateDraftDecisions: transcript decision extraction failed",
-            context: { transcriptionSessionId: meeting.id, chunksFailed: String(run.chunksFailed) },
+            context: {
+              transcriptionSessionId: meeting.id,
+              chunksFailed: String(run.chunksFailed),
+              ...(firstReason
+                ? {
+                    failureReasons: reasons.join(" | "),
+                    providerErrorKind: classifyProviderError(firstReason),
+                  }
+                : {}),
+            },
           });
         }
       } catch (error) {
+        result.transcriptIncomplete = true;
         console.error("[generateDraftDecisions] transcript extraction failed, continuing with notes:", error);
         result.errors.push(error instanceof Error ? error.message : "Transcript extraction failed");
         reportHandledErrorServer(error, {
@@ -383,7 +453,12 @@ export async function generateDraftDecisions(
     // Notes win on exact restatement; the extractor already dropped the rest.
     const seen = new Set<string>();
     const candidates: DecisionCandidate[] = [];
-    for (const candidate of [...notesCandidates, ...transcriptCandidates]) {
+    const spareSlots = Math.max(0, DEFAULT_MAX_DECISIONS - notesCandidates.length - transcriptCandidates.length);
+    const notesTopUp = filterNearDuplicateCandidates(notesOverflow, {
+      decisions: transcriptCandidates.filter((c) => !c.isOpenQuestion).map((c) => c.statement),
+      questions: transcriptCandidates.filter((c) => c.isOpenQuestion).map((c) => c.statement),
+    }).slice(0, spareSlots);
+    for (const candidate of [...notesCandidates, ...notesTopUp, ...transcriptCandidates]) {
       const normalized = normalizeDecisionStatement(candidate.statement);
       if (!normalized) continue;
       const key = `${candidate.isOpenQuestion ? "q" : "d"}:${normalized}`;
@@ -396,9 +471,29 @@ export async function generateDraftDecisions(
     // "this meeting is done", so a run killed part-way through a per-candidate
     // loop left a partial set that every retry reported as complete — with no
     // way back short of rejecting them all.
-    if (candidates.length > 0) {
+    const replacingDrafts = options.replaceDrafts === true && existingDraftCount > 0;
+    if (replacingDrafts && (result.errors.length > 0 || result.transcriptIncomplete)) {
+      // Part of the reading failed, even if the rest returned something. The
+      // drafts already there came from a reading that did not, so they stay
+      // rather than be replaced by less.
+      result.warnings.push(
+        "Part of the transcript could not be read this time, so the existing drafts were kept. Try again in a moment.",
+      );
+      result.success = result.errors.length === 0;
+      result.alreadyDrafted = true;
+      result.draftCount = existingDraftCount;
+      return result;
+    }
+    if (candidates.length > 0 || replacingDrafts) {
       await db.$transaction(
         async (tx) => {
+          if (replacingDrafts) {
+            const { count } = await tx.decision.deleteMany({
+              where: { transcriptionSessionId: meeting.id, workspaceId, reviewState: "DRAFT" },
+            });
+            result.draftsReplaced = count;
+          }
+          if (candidates.length === 0) return;
           // One statement for the whole block of labels, so the transaction is
           // N round trips rather than 2N (see reserveDecisionNumbers).
           const numbers = await reserveDecisionNumbers(tx, workspaceId, candidates.length);

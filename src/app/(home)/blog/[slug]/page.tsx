@@ -10,6 +10,10 @@ interface BlogPostPageProps {
   params: Promise<{ slug: string }>;
 }
 
+// Hourly, so a scheduled post (lib/blog/schedule.ts) appears on its date
+// without waiting for a deploy.
+export const revalidate = 3600;
+
 export async function generateStaticParams() {
   const slugs = await getAllBlogSlugs();
   return slugs.map((slug) => ({ slug }));

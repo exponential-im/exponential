@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { PrismaClient } from "@prisma/client";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
+import { okrPeriodSchema, periodChangeData } from "~/plugins/okr/server/keyResultPeriod";
 import { TRPCError } from "@trpc/server";
 import { getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
 import {
@@ -19,6 +20,7 @@ import {
   mergeObjectiveActivity,
   type ObjectiveActivityItem,
 } from "../objectiveActivity";
+import { runAfterResponseReported } from "~/server/utils/runAfterResponse";
 
 // "Done" for the delivery signal = the Delivery metrics page's completion
 // definition (ADR-0047, SprintAnalyticsService): DONE or DEPLOYED —
@@ -101,6 +103,8 @@ const updateKeyResultInput = z.object({
   confidence: z.number().min(0).max(100).optional(),
   driUserId: z.string().optional(),
   goalId: z.number().optional(),
+  // Moving a key result to another quarter, half or year.
+  period: okrPeriodSchema.optional(),
 });
 
 const checkInInput = z.object({
@@ -642,6 +646,7 @@ export const keyResultRouter = createTRPCRouter({
         where: { id },
         data: {
           ...updateData,
+          ...periodChangeData(existing!.period, updateData.period),
           ...(movedWorkspaceId !== undefined
             ? { workspaceId: movedWorkspaceId }
             : {}),
@@ -708,9 +713,9 @@ export const keyResultRouter = createTRPCRouter({
         }),
       ]);
 
-      // Recompute parent goal health after check-in (fire-and-forget)
-      void computeGoalHealth({ ctx, goalId: keyResult.goalId }).catch(
-        (err: unknown) => { console.error("[goal-health] recompute after KR check-in:", err); },
+      // Recompute parent goal health after check-in, after the response
+      runAfterResponseReported("keyResult.checkIn.goalHealth", () =>
+        computeGoalHealth({ ctx, goalId: keyResult.goalId }),
       );
 
       // Surface the check-in in the workspace activity feed. Only the human

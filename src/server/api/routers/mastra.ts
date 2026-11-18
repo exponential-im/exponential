@@ -36,6 +36,7 @@ import crypto from "crypto";
 import { testFirefliesConnection } from "./integration";
 import { pageRouter } from "./page";
 import { ticketRouter } from "~/plugins/product/server/routers/ticket";
+import { okrPeriodSchema, periodChangeData } from "~/plugins/okr/server/keyResultPeriod";
 import { applyTicketLabels } from "~/server/services/tags/ticketLabels";
 import { GoogleCalendarService } from "~/server/services/GoogleCalendarService";
 import { decryptBufferSafe, encryptString, encryptToBase64 } from "~/server/utils/encryption";
@@ -56,11 +57,14 @@ import {
   assertCanEditKeyResult,
 } from "~/server/services/access/resolvers/goalResolver";
 import { buildMeetingTranscriptionsWhere } from "~/server/services/meetings/meetingTranscriptionsWhere";
+import { buildTranscriptionAccessWhere } from "~/server/services/access";
+import type { Prisma } from "@prisma/client";
 import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import { PRODUCT_NAME } from "~/lib/brand";
 import { filterAgentInstructions } from "~/server/services/agent-routing/agentInstructionFilter";
 import { loadProductWithAccess, assertWorkspaceAccess } from "~/plugins/product/server/routers/product";
 import { createTicketWithNumber } from "~/plugins/product/server/services/createTicket";
+import { notifyTicketAssigned } from "~/plugins/product/server/services/notifyTicketAssigned";
 import { matchCycle, wouldCreateCycle } from "~/plugins/product/server/services/ticketDependencies";
 import { COMPLETED_TICKET_STATUSES } from "~/lib/ticket-statuses";
 import { generateFunId } from "~/lib/fun-ids";
@@ -1663,6 +1667,10 @@ export const mastraRouter = createTRPCRouter({
       meetingType: z.string().optional(),
       limit: z.number().optional().default(5),
       includeTranscript: z.boolean().optional().default(true),
+      // One specific Meeting, e.g. the one open on /recording/<id>. Without
+      // it the agent can only take the latest few and hope the right one is
+      // among them.
+      transcriptionId: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1713,6 +1721,15 @@ export const mastraRouter = createTRPCRouter({
           summary: true,
         },
       });
+
+      // A Meeting asked for by id that isn't there is an answer the agent
+      // must hear ("not found"), not an empty list it reads as "no meetings".
+      if (input.transcriptionId && transcriptions.length === 0) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Meeting not found or access denied',
+        });
+      }
 
       // Filter by participants if specified
       if (input.participants && input.participants.length > 0) {
@@ -1765,6 +1782,8 @@ export const mastraRouter = createTRPCRouter({
       }).optional(),
       topK: z.number().optional().default(5),
       sourceTypes: z.array(z.enum(['transcription', 'resource', 'document', 'page'])).optional(),
+      // Search inside one Meeting (the one open on /recording/<id>).
+      transcriptionId: z.string().optional(),
     }))
     .query(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -1789,76 +1808,35 @@ export const mastraRouter = createTRPCRouter({
         });
       }
 
-      try {
-        // Use KnowledgeService for vector search.
-        // We pass userId for further-narrowing — this matches the previous
-        // behaviour for this user-facing knowledge-base search where users only
-        // expect to see their own indexed content. The cross-user agent path
-        // (knowledgeChunkRouter.semanticSearch) deliberately omits userId.
-        const knowledgeService = getKnowledgeService(ctx.db);
-
-        const searchResults = await knowledgeService.search(input.query, {
-          workspaceId: input.workspaceId,
-          userId,
-          // Own chunks are own pages/meetings/resources today; keep access
-          // explicit anyway.
-          pageViewerId: userId,
-          transcriptionViewerId: userId,
-          resourceViewerId: userId,
-          projectId: input.projectId,
-          sourceTypes: input.sourceTypes,
-          limit: input.topK,
-        });
-
-        // Transform results to expected format
-        const results = searchResults.map(result => ({
-          content: result.content,
-          sourceType: result.sourceType,
-          sourceId: result.sourceId,
-          sourceTitle: result.sourceTitle ?? "",
-          meetingTitle: result.sourceType === 'transcription' ? result.sourceTitle ?? "" : undefined,
-          meetingDate: result.sourceMeta?.meetingDate?.toISOString(),
-          url: result.sourceMeta?.url,
-          contentType: result.sourceMeta?.contentType,
-          relevanceScore: result.similarity,
-          contextType: determineContextType(result.content),
-          chunkIndex: result.chunkIndex,
-        }));
-
-        // SECURITY: Also return provenance-wrapped format for safe AI context injection
-        const { KnowledgeService } = await import("~/server/services/KnowledgeService");
-        const aiContext = KnowledgeService.formatForAIContext(searchResults);
-
-        return { results, aiContext };
-      } catch (error) {
-        console.error('Error in queryMeetingContext:', error);
-
-        // Fallback to keyword search if vector search fails (e.g., no embeddings yet)
-        console.log('[queryMeetingContext] Falling back to keyword search');
-
-        const whereClause: Record<string, unknown> = {
-          userId: userId,
+      // Keyword search over transcript text. Used when vector search throws
+      // (no embeddings provider, a failed query) and when a search inside one
+      // Meeting finds no chunks: that Meeting may simply not be embedded, or
+      // have no workspace, and "no excerpts" would read as "never said".
+      const keywordSearch = async () => {
+        // Meetings the caller can VIEW, the same rule as the vector path and
+        // getMeetingTranscriptions. Scoping this to `userId` (the owner) hid
+        // every Meeting imported by an agent or a teammate, which is exactly
+        // the Meeting someone has open when they ask about it.
+        //
+        // Workspace: this workspace, plus sessions with none (Personal, or not
+        // yet backfilled), whose chunks the workspace-scoped vector search
+        // cannot return at all.
+        const whereClause: Prisma.TranscriptionSessionWhereInput = {
+          AND: [
+            buildTranscriptionAccessWhere(userId),
+            { OR: [{ workspaceId: input.workspaceId }, { workspaceId: null }] },
+            ...(input.transcriptionId ? [{ id: input.transcriptionId }] : []),
+            ...(input.projectId ? [{ projectId: input.projectId }] : []),
+            ...(input.dateRange
+              ? [{
+                  createdAt: {
+                    gte: new Date(input.dateRange.start),
+                    lte: new Date(input.dateRange.end),
+                  },
+                }]
+              : []),
+          ],
         };
-
-        if (input.projectId) {
-          whereClause.projectId = input.projectId;
-        }
-
-        // Mirror the vector-search nullable-tolerant filter: include sessions in this
-        // workspace as well as legacy sessions where workspaceId hasn't been backfilled.
-        if (input.workspaceId) {
-          whereClause.OR = [
-            { workspaceId: input.workspaceId },
-            { workspaceId: null },
-          ];
-        }
-
-        if (input.dateRange) {
-          whereClause.createdAt = {
-            gte: new Date(input.dateRange.start),
-            lte: new Date(input.dateRange.end),
-          };
-        }
 
         const transcriptions = await ctx.db.transcriptionSession.findMany({
           where: whereClause,
@@ -1870,12 +1848,14 @@ export const mastraRouter = createTRPCRouter({
           .map(t => {
             const transcript = (t.transcription ?? "").toLowerCase();
             const query = input.query.toLowerCase();
-            const queryWords = query.split(' ');
+            // Plain substring counts: the words are the person's own text, so
+            // building a RegExp from them threw on "c++" or "(draft".
+            const queryWords = query.split(/\s+/).filter(Boolean);
+            if (queryWords.length === 0) return null;
 
             let relevanceScore = 0;
             queryWords.forEach(word => {
-              const matches = (transcript.match(new RegExp(word, 'g')) ?? []).length;
-              relevanceScore += matches;
+              relevanceScore += transcript.split(word).length - 1;
             });
 
             if (relevanceScore === 0) return null;
@@ -1901,6 +1881,62 @@ export const mastraRouter = createTRPCRouter({
           .slice(0, input.topK);
 
         return { results };
+      };
+
+      try {
+        // Use KnowledgeService for vector search.
+        // We pass userId for further-narrowing — this user-facing
+        // knowledge-base search shows people their own indexed pages,
+        // resources and documents. The cross-user agent path
+        // (knowledgeChunkRouter.semanticSearch) deliberately omits userId.
+        //
+        // Meetings are the exception: a Meeting imported by an agent or a
+        // teammate carries the importer's userId on its chunks, so "own chunks"
+        // hid Meetings the caller can open on the Meetings page. Their chunks
+        // are governed by `transcriptionViewerId` alone.
+        const knowledgeService = getKnowledgeService(ctx.db);
+
+        const searchResults = await knowledgeService.search(input.query, {
+          workspaceId: input.workspaceId,
+          userId,
+          userIdExemptSourceTypes: ['transcription'],
+          pageViewerId: userId,
+          transcriptionViewerId: userId,
+          resourceViewerId: userId,
+          projectId: input.projectId,
+          sourceTypes: input.transcriptionId ? ['transcription'] : input.sourceTypes,
+          sourceId: input.transcriptionId,
+          limit: input.topK,
+        });
+
+        // Transform results to expected format
+        const results = searchResults.map(result => ({
+          content: result.content,
+          sourceType: result.sourceType,
+          sourceId: result.sourceId,
+          sourceTitle: result.sourceTitle ?? "",
+          meetingTitle: result.sourceType === 'transcription' ? result.sourceTitle ?? "" : undefined,
+          meetingDate: result.sourceMeta?.meetingDate?.toISOString(),
+          url: result.sourceMeta?.url,
+          contentType: result.sourceMeta?.contentType,
+          relevanceScore: result.similarity,
+          contextType: determineContextType(result.content),
+          chunkIndex: result.chunkIndex,
+        }));
+
+        // SECURITY: Also return provenance-wrapped format for safe AI context injection
+        const { KnowledgeService } = await import("~/server/services/KnowledgeService");
+        const aiContext = KnowledgeService.formatForAIContext(searchResults);
+
+        if (input.transcriptionId && results.length === 0) {
+          return await keywordSearch();
+        }
+
+        return { results, aiContext };
+      } catch (error) {
+        console.error('Error in queryMeetingContext:', error);
+        console.log('[queryMeetingContext] Falling back to keyword search');
+        return keywordSearch();
       }
     }),
 
@@ -2580,8 +2616,26 @@ export const mastraRouter = createTRPCRouter({
         displayName: z.string().optional(),
       })).optional(),
       provider: z.enum(['google', 'microsoft']).default('google'),
+      // A repeating event: iCalendar RRULE lines. One event that repeats, not
+      // one event per day, so the person can move or stop the whole series.
+      recurrence: z.array(z.string().regex(/^RRULE:[A-Z0-9=;,:+-]+$/)).max(2).optional(),
     }))
     .mutation(async ({ ctx, input }) => {
+      // Dropping the rule would create a single event and report a series.
+      if (input.recurrence?.length && input.provider !== 'google') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Repeating events are only supported for Google Calendar for now',
+        });
+      }
+      // A repeating event with no zone is expanded in UTC and drifts by an
+      // hour at every daylight-saving change.
+      if (input.recurrence?.length && !input.start.timeZone) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'A repeating event needs start.timeZone',
+        });
+      }
       const service = getCalendarService(input.provider);
 
       const createdEvent = await service.createEvent(
@@ -2593,6 +2647,7 @@ export const mastraRouter = createTRPCRouter({
           end: input.end,
           location: input.location,
           attendees: input.attendees,
+          ...(input.recurrence?.length ? { recurrence: input.recurrence } : {}),
         }
       );
 
@@ -3599,6 +3654,8 @@ export const mastraRouter = createTRPCRouter({
       unitLabel: z.string().optional(),
       status: z.enum(["not-started", "on-track", "at-risk", "off-track", "achieved"]).optional(),
       confidence: z.number().min(0).max(100).optional(),
+      // Move the key result to another quarter, half or year.
+      period: okrPeriodSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -3618,7 +3675,10 @@ export const mastraRouter = createTRPCRouter({
 
       const keyResult = await ctx.db.keyResult.update({
         where: { id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...periodChangeData(existing.period, updateData.period),
+        },
         include: {
           goal: { select: { id: true, title: true } },
         },
@@ -3632,6 +3692,7 @@ export const mastraRouter = createTRPCRouter({
           currentValue: keyResult.currentValue,
           status: keyResult.status,
           confidence: keyResult.confidence,
+          period: keyResult.period,
           goal: keyResult.goal,
         },
       };
@@ -4527,6 +4588,13 @@ export const mastraRouter = createTRPCRouter({
 
       console.log(`✅ [tRPC createTicket] CREATED: id=${ticket.id}, number=${ticket.number}, shortId=${ticket.shortId ?? 'none'}`);
 
+      await notifyTicketAssigned(ctx.db, {
+        ticketId: ticket.id,
+        assigneeId: input.assigneeId,
+        previousAssigneeId: null,
+        actorUserId: userId,
+      });
+
       const { labels, warnings } = input.labels?.length
         ? await applyTicketLabels(ctx.db, {
             userId,
@@ -5119,10 +5187,11 @@ export const mastraRouter = createTRPCRouter({
     }),
 
   // Create dependency edges between tickets in one product, by ticket number
-  // ("#12 depends on #7"). Enforces the same rules as the plugin's
-  // ticket.addDependency — same product, no self-deps, no cycles (shared
-  // wouldCreateCycle) — and reports per-edge outcomes so an agent can relay
-  // exactly what was linked and what was rejected.
+  // ("#12 depends on #7"). Numbers are per-product, so this tool only links
+  // within one product; cross-product edges (ADR-0002) go through the plugin's
+  // ticket.addDependency by id. Shares its rules otherwise — no self-deps, no
+  // cycles (shared wouldCreateCycle) — and reports per-edge outcomes so an
+  // agent can relay exactly what was linked and what was rejected.
   addTicketDependencies: protectedProcedure
     .input(
       z.object({

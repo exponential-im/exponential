@@ -320,7 +320,7 @@ A stretch of one person's time spent on an **Action**, with a start and an end. 
 _Avoid_: Timesheet row, log, timer (that is the live way of making one).
 
 **Timer**:
-The live way to make a **Time entry**: start now, stop later, one running per person. Starting a new one silently stops the old one.
+The live way to make a **Time entry**: start now, stop later, one running per person. Starting a new one silently stops the old one. Its target is **one pick, a Ticket or a Project**. Feature, Epic and Product come from the Ticket, the **Cycle** is whichever one the entry's start falls in, and Goals are shown, never chosen (decision 2026-11-17). Time on a Ticket goes on the person's one timer Action for it, reused on every start.
 _Avoid_: Stopwatch, clock.
 
 **Manual time**:
@@ -364,6 +364,22 @@ _Avoid_: Orphan project (only in conversation/code, never UI copy). Also avoid u
 **Ticket**:
 A unit of engineering work inside a Product, stored as `Ticket`. Has its own status enum (`BACKLOG`, `NEEDS_REFINEMENT`, … `DEPLOYED`, `ARCHIVED`), type (`BUG`, `FEATURE`, `CHORE`, …), optional `assignee`, optional `cycle`. Strictly **distinct from Action** — Tickets are product-management artefacts; Actions are meeting-extracted tasks. A Ticket may have many child Actions (`Ticket.actions`), but they are not the same entity. User-facing word is always "ticket" inside the product surface.
 _Avoid_: Task, story, item, issue.
+
+**Cycle**:
+A fixed timebox of delivery for one **Product** — usually two weeks — that **Tickets** are committed to. It carries a **cycle goal** (what the cycle aims for) and **achievements** (what it delivered). Stored as a `List` row with `listType: SPRINT`.
+_Avoid_: Sprint (in UI copy), iteration, List (the legacy table name).
+
+**Cycle brief**:
+One public, plain-language page per **Cycle** for people outside the team: a product owner, users, funders. It has two halves written at different times: the **plan**, written at cycle planning and signed off by the product owner, and the **release notes**, written when the cycle closes. The closed brief is the cycle's release notes; there is no second artifact.
+_Avoid_: Sprint report, cycle summary, changelog (the change log is the raw, PR-level list), Workspace update (workspace-wide, weekly, backward-looking only).
+
+**Product owner**:
+The one or more people accountable for what a **Product** aims for, set on the Product. They sign off its **Cycle briefs**: the plan's first publish, any later change to its **Cycle outcomes**, and the release notes. Always people, never Assistants or External agents.
+_Avoid_: Position (routes work, can be held by agents), reviewer (the **Workspace update** approver list), product manager, PO (in UI copy).
+
+**Cycle outcome**:
+One aim in a **Cycle brief**'s plan, written by hand in plain language ("The Sudan team uses CLEAR every week"). A person sets its status (on track, at risk, done) at the weekly check-in; it is never derived from tickets, because closing every ticket does not mean the aim was met. It always carries a plain-language **why** for the reader, and may link to **Features** and to at most one **Objective** for the team. When the Cycle closes, a person gives it a final result: Achieved, Partly or Missed. It never rolls into the next brief by itself; the **Product owner** carries it over or drops it.
+_Avoid_: Objective (a strategic, multi-cycle outcome), goal, sprint goal, deliverable.
 
 **Sentry bug**:
 An error captured by Sentry, filed into Exponential as a **Ticket** with `type: BUG` in the **Exponential** Product, landing in `BACKLOG` for human triage. Created by a signed inbound Sentry webhook (`/api/webhooks/sentry`) — **one Ticket per Sentry _issue_**, deduped on the Sentry issue id stored in `Ticket.links`, authored by the **Errol** system user. An *engineering* Ticket — strictly distinct from a **Problem** (the product-strategy artefact the glossary keeps bug-free). The write-in sibling of **Ticket promotion on merge** ([ADR-0021](docs/adr/0021-pr-merge-promotes-ticket-via-app-webhook.md)): both are external webhooks that write back to a `Ticket`. See [ADR-0027](docs/adr/0027-sentry-errors-as-bug-tickets.md).

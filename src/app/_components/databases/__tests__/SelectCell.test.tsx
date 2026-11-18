@@ -29,6 +29,17 @@ describe("SelectCell", () => {
     expect(screen.getByRole("button", { name: "Status" }).textContent).toBe("—");
   });
 
+  it("draws a single-select column named Status as a status pill with a dot; other selects without", () => {
+    const { container, unmount } = render(<SelectCell def={status} value="o_tr" editable onCommit={vi.fn()} />);
+    const pill = container.querySelector("[data-variant='status']");
+    expect(pill?.textContent).toBe("Tracked");
+    expect(pill?.firstElementChild?.getAttribute("aria-hidden")).toBe("true");
+    unmount();
+    const area: PropertyDef = { ...status, id: "parea", name: "Area" };
+    const other = render(<SelectCell def={area} value="o_tr" editable onCommit={vi.fn()} />);
+    expect(other.container.querySelector("[data-variant='status']")).toBeNull();
+  });
+
   it("opens on click and commits the picked option id", async () => {
     const onCommit = vi.fn();
     render(<SelectCell def={status} value="o_tr" editable onCommit={onCommit} />);

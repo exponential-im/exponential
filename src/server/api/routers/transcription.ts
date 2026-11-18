@@ -1,3 +1,4 @@
+import { ACTION_DISCARD_REASON_CODES } from "~/lib/draft-reject-reasons";
 import { z } from "zod";
 import { AiNotConfiguredError, requireAi } from "~/server/services/ai/requireAi";
 import type { Prisma, PrismaClient } from "@prisma/client";
@@ -64,6 +65,7 @@ import { emitNotification } from "~/server/services/notifications/emit/emitNotif
 import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
 import { randomUUID } from "crypto";
 import { personSchema, resolvePerson, type Person } from "~/server/services/meetings/resolvePerson";
+import { emitAfterResponse } from "~/server/services/notifications/emit/emitAfterResponse";
 
 // Keep in-memory store for development/debugging
 const transcriptionStore: Record<string, string[]> = {};
@@ -660,6 +662,12 @@ export const transcriptionRouter = createTRPCRouter({
         featureLinks: isWorkspaceMember ? session.featureLinks : [],
         canLinkFeatures,
         canEdit,
+        /**
+         * Whether the viewer belongs to the Meeting's workspace. A Participant
+         * from outside can open the Meeting but not chat in that workspace's
+         * scope, so the page only hands the chat a workspace it will accept.
+         */
+        isWorkspaceMember,
         /** Only the owner may move a workspace meeting to Personal. */
         isOwner: session.userId === ctx.session.user.id,
         hasTranscript: Boolean(transcription),
@@ -1137,12 +1145,15 @@ export const transcriptionRouter = createTRPCRouter({
         .map((p) => p.userId)
         .filter((id): id is string => !!id);
       if (session.workspaceId && memberUserIds.length > 0) {
-        void emitNotification({
-          db: ctx.db,
-          category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
-          actorUserId: ctx.session.user.id,
-          subject: { sessionId: session.id, participantUserIds: memberUserIds },
-        });
+        emitAfterResponse("transcription.participantAdded.notification", () =>
+          emitNotification({
+            db: ctx.db,
+            category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
+            actorUserId: ctx.session.user.id,
+            subject: { sessionId: session.id, participantUserIds: memberUserIds },
+          }),
+          { sessionId: session.id },
+        );
       }
 
       return session;
@@ -1208,18 +1219,22 @@ export const transcriptionRouter = createTRPCRouter({
 
       // Notify the tagged workspace member (ADR-0045 pipeline). Only the member
       // (userId) path is notifiable; CRM-contact / free-text adds resolve to a
-      // contact with no User account. Fire-and-forget; the actor is dropped
+      // contact with no User account. Runs after the response; the actor is dropped
       // downstream (self-adds don't self-notify).
-      if (input.userId) {
-        void emitNotification({
-          db: ctx.db,
-          category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
-          actorUserId: ctx.session.user.id,
-          subject: {
-            sessionId: session.id,
-            participantUserIds: [input.userId],
-          },
-        });
+      const taggedUserId = input.userId;
+      if (taggedUserId) {
+        emitAfterResponse("transcription.participantAdded.notification", () =>
+          emitNotification({
+            db: ctx.db,
+            category: NOTIFICATION_CATEGORIES.MEETING_PARTICIPANT_ADDED,
+            actorUserId: ctx.session.user.id,
+            subject: {
+              sessionId: session.id,
+              participantUserIds: [taggedUserId],
+            },
+          }),
+          { sessionId: session.id },
+        );
       }
 
       return participant;
@@ -2080,11 +2095,29 @@ export const transcriptionRouter = createTRPCRouter({
    * this throws only when neither produced anything usable.
    */
   extractOutputs: protectedProcedure
-    .input(z.object({ transcriptionId: z.string() }))
+    .input(
+      z.object({
+        transcriptionId: z.string(),
+        /** Re-extract: replace the meeting's unreviewed drafts with a new reading. */
+        replaceDrafts: z.boolean().optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }) => {
+      if (input.replaceDrafts) {
+        // A re-extract deletes drafts, including ones another editor's run
+        // made, so it takes the same bar as discarding them by hand.
+        const transcription = await ctx.db.transcriptionSession.findUnique({
+          where: { id: input.transcriptionId },
+        });
+        if (!transcription) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Transcription not found" });
+        }
+        await ensureTranscriptionAccess(ctx.db, ctx.session.user.id, transcription, "edit");
+      }
       const result = await TranscriptionProcessingService.extractMeetingOutputs(
         input.transcriptionId,
         ctx.session.user.id,
+        { replaceDrafts: input.replaceDrafts },
       );
       if (!result.actions.success && !result.decisions.success) {
         const errors = [...result.actions.errors, ...result.decisions.errors];
@@ -2232,6 +2265,8 @@ export const transcriptionRouter = createTRPCRouter({
       z.object({
         transcriptionId: z.string(),
         actionIds: z.array(z.string()).min(1).optional(),
+        /** Why, when the reviewer says (optional). Applies to every draft in the call. */
+        reason: z.enum(ACTION_DISCARD_REASON_CODES).optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -2253,13 +2288,31 @@ export const transcriptionRouter = createTRPCRouter({
         "edit",
       );
 
-      const result = await ctx.db.action.deleteMany({
-        where: {
-          ...(input.actionIds ? { id: { in: input.actionIds } } : {}),
-          transcriptionSessionId: input.transcriptionId,
-          status: "DRAFT",
-          createdById: ctx.session.user.id,
-        },
+      const draftsWhere = {
+        ...(input.actionIds ? { id: { in: input.actionIds } } : {}),
+        transcriptionSessionId: input.transcriptionId,
+        status: "DRAFT",
+        createdById: ctx.session.user.id,
+      };
+      // The draft rows go, but what was discarded is kept: it is not drafted
+      // again from this meeting, and it is the extractor's feedback. Logged
+      // and deleted together, so the log never names a draft that survived.
+      const result = await ctx.db.$transaction(async (tx) => {
+        const drafts = await tx.action.findMany({
+          where: draftsWhere,
+          select: { id: true, name: true, description: true },
+        });
+        if (drafts.length === 0) return { count: 0 };
+        await tx.discardedActionDraft.createMany({
+          data: drafts.map((draft) => ({
+            transcriptionSessionId: input.transcriptionId,
+            name: draft.name,
+            description: draft.description,
+            reason: input.reason ?? null,
+            discardedById: ctx.session.user.id,
+          })),
+        });
+        return tx.action.deleteMany({ where: { ...draftsWhere, id: { in: drafts.map((draft) => draft.id) } } });
       });
 
       // Same bookkeeping as publishSelectedDraftActions: once the review is

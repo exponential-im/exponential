@@ -50,6 +50,7 @@ vi.mock("../ActionExtractionService", () => ({
   },
   numberScreenshotMarkers: vi.fn((text: string) => ({ numberedText: text, count: 0 })),
   filterNearDuplicateActions: vi.fn((items: unknown[]) => items),
+  filterDiscardedActions: vi.fn((items: unknown[]) => items),
   mergeActionItems: vi.fn((a: unknown[], b: unknown[]) => [...a, ...b]),
 }));
 
@@ -70,7 +71,7 @@ vi.mock("../meetings/assignMeetingPlacement", () => ({
 
 import { TranscriptionProcessingService } from "../TranscriptionProcessingService";
 import { InternalActionProcessor } from "../processors/InternalActionProcessor";
-import { ActionExtractionService } from "../ActionExtractionService";
+import { ActionExtractionService, filterDiscardedActions, filterNearDuplicateActions } from "../ActionExtractionService";
 import { FirefliesService } from "../FirefliesService";
 
 const USER_ID = "user-1";
@@ -92,6 +93,7 @@ describe("screenshot pairing survives a failed create mid-list", () => {
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
   });
 
   it("InternalActionProcessor.itemResults stays index-parallel with its input", async () => {
@@ -178,6 +180,7 @@ describe("generateDraftActions after a partial publish", () => {
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
     // The extraction mocks are module-level and carry calls over from the
     // pairing tests above; clear them so "not called" means this test.
     vi.mocked(ActionExtractionService.extractFromNotes).mockClear();
@@ -227,6 +230,7 @@ describe("generateDraftActions with action items from the combined decision pass
   beforeEach(() => {
     db = getDbMock();
     mockReset(db);
+    db.discardedActionDraft.findMany.mockResolvedValue([] as never);
     vi.mocked(ActionExtractionService.extractFromNotes).mockReset().mockResolvedValue([]);
     vi.mocked(ActionExtractionService.extractFromTranscript).mockReset().mockResolvedValue([]);
     db.transcriptionSession.findUnique.mockResolvedValue({
@@ -282,6 +286,127 @@ describe("generateDraftActions with action items from the combined decision pass
 
     const names = db.action.create.mock.calls.map((c) => (c[0] as { data: { name: string } }).data.name);
     expect(names).toEqual(["Review the accordion PR"]);
+  });
+
+  describe("re-extract (replaceDrafts)", () => {
+    beforeEach(() => {
+      db.screenshot.findMany.mockResolvedValue([] as never);
+      db.action.deleteMany.mockResolvedValue({ count: 3 } as never);
+      db.action.findMany.mockResolvedValue([] as never);
+    });
+
+    /** First read: actions already created. Second: the unreviewed drafts. */
+    const withOldDrafts = (...ids: string[]) =>
+      db.action.findMany.mockResolvedValueOnce([] as never).mockResolvedValueOnce(ids.map((id) => ({ id })) as never);
+
+    it("replaces the unreviewed draft actions, removing them only once the new ones exist", async () => {
+      // No created actions, three drafts waiting.
+      db.action.count.mockResolvedValueOnce(0).mockResolvedValueOnce(3);
+      withOldDrafts("old-1", "old-2", "old-3");
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+        replaceDrafts: true,
+      });
+
+      expect(db.action.deleteMany).toHaveBeenCalledTimes(1);
+      expect(db.action.deleteMany).toHaveBeenCalledWith({
+        where: { id: { in: ["old-1", "old-2", "old-3"] }, transcriptionSessionId: TRANSCRIPTION_ID, status: "DRAFT" },
+      });
+      expect(db.action.create.mock.invocationCallOrder[0]!).toBeLessThan(db.action.deleteMany.mock.invocationCallOrder[0]!);
+      expect(result).toMatchObject({ success: true, draftsReplaced: 3, draftCount: 1, alreadyPublished: false });
+    });
+
+    it("keeps the old drafts, and takes back the new ones, when a new draft cannot be written", async () => {
+      db.action.count.mockResolvedValueOnce(0).mockResolvedValueOnce(2);
+      withOldDrafts("old-1", "old-2");
+      const twoItems = [...combinedItems, { ...combinedItems[0]!, text: "Book the venue" }];
+      mockActionCreateFailingOn(db, "Book the venue");
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: twoItems,
+        replaceDrafts: true,
+      });
+
+      // Every draft that is not one of the old ones goes, including one the
+      // processor wrote but reported as failed; the old ids are never touched.
+      expect(db.action.deleteMany).toHaveBeenCalledTimes(1);
+      expect(db.action.deleteMany).toHaveBeenCalledWith({
+        where: { transcriptionSessionId: TRANSCRIPTION_ID, status: "DRAFT", id: { notIn: ["old-1", "old-2"] } },
+      });
+      expect(result.success).toBe(false);
+      expect(result.draftCount).toBe(2);
+      expect(result.errors.length).toBeGreaterThan(0);
+    });
+
+    it("keeps the old drafts when the combined pass read only part of the transcript", async () => {
+      db.action.count.mockResolvedValueOnce(0).mockResolvedValueOnce(2);
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+        replaceDrafts: true,
+        transcriptIncomplete: true,
+      });
+
+      expect(result).toMatchObject({ success: true, draftCount: 2, draftsKept: true });
+      expect(db.action.deleteMany).not.toHaveBeenCalled();
+      expect(db.action.create).not.toHaveBeenCalled();
+    });
+
+    it("removes the old drafts when a complete reading finds no actions", async () => {
+      db.action.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1);
+      withOldDrafts("old-1");
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: [],
+        replaceDrafts: true,
+      });
+
+      expect(db.action.deleteMany).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ success: true, draftCount: 0 });
+    });
+
+    it("runs for a meeting whose actions were already created, without drafting those again", async () => {
+      db.action.count.mockResolvedValueOnce(2).mockResolvedValueOnce(0);
+      db.action.findMany.mockResolvedValue([{ name: "Review the accordion PR" }, { name: "Book the venue" }] as never);
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+        replaceDrafts: true,
+      });
+
+      expect(result.alreadyPublished).toBe(false);
+      // The created actions are what new items are compared against.
+      const lastCall = vi.mocked(filterNearDuplicateActions).mock.calls.at(-1)!;
+      expect(lastCall[1]).toEqual([{ text: "Review the accordion PR" }, { text: "Book the venue" }]);
+    });
+
+    it("does not draft again what a reviewer discarded from this meeting", async () => {
+      db.action.count.mockResolvedValue(0);
+      db.discardedActionDraft.findMany.mockResolvedValue([{ name: "Share the onboarding video" }] as never);
+
+      await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+      });
+
+      expect(db.discardedActionDraft.findMany).toHaveBeenCalledWith({
+        where: { transcriptionSessionId: TRANSCRIPTION_ID },
+        select: { name: true },
+      });
+      expect(vi.mocked(filterDiscardedActions).mock.calls.at(-1)![1]).toEqual(["Share the onboarding video"]);
+    });
+
+    it("without the flag, a meeting with drafts is left as it is", async () => {
+      db.action.count.mockResolvedValueOnce(0).mockResolvedValueOnce(3);
+
+      const result = await TranscriptionProcessingService.generateDraftActions(TRANSCRIPTION_ID, USER_ID, {
+        transcriptActionItems: combinedItems,
+      });
+
+      expect(result.draftCount).toBe(3);
+      expect(db.action.deleteMany).not.toHaveBeenCalled();
+      expect(db.action.create).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps the dedicated pass for screen recordings, which pairs screenshots", async () => {

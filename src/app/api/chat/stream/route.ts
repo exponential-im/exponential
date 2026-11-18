@@ -35,6 +35,8 @@ import {
 } from "~/server/services/ai/providerError";
 import { composePromptVersion } from "~/server/services/promptVersion";
 import { reportHandledErrorServer } from "~/server/utils/reportHandledErrorServer";
+import { classifyToolError, isReportableToolError, summarizeToolError, type ToolErrorKind } from "~/lib/chat/toolErrors";
+import { resolveTimeZone, shouldSaveDetectedZone, timeZonePromptBlock } from "~/lib/chat/timeZoneContext";
 import {
   PER_REQUEST_COST_ALERT_USD,
   priceTokenBreakdown,
@@ -183,7 +185,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform } = (await req.json()) as {
+    const { messages, agentId: rawAgentId, assistantId, workspaceId, projectId, conversationId, platform: rawPlatform, timezone: rawTimezone, pageContextType: rawPageContextType } = (await req.json()) as {
       messages: CoreMessage[];
       agentId?: string;
       assistantId?: string;
@@ -191,7 +193,15 @@ export async function POST(req: Request) {
       projectId?: string;
       conversationId?: string;
       platform?: string;
+      timezone?: string;
+      pageContextType?: string;
     };
+    // Recorded on the interaction row for whoever diagnoses the turn later.
+    // A label, never content: anything that is not a short slug is dropped.
+    const pageContextType =
+      typeof rawPageContextType === "string" && /^[A-Za-z0-9_-]{1,40}$/.test(rawPageContextType)
+        ? rawPageContextType
+        : undefined;
 
     // "web-canvas" stamps Zoe canvas turns (ADR-0040) so engagement volume and
     // judged Thread quality compare canvas vs drawer with no new analytics.
@@ -289,6 +299,29 @@ export async function POST(req: Request) {
           "http://localhost:3000",
       ],
     ];
+    // The person's IANA time zone, for tools that place things on a clock
+    // (calendar events) and for the date in the prompt. The zone saved in
+    // their profile wins; the browser's zone is the fallback, and is saved
+    // the first time it is seen. With neither, no zone is passed and the
+    // agent asks; it never assumes UTC. See ~/lib/chat/timeZoneContext.
+    const savedTimeZone = await db.user
+      .findUnique({ where: { id: session.user.id }, select: { timezone: true } })
+      .then((u) => u?.timezone ?? null);
+    let timeZone = resolveTimeZone({ saved: savedTimeZone, browser: rawTimezone });
+    if (shouldSaveDetectedZone(timeZone)) {
+      // `timezone: null` in the filter: a zone saved by another tab or the
+      // settings page between the read and this write is never overwritten.
+      const saved = await db.user
+        .updateMany({ where: { id: session.user.id, timezone: null }, data: { timezone: timeZone.zone } })
+        .then((r) => r.count > 0)
+        .catch(() => false);
+      if (saved) timeZone = { zone: timeZone.zone, source: "detected" };
+    }
+    if (timeZone.zone) {
+      entries.push(["timezone", timeZone.zone]);
+      // Lets get-my-time-zone say the zone is the one saved in the profile.
+      if (timeZone.source !== "browser") entries.push(["timezoneSource", "profile"]);
+    }
     
     // Verify workspace access and fetch the in-scope AI instructions for the
     // demoted scope-instruction block. `loadScopeInstructions` is shared with
@@ -529,6 +562,15 @@ export async function POST(req: Request) {
       ];
     }
 
+    // The person's date, time and zone. Built here from the resolved zone (not
+    // by the client), so the date the model reads and the zone its tools use
+    // always agree, and so a saved zone beats the browser's.
+    const timeBlock = timeZonePromptBlock(timeZone, new Date());
+    finalMessages = [
+      { role: 'system' as const, content: timeBlock },
+      ...finalMessages,
+    ];
+
     // NOTE: The ACIP security policy is NOT injected here. Each Mastra agent
     // embeds SECURITY_POLICY (or SECURITY_POLICY_COMPACT) inside its own
     // instructions (see mastra/src/mastra/agents/*), so the policy reaches
@@ -635,6 +677,43 @@ export async function POST(req: Request) {
     const loggedToolCallIndexById = new Map<string, number>();
     let lastStepFinishReason: string | undefined;
     let hadToolError = false;
+    // Tools already reported as broken this turn. A retried call fails the
+    // same way; one report per tool per turn, and the ingest fingerprint
+    // collapses turns onto one ticket.
+    const reportedToolFaults = new Set<string>();
+    // A tool that the app rejects, or that fails its own output schema, fails
+    // on EVERY call for EVERY user while the agent narrates around it. The
+    // daily digest lists those, but nothing asked anyone to fix them: one ran
+    // red for six months. File the Bug on first sight instead.
+    // Returns what it classified, for the persisted tool call: the kind, and
+    // for a fault that is filed, the line its ticket is fingerprinted from
+    // (a low rating on this turn links to that ticket, see lowRatingAlert).
+    const reportToolFault = (
+      toolName: string,
+      unmaskedError: string,
+    ): { kind: ToolErrorKind; faultSummary?: string } => {
+      // Masked here, at the sink, not left to each caller: this text is
+      // persisted on a ticket, and error text routinely echoes inputs.
+      const rawError = maskTokenLike(unmaskedError);
+      const kind = classifyToolError(rawError);
+      if (!isReportableToolError(kind)) return { kind };
+      const faultSummary = summarizeToolError(toolName, rawError);
+      if (reportedToolFaults.has(toolName)) return { kind, faultSummary };
+      reportedToolFaults.add(toolName);
+      reportHandledErrorServer(new Error(faultSummary), {
+        area: "agent-tool",
+        context: {
+          tool: toolName,
+          toolErrorKind: kind,
+          platform,
+          rawError: rawError.slice(0, 1500),
+        },
+      });
+      return { kind, faultSummary };
+    };
+    // The Mastra run this turn belongs to, read off the first chunk that
+    // carries one. Persisted so the trace view can hand over a logs command.
+    let mastraRunId: string | undefined;
     let hadAgentError = false;
     // The masked top-level agent error, captured for the durable interaction
     // record (the user only ever sees the generic line). Tool errors flow via
@@ -790,6 +869,9 @@ export async function POST(req: Request) {
             await response.processDataStream({
             onChunk: async (chunk) => {
               chunkCount++;
+              // On a tier retry the later run is the one that answered.
+              const chunkRunId = readString(chunk, 'runId');
+              if (chunkRunId && /^[A-Za-z0-9_-]{1,100}$/.test(chunkRunId)) mastraRunId = chunkRunId;
               if (chunk.type === "text-delta") {
                 textChunkCount++;
                 // Sanitize streaming output to redact leaked secrets
@@ -844,6 +926,7 @@ export async function POST(req: Request) {
                   if (logged) {
                     logged.isError = true;
                     if (errorCode) logged.errorCode = maskTokenLike(errorCode).slice(0, 200);
+                    logged.errorKind = isMastraToolFailure ? 'contract' : classifyToolError(errorCode);
                   }
                   if (firstToolErrorMessages.length < 3) {
                     firstToolErrorMessages.push(
@@ -851,6 +934,12 @@ export async function POST(req: Request) {
                     );
                   }
                   hadToolError = true;
+                  // An output that fails the tool's own schema is a contract
+                  // fault by definition: the tool and the app disagree.
+                  if (isMastraToolFailure) {
+                    const fault = reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
+                    if (logged && fault.faultSummary) logged.faultSummary = fault.faultSummary;
+                  }
                 }
                 toolFrame({ phase: 'result', id, name });
               } else if (chunk.type === "tool-error") {
@@ -864,11 +953,24 @@ export async function POST(req: Request) {
                 hadToolError = true;
                 const idx = loggedToolCallIndexById.get(id);
                 const logged = idx !== undefined ? loggedToolCalls[idx] : undefined;
+                const fault = reportToolFault(name, msg);
                 if (logged) {
                   logged.isError = true;
                   logged.errorCode = msg.slice(0, 200);
+                  logged.errorKind = fault.kind;
+                  if (fault.faultSummary) logged.faultSummary = fault.faultSummary;
                 }
-                toolFrame({ phase: 'error', id, name, msg });
+                // Everyone gets the kind (the client turns it into one plain
+                // sentence). The raw text is a tRPC envelope or a zod issue
+                // list: useful to an admin debugging, noise or worse to
+                // anyone else, so only admins receive it.
+                toolFrame({
+                  phase: 'error',
+                  id,
+                  name,
+                  kind: fault.kind,
+                  ...(session.user.isAdmin ? { msg } : {}),
+                });
               } else if (chunk.type === "error") {
                 // The raw error (often a Zod "Type validation failed" blob, and
                 // capable of echoing credentials) must never reach the user.
@@ -1157,6 +1259,8 @@ export async function POST(req: Request) {
               model: responseModelId ?? "mastra-agents",
               messageType: "question",
               promptVersion: composePromptVersion(brainVersion),
+              mastraRunId,
+              pageContextType,
             })
             // If the DB write fails AFTER the race below times out, the
             // rejection would otherwise be unhandled. Swallow + log here.
@@ -1197,6 +1301,14 @@ export async function POST(req: Request) {
             finishReason: lastStepFinishReason ?? 'unknown',
             error: err instanceof Error ? err.message : (typeof err === 'string' ? err : 'unknown error'),
           });
+          // A provider billing/auth failure can also surface as a throw (the
+          // Sonnet retry's agent.stream(), or a provider error Mastra rethrows
+          // rather than yielding as an `error` chunk). Same treatment as the
+          // chunk path: deterministic, so say "unavailable" and keep paging.
+          const thrownProviderKind = classifyProviderError(
+            maskTokenLike(err instanceof Error ? err.message : String(err)),
+          );
+          const thrownNonRetryable = isNonRetryableProviderError(thrownProviderKind);
           // Server-side failures abort the stream before the client can
           // classify anything, so this is the only place they can be reported.
           reportHandledErrorServer(err, {
@@ -1206,7 +1318,9 @@ export async function POST(req: Request) {
               threadId,
               platform,
               partialChars: String(fullText.length),
+              providerErrorKind: thrownProviderKind,
             },
+            ...(thrownNonRetryable ? { renotifyAfterMs: PROVIDER_OUTAGE_RENOTIFY_MS } : {}),
           });
           // The steps that finished before the failure were still billed.
           usageWrites.push(meterAttempt());
@@ -1248,6 +1362,8 @@ export async function POST(req: Request) {
                   workspaceId: workspaceId ?? undefined,
                   model: responseModelId ?? "mastra-agents",
                   messageType: "question",
+                  mastraRunId,
+                  pageContextType,
                 })
                 .catch((logErr: unknown) => {
                   console.error("Failed to save failed-turn AI history:", logErr);
@@ -1260,7 +1376,21 @@ export async function POST(req: Request) {
           } catch (logErr) {
             console.error("Failed-turn logging threw:", logErr);
           }
-          controller.error(err);
+          if (thrownNonRetryable) {
+            // Erroring the stream reads as a dropped connection to the client,
+            // which auto-retries it as transport — three more calls into an
+            // account that cannot answer. Close cleanly on a plain sentence.
+            try {
+              controller.enqueue(
+                new TextEncoder().encode(`\n\n${USER_FACING_PROVIDER_UNAVAILABLE}\n`),
+              );
+              controller.close();
+            } catch {
+              controller.error(err);
+            }
+          } else {
+            controller.error(err);
+          }
         } finally {
           clearInterval(heartbeat);
           void Promise.allSettled(usageWrites).then(releaseUsageWrites);
@@ -1277,6 +1407,24 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     console.error("Streaming error:", error);
+    // The first agent.stream() runs before the response stream exists, so a
+    // provider that rejects the request outright (credit exhausted, revoked
+    // key) lands here. Answer with the calm provider-unavailable sentence and
+    // a 503 the client shows as-is, instead of a bare 500 it retries.
+    const providerKind = classifyProviderError(
+      maskTokenLike(error instanceof Error ? error.message : String(error)),
+    );
+    if (isNonRetryableProviderError(providerKind)) {
+      reportHandledErrorServer(error, {
+        area: "chat-stream-server",
+        context: { stage: "agent-stream-start", providerErrorKind: providerKind },
+        renotifyAfterMs: PROVIDER_OUTAGE_RENOTIFY_MS,
+      });
+      return new Response(
+        JSON.stringify({ error: USER_FACING_PROVIDER_UNAVAILABLE }),
+        { status: 503, headers: { "Content-Type": "application/json" } },
+      );
+    }
     return new Response(
       JSON.stringify({ error: "Failed to stream response" }),
       {
