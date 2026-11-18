@@ -1,4 +1,4 @@
-import { Textarea, Button, Group, Select, ActionIcon, Popover, Text, NumberInput, Stack, Switch, Tooltip, Divider, Image, Modal } from '@mantine/core';
+import { Textarea, Button, Group, Select, ActionIcon, Popover, Text, NumberInput, Stack, Switch, Tooltip, Divider, Image, Modal, Box } from '@mantine/core';
 import { TimeInput } from '@mantine/dates';
 import { IconPlus, IconClock, IconX, IconRobot, IconAlertCircle, IconInfoCircle, IconPhoto } from '@tabler/icons-react';
 import { type ActionPriority, PRIORITY_OPTIONS } from "~/types/action";
@@ -9,6 +9,7 @@ import { UnifiedDatePicker } from './UnifiedDatePicker';
 import { RichTextInput } from './RichTextInput';
 import { AssigneeSelector } from './AssigneeSelector';
 import { TagSelector } from './TagSelector';
+import { CapturePlacement } from './pillars/CapturePlacement';
 import { CreateProjectModal } from './CreateProjectModal';
 import { SprintSelector } from './SprintSelector';
 import { EpicSelector } from './EpicSelector';
@@ -117,11 +118,14 @@ export function ActionModalForm({
   onScreenshotRemove,
   extraSection,
 }: ActionModalFormProps) {
+  // A new Action asks Pillars, then an optional Project, like every capture.
+  const showCapturePlacement = !actionId && !!workspaceId;
   // Scoped to the form's workspace when it has one: the tag and sprint
   // pickers list the context workspace's rows, and the server attaches them
   // in the same transaction as the Action resolved against the project's
   // workspace — a project from another workspace would refuse the whole
   // create with a containment error the user cannot act on.
+  const utils = api.useUtils();
   const projects = api.project.getAll.useQuery(workspaceId ? { workspaceId } : {});
   const taskSchedules = api.taskSchedule.list.useQuery(
     { workspaceId: workspaceId ?? '' },
@@ -507,6 +511,22 @@ export function ActionModalForm({
         </Group>
       </Group>
 
+      {/* Creating: Pillars, then an optional Project (ADR-0085). The workspace
+          is the one the modal was opened in. */}
+      {showCapturePlacement && workspaceId && (
+        <Box mt="sm">
+          <CapturePlacement
+            workspaceId={workspaceId}
+            value={{ tagIds: selectedTagIds, projectId: projectId ?? null }}
+            suggestFrom={name}
+            onChange={({ tagIds, projectId: nextProjectId }) => {
+              onTagChange(tagIds);
+              setProjectId(nextProjectId ?? undefined);
+            }}
+          />
+        </Box>
+      )}
+
       {/* Row 2: Tags and Assignees */}
       <Group gap="sm" mt="sm">
         <TagSelector
@@ -565,6 +585,7 @@ export function ActionModalForm({
       <div className="border-t border-border-primary p-4 mt-4">
         <Group justify="space-between">
           <Group gap="xs">
+            {!showCapturePlacement && (
             <Select
               placeholder="Select a project (optional)"
               variant="unstyled"
@@ -578,7 +599,15 @@ export function ActionModalForm({
                 },
               }}
             />
-            <CreateProjectModal onSuccess={(project) => setProjectId(project.id)}>
+            )}
+            <CreateProjectModal
+              onSuccess={(project) => {
+                // The capture row lists projects from getUserProjects: refresh it so
+                // the new project is there to see and re-pick.
+                void utils.project.getUserProjects.invalidate();
+                setProjectId(project.id);
+              }}
+            >
               <ActionIcon
                 variant="subtle"
                 size="sm"

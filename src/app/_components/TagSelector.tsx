@@ -17,6 +17,8 @@ import type { TagColor } from '~/types/tag';
 import { api } from '~/trpc/react';
 import { getTagMantineColor } from '~/utils/tagColors';
 import { TagBadge } from './TagBadge';
+import { PillarIcon } from './pillars/PillarIcon';
+import { splitPillarTags } from './pillars/pillarTags';
 
 const COLOR_OPTIONS: { key: TagColor; mantine: string }[] = [
   { key: 'avatar-red', mantine: 'red' },
@@ -95,6 +97,25 @@ export function TagSelector({
 
   const allTags = tags?.allTags ?? [];
   const selectedTags = allTags.filter(tag => selectedTagIds.includes(tag.id));
+  // Pillars (ADR-0085) are a different kind of thing from labels: their own group, on top.
+  const { pillars, labels } = splitPillarTags(allTags, selectedTagIds);
+
+  const renderChips = (group: typeof allTags) => (
+    <Group gap="xs">
+      {group.map(tag => (
+        <Chip
+          key={tag.id}
+          value={tag.id}
+          size="sm"
+          color={getTagMantineColor(tag.color)}
+          variant="light"
+          icon={pillars.includes(tag) ? <PillarIcon size={12} /> : undefined}
+        >
+          {tag.name}
+        </Chip>
+      ))}
+    </Group>
+  );
 
   return (
     <Popover
@@ -135,22 +156,28 @@ export function TagSelector({
             <Group justify="center" p="md">
               <Loader size="sm" />
             </Group>
-          ) : allTags.length > 0 ? (
-            <ScrollArea.Autosize mah={200}>
+          ) : pillars.length + labels.length > 0 ? (
+            <ScrollArea.Autosize mah={240}>
               <Chip.Group multiple value={selectedTagIds} onChange={onChange}>
-                <Group gap="xs">
-                  {allTags.map(tag => (
-                    <Chip
-                      key={tag.id}
-                      value={tag.id}
-                      size="sm"
-                      color={getTagMantineColor(tag.color)}
-                      variant="light"
-                    >
-                      {tag.name}
-                    </Chip>
-                  ))}
-                </Group>
+                <Stack gap="xs">
+                  {pillars.length > 0 && (
+                    <div>
+                      <Group gap={4} mb={4}>
+                        <PillarIcon size={12} className="text-text-muted" />
+                        <Text size="xs" fw={600} className="text-text-muted">Pillars</Text>
+                      </Group>
+                      {renderChips(pillars)}
+                    </div>
+                  )}
+                  {labels.length > 0 && (
+                    <div>
+                      {pillars.length > 0 && (
+                        <Text size="xs" fw={600} mb={4} className="text-text-muted">Labels</Text>
+                      )}
+                      {renderChips(labels)}
+                    </div>
+                  )}
+                </Stack>
               </Chip.Group>
             </ScrollArea.Autosize>
           ) : (

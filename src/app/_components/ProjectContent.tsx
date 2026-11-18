@@ -70,6 +70,8 @@ import { ProjectResourcesTab } from "~/app/_components/knowledge-base/ProjectRes
 import { daysLeftLabel, daysUntil, resolveProjectTargetDate } from "~/lib/projectTargetDate";
 import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { EntityPillars } from "./pillars/EntityPillars";
+import { LooksOngoingHint } from "./pillars/LooksOngoingHint";
 import { notifications } from "@mantine/notifications";
 import Link from "next/link";
 import { useMemo } from "react";
@@ -465,6 +467,21 @@ export function ProjectContent({
                 </div>
               </div>
             )}
+            {workspace && project.workspaceId === workspace.id && (
+              <EntityPillars
+                entityType="project"
+                entityId={project.id}
+                workspaceId={workspace.id}
+                workspaceSlug={workspace.slug}
+                readOnly={!myAccess?.canEdit}
+                wrapper={(content) => (
+                  <div className={overviewStyles.stat}>
+                    <div className={overviewStyles.statLabel}>Pillars</div>
+                    <div className={overviewStyles.statValue}>{content}</div>
+                  </div>
+                )}
+              />
+            )}
           </div>
         </div>
 
@@ -496,6 +513,11 @@ export function ProjectContent({
           </button>
         </div>
       </div>
+
+      {/* A long-running project with no end date may be a Pillar (ADR-0085). */}
+      {workspace && myAccess?.canEdit && (
+        <LooksOngoingHint project={project} workspaceSlug={workspace.slug} className="mb-4" />
+      )}
 
       {/* Main Content */}
       <div className="w-full">

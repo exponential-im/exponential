@@ -1,13 +1,38 @@
 import type { PrismaClient, Tag } from "@prisma/client";
 import { TRPCError } from "@trpc/server";
 import {
+  assertCanEditGoal,
   assertWorkspaceMembership,
   assertWorkspaceWriteRole,
+  buildSharedResourceWhere,
   canEditAction,
+  canEditProject,
   getActionAccess,
+  getProjectAccess,
+  hasProjectAccess,
 } from "~/server/services/access";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
-export type TagEntityType = "action" | "ticket" | "feature" | "epic";
+export type TagEntityType =
+  | "action"
+  | "ticket"
+  | "feature"
+  | "epic"
+  | "project"
+  | "goal"
+  | "resource"
+  | "recurringTask";
+
+/**
+ * Entities that take Pillars only, never ordinary labels (ADR-0085): a
+ * Project, Goal or Resource is filed under a standing area, not labelled.
+ */
+const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set([
+  "project",
+  "goal",
+  "resource",
+  "recurringTask",
+]);
 
 interface EntityResolution {
   workspaceId: string;
@@ -125,7 +150,140 @@ async function resolveEntity(
         currentTagIds: epic.tags.map((t) => t.tagId),
       };
     }
+    case "project": {
+      const project = await db.project.findUnique({
+        where: { id: entityId },
+        select: {
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!project) throwNotFound("Project");
+      const access = await getProjectAccess(db, userId, entityId);
+      const allowed = level === "edit" ? canEditProject(access) : hasProjectAccess(access);
+      if (!allowed) {
+        // A project the caller cannot see stays hidden.
+        if (!hasProjectAccess(access)) throwNotFound("Project");
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You don't have permission to change this project's Pillars",
+        });
+      }
+      return {
+        workspaceId: requireEntityWorkspace(project.workspaceId, "Project"),
+        currentTagIds: project.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "goal": {
+      const goalId = parseGoalId(entityId);
+      const goal = await db.goal.findUnique({
+        where: { id: goalId },
+        select: {
+          userId: true,
+          driUserId: true,
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (level === "edit") {
+        await assertCanEditGoal(db, userId, goal);
+      } else if (!goal) {
+        throwNotFound("Objective");
+      }
+      const workspaceId = requireEntityWorkspace(goal!.workspaceId, "Objective");
+      // Reading an objective's Pillars: any member of its workspace, as for the objective.
+      if (level === "view") await assertWorkspaceMembership(db, userId, workspaceId);
+      return {
+        workspaceId,
+        currentTagIds: goal!.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "resource": {
+      const resource = await db.resource.findUnique({
+        where: { id: entityId },
+        select: {
+          userId: true,
+          workspaceId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!resource) throwNotFound("Resource");
+      const isOwner = resource.userId === userId;
+      // Only its owner files a Resource; others it is shared with may read its Pillars.
+      if (!isOwner && !(level === "view" && (await canReadSharedResource(db, userId, entityId)))) {
+        throwNotFound("Resource");
+      }
+      const workspaceId = requireEntityWorkspace(resource.workspaceId, "Resource");
+      if (level === "edit") await assertWorkspaceWriteRole(db, userId, workspaceId);
+      return {
+        workspaceId,
+        currentTagIds: resource.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "recurringTask": {
+      const task = await db.recurringTask.findUnique({
+        where: { id: entityId },
+        select: {
+          workspaceId: true,
+          createdById: true,
+          projectId: true,
+          pillarTags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!task) throwNotFound("Recurring task");
+      // Like an Action: a project's recurring task follows the project's
+      // access; one with no project is its creator's.
+      if (task.projectId) {
+        const access = await getProjectAccess(db, userId, task.projectId);
+        if (!hasProjectAccess(access)) throwNotFound("Recurring task");
+        if (level === "edit" && !canEditProject(access)) {
+          throw new TRPCError({
+            code: "FORBIDDEN",
+            message: "You don't have permission to change this recurring task's Pillars",
+          });
+        }
+      } else if (task.createdById !== userId) {
+        throwNotFound("Recurring task");
+      }
+      await requireWorkspaceAccess(db, userId, task.workspaceId, level);
+      return {
+        workspaceId: task.workspaceId,
+        currentTagIds: task.pillarTags.map((t) => t.tagId),
+      };
+    }
   }
+}
+
+/** A goal's id is an integer; the polymorphic API passes every id as a string. */
+function parseGoalId(entityId: string): number {
+  const id = Number(entityId);
+  if (!Number.isInteger(id) || id <= 0) throwNotFound("Objective");
+  return id;
+}
+
+async function canReadSharedResource(
+  db: PrismaClient,
+  userId: string,
+  resourceId: string,
+): Promise<boolean> {
+  const shared = await buildSharedResourceWhere(db, userId);
+  if (!shared) return false;
+  const row = await db.resource.findFirst({
+    where: { AND: [{ id: resourceId }, shared] },
+    select: { id: true },
+  });
+  return row !== null;
+}
+
+/** A tag is workspace-scoped, so an entity with no workspace carries none. */
+function requireEntityWorkspace(workspaceId: string | null, label: string): string {
+  if (!workspaceId) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: `${label} has no workspace; cannot validate tag scope`,
+    });
+  }
+  return workspaceId;
 }
 
 function throwNotFound(label: string): never {
@@ -147,10 +305,18 @@ async function requireWorkspaceAccess(
   else await assertWorkspaceMembership(db, userId, workspaceId);
 }
 
+/**
+ * Every tag must be global or belong to the entity's workspace. A Pillar-only
+ * entity is newly filed only under this workspace's Pillars. An inactive
+ * (archived) Pillar is never newly added. Tags already on the entity stay
+ * either way.
+ */
 async function validateTagsForWorkspace(
   db: PrismaClient,
+  entityType: TagEntityType,
   workspaceId: string,
   tagIds: string[],
+  currentTagIds: string[],
 ): Promise<void> {
   if (tagIds.length === 0) return;
   const validTags = await db.tag.findMany({
@@ -158,12 +324,34 @@ async function validateTagsForWorkspace(
       id: { in: tagIds },
       OR: [{ workspaceId: null }, { workspaceId }],
     },
-    select: { id: true },
+    select: { id: true, category: true, workspaceId: true, archivedAt: true },
   });
   if (validTags.length !== tagIds.length) {
     throw new TRPCError({
       code: "BAD_REQUEST",
       message: "One or more tags are not available in this workspace",
+    });
+  }
+  const current = new Set(currentTagIds);
+  if (PILLAR_ONLY_ENTITY_TYPES.has(entityType)) {
+    // Only what is being added must be a Pillar. A tag already on the item
+    // may since have been turned back into a label; it can stay until removed,
+    // or it would block every other change to the item's Pillars.
+    const nonPillar = validTags.some(
+      (t) =>
+        !current.has(t.id) && (t.category !== PILLAR_CATEGORY || t.workspaceId !== workspaceId),
+    );
+    if (nonPillar) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: `A ${entityType} can only be filed under this workspace's Pillars`,
+      });
+    }
+  }
+  if (validTags.some((t) => t.archivedAt && !current.has(t.id))) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "An inactive Pillar cannot be added",
     });
   }
 }
@@ -236,6 +424,58 @@ async function applyTagSet(
           });
         }
         return;
+      case "project":
+        if (toRemove.length > 0) {
+          await tx.projectTag.deleteMany({
+            where: { projectId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.projectTag.createMany({
+            data: toAdd.map((tagId) => ({ projectId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
+      case "goal": {
+        const goalId = parseGoalId(entityId);
+        if (toRemove.length > 0) {
+          await tx.goalTag.deleteMany({ where: { goalId, tagId: { in: toRemove } } });
+        }
+        if (toAdd.length > 0) {
+          await tx.goalTag.createMany({
+            data: toAdd.map((tagId) => ({ goalId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
+      }
+      case "resource":
+        if (toRemove.length > 0) {
+          await tx.resourceTag.deleteMany({
+            where: { resourceId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.resourceTag.createMany({
+            data: toAdd.map((tagId) => ({ resourceId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
+      case "recurringTask":
+        if (toRemove.length > 0) {
+          await tx.recurringTaskTag.deleteMany({
+            where: { recurringTaskId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.recurringTaskTag.createMany({
+            data: toAdd.map((tagId) => ({ recurringTaskId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
     }
   });
 }
@@ -278,6 +518,38 @@ async function loadTagsForEntity(
       });
       return rows.map((r) => r.tag);
     }
+    case "project": {
+      const rows = await db.projectTag.findMany({
+        where: { projectId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "goal": {
+      const rows = await db.goalTag.findMany({
+        where: { goalId: parseGoalId(entityId) },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "resource": {
+      const rows = await db.resourceTag.findMany({
+        where: { resourceId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "recurringTask": {
+      const rows = await db.recurringTaskTag.findMany({
+        where: { recurringTaskId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
   }
 }
 
@@ -298,7 +570,7 @@ export async function setEntityTags({
     "edit",
   );
 
-  await validateTagsForWorkspace(db, workspaceId, uniqueTagIds);
+  await validateTagsForWorkspace(db, entityType, workspaceId, uniqueTagIds, currentTagIds);
   await applyTagSet(db, entityType, entityId, uniqueTagIds, currentTagIds);
 
   const tags = await loadTagsForEntity(db, entityType, entityId);

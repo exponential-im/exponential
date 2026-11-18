@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PILLAR_CATEGORY } from "~/types/tag";
 import { syncProjectCeremonies } from "~/server/services/ceremonies/projectCeremonies";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
@@ -53,7 +54,8 @@ async function assertProductInWorkspace(
 }
 
 export const projectRouter = createTRPCRouter({
-  // API endpoint for browser plugin - uses API key authentication
+  // Projects for capture pickers: the browser plugin (API key) and the app's
+  // own capture row (session; apiKeyMiddleware accepts a session first).
   getUserProjects: apiKeyMiddleware
     .input(z.object({
       workspaceId: z.string().optional(),
@@ -63,6 +65,9 @@ export const projectRouter = createTRPCRouter({
         id: z.string(),
         name: z.string(),
         slug: z.string(),
+        // The project's Pillars (ADR-0085), so a capture picker can narrow
+        // projects to ticked Pillars and pre-tick a chosen project's.
+        pillarTagIds: z.array(z.string()),
       }))
     }))
     .query(async ({ ctx, input }) => {
@@ -76,6 +81,12 @@ export const projectRouter = createTRPCRouter({
           id: true,
           name: true,
           slug: true,
+          // Active Pillars only: an inactive one stays on the project, but a
+          // capture must never tick it (the save would be refused).
+          pillarTags: {
+            where: { tag: { category: PILLAR_CATEGORY, archivedAt: null } },
+            select: { tagId: true },
+          },
         },
         orderBy: {
           name: "asc",
@@ -83,7 +94,10 @@ export const projectRouter = createTRPCRouter({
       });
 
       return {
-        projects,
+        projects: projects.map(({ pillarTags, ...project }) => ({
+          ...project,
+          pillarTagIds: pillarTags.map((t) => t.tagId),
+        })),
       };
     }),
 

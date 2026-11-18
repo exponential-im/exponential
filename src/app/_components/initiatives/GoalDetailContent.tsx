@@ -44,6 +44,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { useMemo } from "react";
 import { useRegisterPageContext } from "~/hooks/useRegisterPageContext";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { EntityPillars } from "~/app/_components/pillars/EntityPillars";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { CreateGoalModal } from "../CreateGoalModal";
 import { GoalDescriptionEditor } from "./GoalDescriptionEditor";
@@ -458,6 +459,26 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                   </Text>
                 </Group>
               </Group>
+
+              {/* Pillars (ADR-0085): only an objective in this workspace carries them */}
+              {workspace && goal.workspaceId === workspace.id && (
+                <EntityPillars
+                  entityType="goal"
+                  entityId={String(goal.id)}
+                  workspaceId={workspace.id}
+                  workspaceSlug={workspace.slug}
+                  // A workspace objective is written with a write role (assertCanEditGoal).
+                  readOnly={!(userRole === "owner" || userRole === "admin" || userRole === "member")}
+                  wrapper={(content) => (
+                    <Group gap="md" align="center">
+                      <Text size="sm" className="text-text-muted">
+                        Pillars
+                      </Text>
+                      {content}
+                    </Group>
+                  )}
+                />
+              )}
 
               {/* Resources */}
               <div>

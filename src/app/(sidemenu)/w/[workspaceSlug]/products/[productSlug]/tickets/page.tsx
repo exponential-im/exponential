@@ -96,6 +96,7 @@ import { getAvatarColor, getInitial } from "~/utils/avatarColors";
 import {
   groupTickets,
   GROUP_BY_OPTIONS,
+  parseGroupBy,
   type GroupByField,
 } from "./ticketGrouping";
 import { nestTicketsByDependency, type NestedTicketRow } from "./ticketNesting";
@@ -170,7 +171,11 @@ type SortField = "status" | "title" | "priority" | "assignee" | "type" | "epic" 
 type SortDir = "asc" | "desc";
 
 /** The group-by values a shared link may name. */
-const GROUP_BY_VALUES: readonly string[] = GROUP_BY_OPTIONS.map((o) => o.value);
+const GROUP_BY_VALUES: readonly string[] = [
+  ...GROUP_BY_OPTIONS.map((o) => o.value),
+  // Older links grouped by the retired "area" tag category; parseGroupBy reads it as "pillar".
+  "area",
+];
 
 function cmp(a: string | number, b: string | number, dir: SortDir) {
   if (a < b) return dir === "asc" ? -1 : 1;
@@ -288,7 +293,7 @@ export default function TicketsBacklogPage() {
   const sortDir = urlView?.sortDir ?? prefSortDir;
   const view = urlView?.layout ?? prefView;
   const entity = urlView?.entity ?? prefEntity;
-  const groupBy = (urlView?.groupBy as GroupByField | undefined) ?? prefGroupBy;
+  const groupBy = parseGroupBy(urlView?.groupBy) ?? prefGroupBy;
   const filters = urlView?.filters ?? prefFilters;
   const nestDependencies = urlView?.nestDependencies ?? prefNestDependencies;
 
@@ -343,8 +348,8 @@ export default function TicketsBacklogPage() {
       const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
       const savedView = str(savedPrefs.view);
       if (savedView) setPrefView(savedView);
-      const savedGroupBy = str(savedPrefs.groupBy);
-      if (savedGroupBy) setPrefGroupBy(savedGroupBy as GroupByField);
+      const savedGroupBy = parseGroupBy(str(savedPrefs.groupBy));
+      if (savedGroupBy) setPrefGroupBy(savedGroupBy);
       // Epic and Cycle are sub-line metadata now, with no header to show or
       // flip that sort; fall back to the default rather than sort invisibly.
       const savedSortField = str(savedPrefs.sortField);
@@ -565,7 +570,8 @@ export default function TicketsBacklogPage() {
         }
         if (vars.epicId !== undefined) {
           const e = (epics ?? []).find((x) => x.id === vars.epicId);
-          next.epic = vars.epicId && e ? { id: e.id, name: e.name } : null;
+          // The epic's Pillars arrive with the refetch.
+          next.epic = vars.epicId && e ? { id: e.id, name: e.name, tags: [] } : null;
         }
         if (vars.cycleId !== undefined) {
           const c = (cycles ?? []).find((x) => x.id === vars.cycleId);

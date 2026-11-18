@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   groupTickets,
-  NO_AREA_KEY,
-  NO_AREA_LABEL,
+  NO_PILLAR_KEY,
+  NO_PILLAR_LABEL,
+  parseGroupBy,
   type GroupableTicket,
 } from "../ticketGrouping";
 
@@ -10,21 +11,21 @@ import {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-type Area = { id: string; name: string };
+type Pillar = { id: string; name: string };
 
-function area(id: string, name: string) {
-  return { tag: { id, name, category: "area" as const } };
+function pillar(id: string, name: string) {
+  return { tag: { id, name, category: "pillar" as const } };
 }
 
 function label(name: string) {
-  // a non-area tag, must never affect Area grouping
+  // a non-Pillar tag, must never affect Pillar grouping
   return { tag: { id: `lbl-${name}`, name, category: "label" as const } };
 }
 
-function ticket(id: string, areas: Area[] = [], extraTags: Array<{ tag: { id: string; name: string; category: string | null } }> = []): GroupableTicket & { id: string } {
+function ticket(id: string, pillars: Pillar[] = [], extraTags: Array<{ tag: { id: string; name: string; category: string | null } }> = []): GroupableTicket & { id: string } {
   return {
     id,
-    tags: [...areas.map((a) => area(a.id, a.name)), ...extraTags],
+    tags: [...pillars.map((a) => pillar(a.id, a.name)), ...extraTags],
   };
 }
 
@@ -34,14 +35,14 @@ const idsIn = (group: { items: Array<{ id: string }> }) => group.items.map((i) =
 
 // ---------------------------------------------------------------------------
 
-describe("groupTickets — area", () => {
+describe("groupTickets — pillar", () => {
   it("buckets a single Area per ticket under its Area group", () => {
     const tickets = [
       ticket("t1", [{ id: "a-api", name: "clear-api" }]),
       ticket("t2", [{ id: "a-api", name: "clear-api" }]),
     ];
 
-    const groups = groupTickets(tickets, "area");
+    const groups = groupTickets(tickets, "pillar");
 
     expect(groups).toHaveLength(1);
     expect(groups[0]!.key).toBe("a-api");
@@ -58,7 +59,7 @@ describe("groupTickets — area", () => {
       ticket("t2", [{ id: "a-api", name: "clear-api" }]),
     ];
 
-    const groups = groupTickets(tickets, "area");
+    const groups = groupTickets(tickets, "pillar");
 
     const byKey = Object.fromEntries(groups.map((g) => [g.key, idsIn(g)]));
     expect(byKey["a-api"]).toEqual(["t1", "t2"]);
@@ -68,16 +69,17 @@ describe("groupTickets — area", () => {
   it("collects tickets with no Area in a single 'No area' bucket", () => {
     const tickets = [
       ticket("t1"),
-      ticket("t2", [], [label("frontend")]), // only a non-area tag -> still no area
+      ticket("t2", [], [label("frontend")]), // only a label -> still under no Pillar
+      ticket("t4", [], [{ tag: { id: "old", name: "repo", category: "area" } }]), // the retired category is not a Pillar
       ticket("t3", [{ id: "a-api", name: "clear-api" }]),
     ];
 
-    const groups = groupTickets(tickets, "area");
+    const groups = groupTickets(tickets, "pillar");
 
-    const noArea = groups.find((g) => g.key === NO_AREA_KEY);
-    expect(noArea).toBeDefined();
-    expect(noArea!.label).toBe(NO_AREA_LABEL);
-    expect(idsIn(noArea!)).toEqual(["t1", "t2"]);
+    const noPillar = groups.find((g) => g.key === NO_PILLAR_KEY);
+    expect(noPillar).toBeDefined();
+    expect(noPillar!.label).toBe(NO_PILLAR_LABEL);
+    expect(idsIn(noPillar!)).toEqual(["t1", "t2", "t4"]);
   });
 
   it("orders Area groups alphabetically with 'No area' pinned last", () => {
@@ -88,13 +90,13 @@ describe("groupTickets — area", () => {
       ticket("t4", [{ id: "a-pipeline", name: "clear-pipeline" }]),
     ];
 
-    const groups = groupTickets(tickets, "area");
+    const groups = groupTickets(tickets, "pillar");
 
     expect(labels(groups)).toEqual([
       "clear-api",
       "clear-pipeline",
       "clear-platform",
-      NO_AREA_LABEL,
+      NO_PILLAR_LABEL,
     ]);
   });
 
@@ -105,15 +107,47 @@ describe("groupTickets — area", () => {
       ticket("t3", [{ id: "m", name: "Mango" }]),
     ];
 
-    expect(labels(groupTickets(tickets, "area"))).toEqual(["apple", "Mango", "Zebra"]);
+    expect(labels(groupTickets(tickets, "pillar"))).toEqual(["apple", "Mango", "Zebra"]);
   });
 
   it("returns an empty array for empty input", () => {
-    expect(groupTickets([], "area")).toEqual([]);
+    expect(groupTickets([], "pillar")).toEqual([]);
   });
 });
 
-describe("groupTickets — non-area fields are unaffected (single-membership)", () => {
+describe("groupTickets — pillar through the epic", () => {
+  it("puts a ticket under its epic's Pillars as well as its own, once each", () => {
+    const tickets = [
+      {
+        id: "t1",
+        tags: [pillar("p-devops", "DevOps")],
+        epic: { name: "Observability", tags: [pillar("p-devops", "DevOps"), pillar("p-eng", "Engineering")] },
+      },
+      { id: "t2", tags: [], epic: { name: "Onboarding", tags: [] } },
+    ];
+
+    const groups = groupTickets(tickets, "pillar");
+
+    expect(labels(groups)).toEqual(["DevOps", "Engineering", NO_PILLAR_LABEL]);
+    expect(idsIn(groups[0]!)).toEqual(["t1"]);
+    expect(idsIn(groups[1]!)).toEqual(["t1"]);
+    expect(idsIn(groups[2]!)).toEqual(["t2"]);
+  });
+});
+
+describe("parseGroupBy", () => {
+  it("reads the retired 'area' grouping as 'pillar'", () => {
+    expect(parseGroupBy("area")).toBe("pillar");
+  });
+
+  it("keeps known values and drops unknown ones", () => {
+    expect(parseGroupBy("status")).toBe("status");
+    expect(parseGroupBy("nonsense")).toBeUndefined();
+    expect(parseGroupBy(undefined)).toBeUndefined();
+  });
+});
+
+describe("groupTickets — non-pillar fields are unaffected (single-membership)", () => {
   it("groups by status with one bucket per ticket", () => {
     const tickets = [
       { id: "t1", status: "IN_PROGRESS" },

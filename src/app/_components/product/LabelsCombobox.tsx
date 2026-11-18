@@ -10,9 +10,17 @@ import {
   useCombobox,
 } from "@mantine/core";
 import { TagBadge } from "~/app/_components/TagBadge";
+import { PillarIcon } from "~/app/_components/pillars/PillarIcon";
+import { splitPillarTags } from "~/app/_components/pillars/pillarTags";
 import { getTagMantineColor } from "~/utils/tagColors";
 
-type Tag = { id: string; name: string; color: string };
+type Tag = {
+  id: string;
+  name: string;
+  color: string;
+  category?: string | null;
+  archivedAt?: Date | string | null;
+};
 
 /**
  * Multi-select labels picker with inline create. Entity-agnostic — used by both
@@ -36,6 +44,8 @@ export function LabelsCombobox({
   const [search, setSearch] = useState("");
 
   const filtered = allTags.filter((t) => t.name.toLowerCase().includes(search.toLowerCase().trim()));
+  // Pillars (ADR-0085) get their own group above the labels; inactive ones only while carried.
+  const { pillars, labels } = splitPillarTags(filtered, selectedIds);
   const exactMatch = allTags.some((t) => t.name.toLowerCase() === search.toLowerCase().trim());
 
   const toggleTag = (tagId: string) => {
@@ -44,6 +54,25 @@ export function LabelsCombobox({
     } else {
       onChange([...selectedIds, tagId]);
     }
+  };
+
+  const renderOption = (tag: Tag) => {
+    const isSelected = selectedIds.includes(tag.id);
+    return (
+      <Combobox.Option key={tag.id} value={tag.id} active={isSelected}>
+        <div className="flex items-center gap-2">
+          {isSelected && <CheckIcon size={12} />}
+          <Badge
+            size="xs"
+            variant="light"
+            color={getTagMantineColor(tag.color)}
+            leftSection={pillars.includes(tag) ? <PillarIcon size={10} /> : undefined}
+          >
+            {tag.name}
+          </Badge>
+        </div>
+      </Combobox.Option>
+    );
   };
 
   return (
@@ -80,23 +109,21 @@ export function LabelsCombobox({
           size="xs"
         />
         <Combobox.Options>
-          {filtered.map((tag) => {
-            const isSelected = selectedIds.includes(tag.id);
-            return (
-              <Combobox.Option key={tag.id} value={tag.id} active={isSelected}>
-                <div className="flex items-center gap-2">
-                  {isSelected && <CheckIcon size={12} />}
-                  <Badge size="xs" variant="light" color={getTagMantineColor(tag.color)}>{tag.name}</Badge>
-                </div>
-              </Combobox.Option>
-            );
-          })}
+          {pillars.length > 0 && (
+            <Combobox.Group label="Pillars">{pillars.map(renderOption)}</Combobox.Group>
+          )}
+          {labels.length > 0 &&
+            (pillars.length > 0 ? (
+              <Combobox.Group label="Labels">{labels.map(renderOption)}</Combobox.Group>
+            ) : (
+              labels.map(renderOption)
+            ))}
           {search.trim() && !exactMatch && (
             <Combobox.Option value="__create">
               <Text size="xs" className="text-blue-400">+ Create &quot;{search.trim()}&quot;</Text>
             </Combobox.Option>
           )}
-          {!search.trim() && filtered.length === 0 && (
+          {!search.trim() && pillars.length + labels.length === 0 && (
             <Combobox.Empty>
               <Text size="xs" className="text-text-muted">No labels</Text>
             </Combobox.Empty>

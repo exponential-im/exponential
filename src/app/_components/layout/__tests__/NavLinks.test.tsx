@@ -11,6 +11,7 @@ const {
   mockGetWorkspaceLayout,
   mockUpdateWorkspaceLayout,
   mockSetWorkspaceLayoutData,
+  mockPillarList,
 } = vi.hoisted(() => ({
   mockUseWorkspace: vi.fn(),
   mockUsePathname: vi.fn(() => '/today'),
@@ -19,6 +20,7 @@ const {
   mockGetWorkspaceLayout: vi.fn(() => ({ data: { navLayout: null as unknown }, isLoading: false })),
   mockUpdateWorkspaceLayout: vi.fn(() => Promise.resolve()),
   mockSetWorkspaceLayoutData: vi.fn(),
+  mockPillarList: vi.fn(() => ({ data: [] as { id: string; name: string }[] })),
 }));
 
 vi.mock('~/providers/WorkspaceProvider', () => ({
@@ -47,6 +49,7 @@ vi.mock('~/trpc/react', () => ({
     pluginConfig: { getEnabled: { useQuery: () => ({ data: [] }) } },
     project: { navChildren: { useQuery: () => ({ data: [], isLoading: false }) } },
     goal: { navChildren: { useQuery: () => ({ data: [], isLoading: false }) } },
+    pillar: { list: { useQuery: () => mockPillarList() } },
   },
 }));
 
@@ -92,6 +95,18 @@ describe('NavLinks — sections', () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it('shows a Pillars row only while the workspace has an active Pillar, whatever the saved layout', () => {
+    mockPillarList.mockReturnValue({ data: [] });
+    render(<NavLinks />);
+    expect(screen.queryByRole('link', { name: 'Pillars' })).not.toBeInTheDocument();
+    cleanup();
+
+    mockPillarList.mockReturnValue({ data: [{ id: 'tag-devops', name: 'DevOps' }] });
+    render(<NavLinks />);
+    expect(screen.getByRole('link', { name: 'Pillars' })).toHaveAttribute('href', '/w/test/pillars');
+    mockPillarList.mockReturnValue({ data: [] });
   });
 
   it('shows a heading only for sections with more than one item', () => {

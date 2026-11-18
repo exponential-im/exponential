@@ -1083,6 +1083,7 @@ model Position {
 
   workspace Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   holders   PositionHolder[]
+  pillars   PillarPosition[] // Pillars it is accountable for (ADR-0085; display only)
 
   @@unique([workspaceId, title])
   @@index([workspaceId])
@@ -1539,6 +1540,7 @@ model Project {
   decisions             Decision[]
 
   timeResolutionRules TimeResolutionRule[]
+  pillarTags          ProjectTag[] // Pillars this project is filed under (ADR-0085)
 
   @@index([name])
   @@index([status])
@@ -1666,6 +1668,7 @@ model Goal {
   progressSnapshots GoalProgressSnapshot[]
   features          Feature[]                   @relation("FeatureGoal")
   decisions         Decision[] // Decisions scoped to this objective (ADR-0060)
+  pillarTags        GoalTag[] // Pillars this objective is filed under (ADR-0085)
 
   @@index([lifeDomainId])
   @@index([userId])
@@ -3215,8 +3218,9 @@ model Tag {
   slug        String
   color       String // Semantic color key (e.g., "avatar-red", "brand-primary")
   description String?
-  category    String? // e.g. "label", "area" - null treated as general "label"
+  category    String? // "pillar" = a Pillar (ADR-0085); null or "label" = an ordinary label
   isSystem    Boolean  @default(false) // System tags cannot be deleted
+  archivedAt  DateTime? // An inactive Pillar: kept on every item, hidden from pickers and the sidebar
   workspaceId String? // null = global tag, available in all workspaces
   createdById String? // null for system tags
   createdAt   DateTime @default(now())
@@ -3229,6 +3233,11 @@ model Tag {
   features  FeatureTag[]
   epics     EpicTag[]
   insights  InsightTag[]
+  projects  ProjectTag[]
+  goals     GoalTag[]
+  resources ResourceTag[]
+  recurringTasks RecurringTaskTag[]
+  positions PillarPosition[] // Positions accountable for a Pillar (shown, never routed)
 
   // Global tags: unique by slug (when workspaceId is null)
   // Workspace tags: unique by slug within workspace
@@ -3250,6 +3259,74 @@ model ActionTag {
   @@unique([actionId, tagId])
   @@index([actionId])
   @@index([tagId])
+}
+
+// Pillars on Projects, Goals and Resources (ADR-0085). Same shape as ActionTag.
+model ProjectTag {
+  id        String   @id @default(cuid())
+  projectId String
+  tagId     String
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, tagId])
+  @@index([tagId])
+}
+
+model GoalTag {
+  id        String   @id @default(cuid())
+  goalId    Int
+  tagId     String
+  createdAt DateTime @default(now())
+
+  goal Goal @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, tagId])
+  @@index([tagId])
+}
+
+model ResourceTag {
+  id         String   @id @default(cuid())
+  resourceId String
+  tagId      String
+  createdAt  DateTime @default(now())
+
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([resourceId, tagId])
+  @@index([tagId])
+}
+
+// A recurring task's Pillars (ADR-0085, V3). Same shape as ProjectTag.
+model RecurringTaskTag {
+  id              String   @id @default(cuid())
+  recurringTaskId String
+  tagId           String
+  createdAt       DateTime @default(now())
+
+  recurringTask RecurringTask @relation(fields: [recurringTaskId], references: [id], onDelete: Cascade)
+  tag           Tag           @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([recurringTaskId, tagId])
+  @@index([tagId])
+}
+
+// The Positions shown as accountable for a Pillar: who to ask. Display only;
+// a Pillar never assigns or routes work through them (ADR-0085).
+model PillarPosition {
+  tagId      String
+  positionId String
+  createdAt  DateTime @default(now())
+
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  position Position @relation(fields: [positionId], references: [id], onDelete: Cascade)
+
+  @@id([tagId, positionId])
+  @@index([positionId])
 }
 
 model ActionList {
@@ -3624,6 +3701,7 @@ model Resource {
   project   Project?   @relation(fields: [projectId], references: [id])
   workspace Workspace? @relation(fields: [workspaceId], references: [id])
   createdByAgent ExternalAgent? @relation("ResourceAuthorAgent", fields: [createdByAgentId], references: [id], onDelete: SetNull)
+  pillarTags     ResourceTag[] // Pillars this resource is filed under (ADR-0085)
 
   @@index([userId])
   @@index([userId, readStatus])
@@ -4802,6 +4880,7 @@ model RecurringTask {
   workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy User          @relation("RecurringTaskCreator", fields: [createdById], references: [id])
   schedule  TaskSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  pillarTags RecurringTaskTag[] // Pillars this recurring duty serves (ADR-0085)
 
   @@index([workspaceId])
   @@index([projectId])

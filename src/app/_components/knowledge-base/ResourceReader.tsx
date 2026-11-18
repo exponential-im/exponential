@@ -1,5 +1,6 @@
 'use client';
 
+import { EntityPillars } from '~/app/_components/pillars/EntityPillars';
 import { useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
@@ -163,6 +164,17 @@ export function ResourceReader({ resourceId, workspaceSlug }: ResourceReaderProp
         <header className={styles.header}>
           <h1 className={styles.title}>{resource.title}</h1>
           {byline.length > 0 && <Text className={styles.byline}>{byline.join(' · ')}</Text>}
+          {resource.workspace && workspaceSlug && (
+            <div className="mt-2">
+              <EntityPillars
+                entityType="resource"
+                entityId={resource.id}
+                workspaceId={resource.workspace.id}
+                workspaceSlug={workspaceSlug}
+                readOnly={!resource.isMine}
+              />
+            </div>
+          )}
           <Group gap="xs" mt="md">
             {sourceUrl && (
               <Button

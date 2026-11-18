@@ -29,6 +29,7 @@ import {
 } from "@tabler/icons-react";
 import { Menu } from "@mantine/core";
 import { InboxCount } from "./InboxCount";
+import { PillarIcon } from "~/app/_components/pillars/PillarIcon";
 import { TodayCount } from "./TodayCount";
 import { useSidebarMode } from "./sidebarMode";
 import { useStoredBoolean } from "~/hooks/useStoredBoolean";
@@ -413,6 +414,34 @@ export function GlobalNavLinks(): React.ReactElement {
 }
 
 /**
+ * The Pillars row (ADR-0085), in a fixed slot above the configurable sections
+ * rather than in the saved layout, so sidebars people have already arranged
+ * get it too. Shown only while the workspace has an active Pillar.
+ */
+function PillarsNavSlot({
+  workspaceId,
+  workspaceSlug,
+}: {
+  workspaceId: string | null;
+  workspaceSlug: string;
+}): React.ReactElement | null {
+  const { data: pillars } = api.pillar.list.useQuery(
+    { workspaceId: workspaceId ?? "" },
+    { enabled: !!workspaceId, staleTime: 5 * 60 * 1000 },
+  );
+  if (!pillars || pillars.length === 0) return null;
+  return (
+    <div className="sb-section">
+      <div className="sb-group">
+        <NavLink href={`/w/${workspaceSlug}/pillars`} icon={PillarIcon}>
+          Pillars
+        </NavLink>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Renders the workspace sidebar navigation from the layout in effect for the
  * current workspace (see {@link useWorkspaceNavLayout}): pinned shortcuts,
  * then the configurable sections/items, with plugin gating and a reduced
@@ -475,6 +504,7 @@ export function NavLinks({ onCustomize }: { onCustomize?: () => void } = {}): Re
 
   return (
     <>
+      <PillarsNavSlot workspaceId={workspaceId} workspaceSlug={workspaceSlug} />
       {layout.map((section) => {
         if (section.hidden) return null;
 

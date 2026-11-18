@@ -8,10 +8,42 @@ import {
   listForEntity as listForEntityService,
   setEntityTags as setEntityTagsService,
 } from "~/server/services/tags/TagAssignmentService";
+import {
+  createPillar as createPillarService,
+  setPillar as setPillarService,
+  setPillarArchived as setPillarArchivedService,
+  setPillarPositions as setPillarPositionsService,
+} from "~/server/services/pillars/PillarService";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
-const tagEntityTypeSchema = z.enum(["action", "ticket", "feature", "epic"]);
+const tagEntityTypeSchema = z.enum([
+  "action",
+  "ticket",
+  "feature",
+  "epic",
+  "project",
+  "goal",
+  "resource",
+  "recurringTask",
+]);
+
+/**
+ * `tag.create` and `tag.update` may not make or unmake a Pillar: promotion has
+ * one entry point, `tag.setPillar`, which needs a workspace admin.
+ */
+function assertNotPillarCategory(category: string | null | undefined): void {
+  if (category === PILLAR_CATEGORY) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Use tag.setPillar to promote a tag to a Pillar",
+    });
+  }
+}
 
 const tagColorSchema = z.enum(TAG_COLORS);
+
+/** Room for a Pillar's "what good looks like" (Markdown); a label's stays short in practice. */
+const TAG_DESCRIPTION_MAX = 2000;
 
 export const tagRouter = createTRPCRouter({
   // List all tags available for a workspace (global + workspace-specific)
@@ -115,12 +147,13 @@ export const tagRouter = createTRPCRouter({
       z.object({
         name: z.string().min(1).max(50),
         color: tagColorSchema,
-        description: z.string().max(200).optional(),
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
         category: z.string().max(50).nullable().optional(),
         workspaceId: z.string(), // Required - users create workspace-specific tags
       })
     )
     .mutation(async ({ ctx, input }) => {
+      assertNotPillarCategory(input.category);
       // A tag is workspace content: membership alone (a read-only viewer)
       // is not permission to create one.
       await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, input.workspaceId);
@@ -167,7 +200,7 @@ export const tagRouter = createTRPCRouter({
         id: z.string(),
         name: z.string().min(1).max(50).optional(),
         color: tagColorSchema.optional(),
-        description: z.string().max(200).optional(),
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
         category: z.string().max(50).nullable().optional(),
       })
     )
@@ -194,6 +227,17 @@ export const tagRouter = createTRPCRouter({
       // Verify user has permission (a write role in the tag's workspace)
       if (tag.workspaceId) {
         await assertWorkspaceWriteRole(ctx.db, ctx.session.user.id, tag.workspaceId);
+      }
+
+      // Neither setting nor clearing the Pillar category goes through here.
+      if (input.category !== undefined) {
+        assertNotPillarCategory(input.category);
+        if (tag.category === PILLAR_CATEGORY) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Use tag.setPillar to turn a Pillar back into a label",
+          });
+        }
       }
 
       // If name is changing, update slug and check for conflicts
@@ -231,6 +275,56 @@ export const tagRouter = createTRPCRouter({
         },
       });
     }),
+
+  // Promote a workspace tag to a Pillar, or demote it (ADR-0085). Admins only.
+  setPillar: protectedProcedure
+    .input(z.object({ tagId: z.string(), isPillar: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      setPillarService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        isPillar: input.isPillar,
+      }),
+    ),
+
+  // Create a workspace tag that is a Pillar from the start. Admins only.
+  createPillar: protectedProcedure
+    .input(
+      z.object({
+        workspaceId: z.string(),
+        name: z.string().trim().min(1).max(50),
+        color: tagColorSchema,
+        description: z.string().max(TAG_DESCRIPTION_MAX).optional(),
+      }),
+    )
+    .mutation(({ ctx, input }) =>
+      createPillarService({ db: ctx.db, userId: ctx.session.user.id, ...input }),
+    ),
+
+  // Mark a Pillar inactive (or active again). Admins only; no item loses its tag.
+  setPillarArchived: protectedProcedure
+    .input(z.object({ tagId: z.string(), archived: z.boolean() }))
+    .mutation(({ ctx, input }) =>
+      setPillarArchivedService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        archived: input.archived,
+      }),
+    ),
+
+  // The Positions shown as accountable for a Pillar (replace-all). Admins only.
+  setPillarPositions: protectedProcedure
+    .input(z.object({ tagId: z.string(), positionIds: z.array(z.string()).max(50) }))
+    .mutation(({ ctx, input }) =>
+      setPillarPositionsService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        positionIds: input.positionIds,
+      }),
+    ),
 
   // Delete a tag
   delete: protectedProcedure

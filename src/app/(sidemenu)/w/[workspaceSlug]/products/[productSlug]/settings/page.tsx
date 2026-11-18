@@ -33,7 +33,9 @@ import {
 } from "@tabler/icons-react";
 import { modals } from "@mantine/modals";
 import { getTagMantineColor } from "~/utils/tagColors";
-import type { TagColor } from "~/types/tag";
+import { PILLAR_CATEGORY, type TagColor } from "~/types/tag";
+import { Panel } from "~/app/_components/ui";
+import { TagBadge } from "~/app/_components/TagBadge";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { api } from "~/trpc/react";
 import { FavoriteButton } from "~/app/_components/shared/FavoriteButton";
@@ -150,7 +152,13 @@ interface OptimisticTag {
   isOptimistic?: boolean;
 }
 
-function TagManagementSection({ workspaceId }: { workspaceId: string }) {
+function TagManagementSection({
+  workspaceId,
+  workspaceSlug,
+}: {
+  workspaceId: string;
+  workspaceSlug: string;
+}) {
   const utils = api.useUtils();
   const { data: tags } = api.tag.list.useQuery(
     { workspaceId },
@@ -189,7 +197,6 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
 
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState<TagColor>("avatar-blue");
-  const [newCategory, setNewCategory] = useState<"label" | "area">("label");
 
   // Merge server tags with optimistic state
   const serverTags: OptimisticTag[] = (tags?.workspaceTags ?? []).map((t) => ({
@@ -205,8 +212,9 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
     ...optimisticAdds,
   ];
 
-  const areas = allTags.filter((t) => t.category === "area");
-  const labels = allTags.filter((t) => t.category !== "area");
+  // Pillars (ADR-0085) are managed in workspace settings; this page makes labels.
+  const pillars = allTags.filter((t) => t.category === PILLAR_CATEGORY);
+  const labels = allTags.filter((t) => t.category !== PILLAR_CATEGORY);
 
   const handleCreate = () => {
     const trimmed = newName.trim();
@@ -220,7 +228,7 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
         id: optimisticId,
         name: trimmed,
         color: newColor,
-        category: newCategory,
+        category: null,
         isSystem: false,
         isOptimistic: true,
       },
@@ -229,7 +237,6 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
     createTag.mutate({
       name: trimmed,
       color: newColor,
-      category: newCategory,
       workspaceId,
     });
 
@@ -254,19 +261,8 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
       <SectionCard>
         <div className="px-5 py-3">
           <div className="flex items-center gap-2">
-            <Select
-              value={newCategory}
-              onChange={(v) => v && setNewCategory(v as "label" | "area")}
-              data={[
-                { value: "label", label: "Label" },
-                { value: "area", label: "Area" },
-              ]}
-              size="xs"
-              comboboxProps={{ withinPortal: true }}
-              styles={{ input: { width: 90 } }}
-            />
             <TextInput
-              placeholder="Add a label or area..."
+              placeholder="Add a label..."
               size="xs"
               value={newName}
               onChange={(e) => setNewName(e.currentTarget.value)}
@@ -340,43 +336,24 @@ function TagManagementSection({ workspaceId }: { workspaceId: string }) {
           </div>
         </div>
 
-        {/* Areas */}
+        {/* Pillars: shown here, managed in workspace settings */}
         <div className="space-y-3">
-          <SubSectionLabel>Areas</SubSectionLabel>
-          <div className="rounded-lg border border-border-primary bg-surface-secondary p-4 min-h-[100px]">
-            {areas.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {areas.map((tag) => (
-                  <Badge
-                    key={tag.id}
-                    size="md"
-                    variant="light"
-                    color={getTagMantineColor(tag.color)}
-                    className={tag.isOptimistic ? "opacity-60" : ""}
-                    rightSection={
-                      !tag.isSystem ? (
-                        <ActionIcon
-                          size={16}
-                          radius="xl"
-                          variant="transparent"
-                          color={getTagMantineColor(tag.color)}
-                          onClick={() => handleDelete(tag.id)}
-                        >
-                          <IconX size={12} />
-                        </ActionIcon>
-                      ) : undefined
-                    }
-                  >
-                    {tag.name}
-                  </Badge>
+          <SubSectionLabel>Pillars</SubSectionLabel>
+          <Panel padding="md" className="min-h-[100px]">
+            {pillars.length > 0 && (
+              <div className="mb-3 flex flex-wrap gap-2">
+                {pillars.map((tag) => (
+                  <TagBadge key={tag.id} tag={tag} size="md" />
                 ))}
               </div>
-            ) : (
-              <Text size="xs" className="text-text-muted">
-                No areas yet
-              </Text>
             )}
-          </div>
+            <Text size="xs" className="text-text-muted">
+              Standing areas of the whole workspace, such as DevOps.{" "}
+              <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+                Manage Pillars in workspace settings
+              </Link>
+            </Text>
+          </Panel>
         </div>
       </div>
     </div>
@@ -975,9 +952,9 @@ export default function ProductSettingsPage() {
           <SettingsSection
             icon={IconTags}
             title="Labels"
-            description="Freeform tags for filtering (e.g. tech-debt, urgent, mobile). The legacy Area category here only groups tickets in ticket views - feature registry Areas are managed in the Areas section."
+            description="Freeform tags for filtering (e.g. tech-debt, urgent, mobile). Feature registry Areas are managed in the Areas section; the workspace's Pillars, its standing areas of work, in workspace settings."
           >
-            <TagManagementSection workspaceId={workspaceId ?? ""} />
+            <TagManagementSection workspaceId={workspaceId ?? ""} workspaceSlug={workspace?.slug ?? ""} />
           </SettingsSection>
         )}
 

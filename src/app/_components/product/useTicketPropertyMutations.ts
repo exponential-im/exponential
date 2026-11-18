@@ -161,7 +161,8 @@ export function useTicketPropertyMutations(
         }
         if (vars.epicId !== undefined) {
           const e = resolve(vars.epicId, lookups.epics?.find((x) => x.id === vars.epicId));
-          r.epic = vars.epicId && e ? { id: e.id, name: e.name } : null;
+          // The epic's Pillars arrive with the refetch.
+          r.epic = vars.epicId && e ? { id: e.id, name: e.name, tags: [] } : null;
         }
         if (vars.cycleId !== undefined) {
           const c = resolve(vars.cycleId, lookups.cycles?.find((x) => x.id === vars.cycleId));
