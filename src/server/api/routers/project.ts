@@ -63,6 +63,9 @@ export const projectRouter = createTRPCRouter({
         id: z.string(),
         name: z.string(),
         slug: z.string(),
+        // The project's Pillars (ADR-0085), so a capture picker can narrow
+        // projects to ticked Pillars and pre-tick a chosen project's.
+        pillarTagIds: z.array(z.string()),
       }))
     }))
     .query(async ({ ctx, input }) => {
@@ -76,6 +79,7 @@ export const projectRouter = createTRPCRouter({
           id: true,
           name: true,
           slug: true,
+          pillarTags: { select: { tagId: true } },
         },
         orderBy: {
           name: "asc",
@@ -83,7 +87,10 @@ export const projectRouter = createTRPCRouter({
       });
 
       return {
-        projects,
+        projects: projects.map(({ pillarTags, ...project }) => ({
+          ...project,
+          pillarTagIds: pillarTags.map((t) => t.tagId),
+        })),
       };
     }),
 

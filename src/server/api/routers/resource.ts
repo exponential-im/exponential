@@ -22,6 +22,7 @@ import {
   type AlreadyInProject,
 } from "~/server/services/resources/alreadyInProject";
 import { youtubeVideoId } from "~/utils/youtube";
+import { resolveCapturePillars } from "~/server/services/pillars/PillarService";
 
 const contentTypeEnum = z.enum([
   "web_page",
@@ -385,6 +386,25 @@ async function moveChunksWithResource(
   });
 }
 
+/**
+ * Add a capture's Pillars to the Resource it saved. Only when the Resource
+ * landed in the Pillars' workspace: a re-save of a page already filed under a
+ * Project elsewhere keeps its place, and another workspace's Pillars do not
+ * apply to it.
+ */
+async function fileResourceUnderPillars(
+  db: PrismaClient,
+  resource: { id: string; workspaceId: string | null },
+  pillarWorkspaceId: string | null,
+  tagIds: string[] | undefined,
+): Promise<void> {
+  if (!pillarWorkspaceId || !tagIds?.length || resource.workspaceId !== pillarWorkspaceId) return;
+  await db.resourceTag.createMany({
+    data: [...new Set(tagIds)].map((tagId) => ({ resourceId: resource.id, tagId })),
+    skipDuplicates: true,
+  });
+}
+
 const resourceProcedure = protectedProcedure.use(async ({ ctx, next }) =>
   next({ ctx: { scope: await resolveResourceScope(ctx) } }),
 );
@@ -428,10 +448,21 @@ export const resourceRouter = createTRPCRouter({
         // Filed for reference, not to read: the save leaves the Reading list
         // alone and `readStatus` is ignored. See `saveReadState`.
         forReference: z.boolean().default(false),
+        // Pillars the capture ticked (ADR-0085): active Pillars of one
+        // workspace. With no workspace or Project named, they name it. Added
+        // to the Pillars the Resource already has; never removes one.
+        tagIds: z.array(z.string()).max(20).optional(),
       })
     )
-    .mutation(async ({ ctx, input }) => {
+    .mutation(async ({ ctx, input: rawInput }) => {
       const { scope } = ctx;
+      const pillarWorkspaceId = await resolveCapturePillars(ctx.db, rawInput.tagIds ?? []);
+      // A capture with Pillars and no Project files into the Pillars' workspace.
+      const input = {
+        ...rawInput,
+        workspaceId:
+          rawInput.workspaceId ?? (rawInput.projectId ? undefined : pillarWorkspaceId ?? undefined),
+      };
 
       // Verify project access if specified — creating a resource in a project
       // requires edit access to that project.
@@ -451,6 +482,12 @@ export const resourceRouter = createTRPCRouter({
         (input.projectId ? await projectWorkspaceId(ctx.db, input.projectId) : null) ??
         input.workspaceId;
       assertAgentCanPlace(scope, workspaceId);
+      if (pillarWorkspaceId && workspaceId !== pillarWorkspaceId) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "Pillars must belong to the workspace the Resource is saved in",
+        });
+      }
 
       // The caller must belong to a workspace they name. An agent must be
       // delegated the workspace the Resource lands in, named or not.
@@ -593,6 +630,7 @@ export const resourceRouter = createTRPCRouter({
           context: "re-save",
         });
 
+        await fileResourceUnderPillars(ctx.db, resource, pillarWorkspaceId, input.tagIds);
         return { resource, created: false, alreadyInProject };
       }
 
@@ -624,6 +662,7 @@ export const resourceRouter = createTRPCRouter({
         context: "create",
       });
 
+      await fileResourceUnderPillars(ctx.db, resource, pillarWorkspaceId, input.tagIds);
       return { resource, created: true, alreadyInProject };
     }),
 

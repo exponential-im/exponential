@@ -490,6 +490,69 @@ describe("resource router — reading list (mocked)", () => {
       expect(dbMock.resource.update).not.toHaveBeenCalled();
     });
 
+    describe("Pillars at capture (inner.tiger)", () => {
+      const pillar = (id: string, workspaceId = "w1", extra: Record<string, unknown> = {}) => ({
+        id,
+        category: "pillar",
+        workspaceId,
+        archivedAt: null,
+        ...extra,
+      });
+
+      it("files a link with Pillars and no workspace into the Pillars' workspace, under them", async () => {
+        dbMock.tag.findMany.mockResolvedValue([pillar("devops")] as never);
+        dbMock.workspaceUser.count.mockResolvedValue(1);
+        dbMock.resource.create.mockResolvedValue(fakeResource({ id: "r1", workspaceId: "w1" }));
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await caller.resource.create({
+          title: "Backups",
+          url: "https://example.com/backups",
+          contentType: "bookmark",
+          tagIds: ["devops"],
+        });
+
+        expect(dbMock.resource.create.mock.calls[0]![0].data).toMatchObject({ workspaceId: "w1" });
+        expect(dbMock.resourceTag.createMany).toHaveBeenCalledWith({
+          data: [{ resourceId: "r1", tagId: "devops" }],
+          skipDuplicates: true,
+        });
+      });
+
+      it("refuses Pillars from another workspace than the one named", async () => {
+        dbMock.tag.findMany.mockResolvedValue([pillar("devops", "w2")] as never);
+        dbMock.workspaceUser.count.mockResolvedValue(1);
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+
+        await expect(
+          caller.resource.create({ title: "x", workspaceId: "w1", tagIds: ["devops"] }),
+        ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+        expect(dbMock.resource.create).not.toHaveBeenCalled();
+      });
+
+      it("refuses a plain label, an inactive Pillar, or Pillars of two workspaces", async () => {
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+        for (const tags of [
+          [pillar("bug", "w1", { category: null })],
+          [pillar("old", "w1", { archivedAt: new Date() })],
+          [pillar("devops", "w1"), pillar("gtm", "w2")],
+        ]) {
+          dbMock.tag.findMany.mockResolvedValue(tags as never);
+          await expect(
+            caller.resource.create({ title: "x", tagIds: tags.map((t) => t.id) }),
+          ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+        }
+        expect(dbMock.resource.create).not.toHaveBeenCalled();
+      });
+
+      it("adds nothing when the save names no Pillars", async () => {
+        dbMock.resource.create.mockResolvedValue(fakeResource());
+        const caller = createMockCaller({ userId: callerId, db: dbMock });
+        await caller.resource.create({ title: "x", url: "https://example.com/x" });
+        expect(dbMock.resourceTag.createMany).not.toHaveBeenCalled();
+      });
+    });
+
     describe("Page text (damp.gem)", () => {
       const url = "https://www.airbnb.com/rooms/53368445";
       const pageText = "Villa in Lanzarote\n€1,240 total\nFree cancellation";

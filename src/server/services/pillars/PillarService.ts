@@ -166,6 +166,39 @@ export async function listPillars({
   });
 }
 
+/**
+ * Check the Pillars a capture ticked (the Chrome extension, Save link, quick
+ * add) and return the one workspace they belong to. Each must be an active
+ * Pillar, and all of one workspace: a capture files into one workspace.
+ * Membership of that workspace is the caller's own check, since it differs
+ * for agents.
+ */
+export async function resolveCapturePillars(
+  db: PrismaClient,
+  tagIds: readonly string[],
+): Promise<string | null> {
+  const ids = [...new Set(tagIds)];
+  if (ids.length === 0) return null;
+  const tags = await db.tag.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, category: true, workspaceId: true, archivedAt: true },
+  });
+  const workspaceIds = new Set(tags.map((t) => t.workspaceId));
+  const [workspaceId] = workspaceIds;
+  if (
+    tags.length !== ids.length ||
+    workspaceIds.size !== 1 ||
+    !workspaceId ||
+    tags.some((t) => t.category !== PILLAR_CATEGORY || t.archivedAt)
+  ) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message: "Pillars must be active Pillars of one workspace",
+    });
+  }
+  return workspaceId;
+}
+
 /** Slug rule shared with `tag.create`. */
 export function slugifyTagName(name: string): string {
   return name
