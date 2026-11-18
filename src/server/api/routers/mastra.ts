@@ -36,6 +36,7 @@ import crypto from "crypto";
 import { testFirefliesConnection } from "./integration";
 import { pageRouter } from "./page";
 import { ticketRouter } from "~/plugins/product/server/routers/ticket";
+import { okrPeriodSchema, periodChangeData } from "~/plugins/okr/server/keyResultPeriod";
 import { applyTicketLabels } from "~/server/services/tags/ticketLabels";
 import { GoogleCalendarService } from "~/server/services/GoogleCalendarService";
 import { decryptBufferSafe, encryptString, encryptToBase64 } from "~/server/utils/encryption";
@@ -3653,6 +3654,8 @@ export const mastraRouter = createTRPCRouter({
       unitLabel: z.string().optional(),
       status: z.enum(["not-started", "on-track", "at-risk", "off-track", "achieved"]).optional(),
       confidence: z.number().min(0).max(100).optional(),
+      // Move the key result to another quarter, half or year.
+      period: okrPeriodSchema.optional(),
     }))
     .mutation(async ({ ctx, input }) => {
       const userId = ctx.session.user.id;
@@ -3672,7 +3675,10 @@ export const mastraRouter = createTRPCRouter({
 
       const keyResult = await ctx.db.keyResult.update({
         where: { id },
-        data: updateData,
+        data: {
+          ...updateData,
+          ...periodChangeData(existing.period, updateData.period),
+        },
         include: {
           goal: { select: { id: true, title: true } },
         },
@@ -3686,6 +3692,7 @@ export const mastraRouter = createTRPCRouter({
           currentValue: keyResult.currentValue,
           status: keyResult.status,
           confidence: keyResult.confidence,
+          period: keyResult.period,
           goal: keyResult.goal,
         },
       };

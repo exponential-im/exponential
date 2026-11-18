@@ -94,6 +94,16 @@ export function isHalfYearPeriod(period: string): boolean {
 }
 
 /**
+ * The shape every key result and objective period takes: a quarter, a half
+ * or a year, e.g. "Q3-2026", "H1-2026", "Annual-2026".
+ */
+export const OKR_PERIOD_PATTERN = /^(Q[1-4]|H[12]|Annual)-\d{4}$/;
+
+export function isOkrPeriod(period: string): boolean {
+  return OKR_PERIOD_PATTERN.test(period);
+}
+
+/**
  * Get a friendly display name for a period.
  * @example getPeriodDisplayName("Q1-2026") => "Q1 2026"
  * @example getPeriodDisplayName("Annual-2026") => "Annual 2026"
