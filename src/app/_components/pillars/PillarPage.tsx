@@ -2,6 +2,7 @@
 
 import { PillarIcon } from "./PillarIcon";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Avatar,
@@ -69,15 +70,23 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
     { placeholderData: (previous) => previous },
   );
 
-  // Opened by id (an old link): show the slug URL instead. Replacing the
-  // history entry rather than navigating keeps this query, so nothing reloads
-  // (Next.js syncs its router with the native history call).
+  // Opened by id (an old link): show the slug URL instead. In the same
+  // workspace, replacing the history entry keeps this query, so nothing
+  // reloads (Next.js syncs its router with the native history call). An id
+  // from another workspace navigates, so the sidebar and workspace context
+  // follow the URL.
+  const router = useRouter();
   const canonicalPath = data ? pillarPath(data.pillar.workspaceSlug, data.pillar) : null;
+  const otherWorkspace = data ? data.pillar.workspaceSlug !== workspaceSlug : false;
   useEffect(() => {
-    if (canonicalPath && window.location.pathname !== canonicalPath) {
-      window.history.replaceState(null, "", canonicalPath + window.location.search);
+    if (!canonicalPath || window.location.pathname === canonicalPath) return;
+    const target = canonicalPath + window.location.search;
+    if (otherWorkspace) {
+      router.replace(target);
+    } else {
+      window.history.replaceState(null, "", target);
     }
-  }, [canonicalPath]);
+  }, [canonicalPath, otherWorkspace, router]);
 
   if (isLoading) {
     return (
