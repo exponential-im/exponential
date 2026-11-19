@@ -186,6 +186,7 @@ export function CreateGoalModal({ children, goal, trigger, projectId, defaultWor
           keyResults: [],
           workspace: null,
           driUser: null,
+          pillarTags: [],
           // A brand-new goal has no key results and no override, so its
           // resolved progress is "no signal" until the refetch lands.
           resolvedProgress: null,

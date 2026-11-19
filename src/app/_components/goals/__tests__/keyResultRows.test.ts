@@ -11,11 +11,15 @@ import type { ObjectiveCardObjective } from "~/plugins/okr/client/components/Obj
 
 const user = (id: string, name: string | null) => ({ id, name, email: null, image: null });
 
-const objectives: (ObjectiveCardObjective & { status?: string })[] = [
+const objectives: (ObjectiveCardObjective & {
+  status?: string;
+  pillarTags?: { tagId: string }[];
+})[] = [
   {
     id: 1,
     title: "Grow revenue",
     status: "active",
+    pillarTags: [{ tagId: "p-growth" }],
     progress: 50,
     keyResults: [
       {
@@ -189,6 +193,14 @@ describe("filterKeyResultRows", () => {
   it("Owner is the key result's DRI; unassigned never matches", () => {
     expect(ids(filterKeyResultRows(rows, { driId: ["u2"] }, ""))).toEqual(["kr-c"]);
     expect(ids(filterKeyResultRows(rows, { driId: ["nobody"] }, ""))).toEqual([]);
+  });
+
+  it("Pillar reads the parent objective's Pillars", () => {
+    expect(ids(filterKeyResultRows(rows, { pillar: ["p-growth"] }, ""))).toEqual([
+      "kr-a",
+      "kr-b",
+    ]);
+    expect(ids(filterKeyResultRows(rows, { pillar: ["none"] }, ""))).toEqual(["kr-c"]);
   });
 
   it("search matches the key result or its objective title", () => {
