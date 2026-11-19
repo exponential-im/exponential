@@ -97,7 +97,7 @@ export function TagSelector({
 
   const allTags = tags?.allTags ?? [];
   const selectedTags = allTags.filter(tag => selectedTagIds.includes(tag.id));
-  // Pillars (ADR-0085) are a different kind of thing from labels: their own group, on top.
+  // Pillars (ADR-0086) are a different kind of thing from labels: their own group, on top.
   const { pillars, labels } = splitPillarTags(allTags, selectedTagIds);
 
   const renderChips = (group: typeof allTags) => (

@@ -7,7 +7,7 @@ import {
 } from "~/server/services/pillars/PillarService";
 
 /**
- * Pillars (ADR-0085): reads for the Pillar page. Promotion lives on the tag
+ * Pillars (ADR-0086): reads for the Pillar page. Promotion lives on the tag
  * router (`tag.setPillar`), because a Pillar is a tag.
  */
 export const pillarRouter = createTRPCRouter({

@@ -57,7 +57,7 @@ interface PillarPageProps {
 }
 
 /**
- * A Pillar's page (ADR-0085): everything happening in one standing area of
+ * A Pillar's page (ADR-0086): everything happening in one standing area of
  * the workspace's work. Sections run top to bottom in the order the PRD gives.
  */
 export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {

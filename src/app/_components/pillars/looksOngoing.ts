@@ -5,7 +5,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * A Project is finite. One that has been active for more than 90 days with
- * no end date may really be a standing area of work: a Pillar (ADR-0085).
+ * no end date may really be a standing area of work: a Pillar (ADR-0086).
  * Derived on read; nothing is stored.
  */
 export function looksOngoing(

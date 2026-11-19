@@ -155,7 +155,7 @@ const ticketListInput = z.object({
   epicId: z.string().optional(),
   cycleId: z.string().optional(),
   assigneeId: z.string().optional(),
-  // Pillar filter: a Pillar's Tag CUID (ADR-0085). Constrains results to
+  // Pillar filter: a Pillar's Tag CUID (ADR-0086). Constrains results to
   // tickets under that Pillar, carried by the ticket or by its epic.
   pillarTagId: z.string().optional(),
   // Deprecated alias of pillarTagId, from when the board grouped by the
@@ -241,7 +241,7 @@ function withBlockerCounts<
   });
 }
 
-/** A ticket's epic with the epic's Pillars, for the board's "group by Pillar" (ADR-0085). */
+/** A ticket's epic with the epic's Pillars, for the board's "group by Pillar" (ADR-0086). */
 const TICKET_EPIC_WITH_PILLARS = {
   id: true,
   name: true,

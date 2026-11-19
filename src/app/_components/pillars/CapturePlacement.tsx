@@ -33,7 +33,7 @@ interface CapturePlacementProps {
 }
 
 /**
- * The second and third questions of capture (ADR-0085): which Pillars this
+ * The second and third questions of capture (ADR-0086): which Pillars this
  * belongs to, then optionally which Project. Ticking Pillars narrows the
  * Project list to Projects under them; choosing a Project ticks its Pillars.
  * Renders nothing while the workspace has no Pillar and no Project to offer.

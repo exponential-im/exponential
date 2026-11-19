@@ -25,7 +25,7 @@ interface EntityPillarsProps {
 }
 
 /**
- * The Pillars a Project, Goal or Resource is filed under (ADR-0085), each a
+ * The Pillars a Project, Goal or Resource is filed under (ADR-0086), each a
  * link to its Pillar page, with an editor for people who may change them.
  * Inactive Pillars already on the item stay shown, but are never offered.
  */

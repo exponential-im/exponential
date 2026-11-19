@@ -1,5 +1,5 @@
 /**
- * Pillar guards on the tag router (ADR-0085): promotion is admin-only and
+ * Pillar guards on the tag router (ADR-0086): promotion is admin-only and
  * has one entry point, and a Project takes this workspace's active Pillars
  * only. Mocked Prisma, same harness as `crmTagWriteRole.test.ts`.
  */

@@ -1,6 +1,6 @@
 import { PillarPage } from "~/app/_components/pillars/PillarPage";
 
-/** A Pillar's page: one standing area of the workspace's work (ADR-0085). */
+/** A Pillar's page: one standing area of the workspace's work (ADR-0086). */
 export default async function PillarRoute({
   params,
 }: {

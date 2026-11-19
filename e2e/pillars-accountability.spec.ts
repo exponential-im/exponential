@@ -1,5 +1,5 @@
 /**
- * Pillars V3 (ADR-0085, ticket teal.vault): accountability, recurring duties
+ * Pillars V3 (ADR-0086, ticket teal.vault): accountability, recurring duties
  * and nudges on a Pillar. Positions are shown as who to ask; nothing is routed
  * through them.
  *

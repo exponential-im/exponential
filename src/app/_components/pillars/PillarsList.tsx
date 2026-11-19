@@ -11,7 +11,7 @@ import { getTagMantineColor } from "~/utils/tagColors";
 import { PillarIcon } from "./PillarIcon";
 
 /**
- * Every Pillar in the workspace (ADR-0085): the standing areas of its work,
+ * Every Pillar in the workspace (ADR-0086): the standing areas of its work,
  * each linking to its page.
  */
 export function PillarsList() {

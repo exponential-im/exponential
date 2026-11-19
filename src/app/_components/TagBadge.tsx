@@ -9,7 +9,7 @@ interface TagBadgeProps {
     name: string;
     slug?: string;
     color: string;
-    /** "pillar" marks a Pillar (ADR-0085), drawn with the Pillar glyph. */
+    /** "pillar" marks a Pillar (ADR-0086), drawn with the Pillar glyph. */
     category?: string | null;
   };
   size?: 'xs' | 'sm' | 'md' | 'lg' | 'xl';

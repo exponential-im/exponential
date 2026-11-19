@@ -1,5 +1,5 @@
 /**
- * project.getUserProjects for capture pickers (ADR-0085, inner.tiger): each
+ * project.getUserProjects for capture pickers (ADR-0086, inner.tiger): each
  * project comes with its active Pillars only, so a capture never ticks an
  * inactive one it cannot show. Mocked Prisma, same harness as tagPillar.test.
  */

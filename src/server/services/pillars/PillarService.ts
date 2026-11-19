@@ -1,5 +1,5 @@
 /**
- * Pillars (ADR-0085): a Pillar is a workspace Tag with `category = "pillar"`,
+ * Pillars (ADR-0086): a Pillar is a workspace Tag with `category = "pillar"`,
  * promoted to have its own page. This service owns promotion and the Pillar
  * page read.
  *
@@ -210,7 +210,7 @@ export async function resolveCapturePillars(
 /**
  * Set the Positions shown as accountable for a Pillar (replace-all).
  * Admin-only, like the rest of a Pillar's settings. Display only: nothing
- * assigns or routes work through them (ADR-0085).
+ * assigns or routes work through them (ADR-0086).
  */
 export async function setPillarPositions({
   db,
@@ -249,7 +249,7 @@ export async function setPillarPositions({
 }
 
 /**
- * Pillars to pre-tick for a capture's text, best first (ADR-0085, V3): the
+ * Pillars to pre-tick for a capture's text, best first (ADR-0086, V3): the
  * workspace's active Pillars matched by keyword against their names and
  * descriptions. Suggestions only; nothing is filed.
  */

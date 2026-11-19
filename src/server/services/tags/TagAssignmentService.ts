@@ -24,7 +24,7 @@ export type TagEntityType =
   | "recurringTask";
 
 /**
- * Entities that take Pillars only, never ordinary labels (ADR-0085): a
+ * Entities that take Pillars only, never ordinary labels (ADR-0086): a
  * Project, Goal or Resource is filed under a standing area, not labelled.
  */
 const PILLAR_ONLY_ENTITY_TYPES: ReadonlySet<TagEntityType> = new Set([

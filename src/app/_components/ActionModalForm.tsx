@@ -511,7 +511,7 @@ export function ActionModalForm({
         </Group>
       </Group>
 
-      {/* Creating: Pillars, then an optional Project (ADR-0085). The workspace
+      {/* Creating: Pillars, then an optional Project (ADR-0086). The workspace
           is the one the modal was opened in. */}
       {showCapturePlacement && workspaceId && (
         <Box mt="sm">

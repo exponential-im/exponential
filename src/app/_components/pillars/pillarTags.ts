@@ -7,7 +7,7 @@ export interface PickableTag {
 }
 
 /**
- * Split a tag picker's options into Pillars and ordinary labels (ADR-0085),
+ * Split a tag picker's options into Pillars and ordinary labels (ADR-0086),
  * so a picker can show Pillars as their own group. An inactive Pillar is never
  * offered for new assignment, but stays listed while the item already carries
  * it, so it can be seen and removed.

@@ -460,7 +460,7 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                 </Group>
               </Group>
 
-              {/* Pillars (ADR-0085): only an objective in this workspace carries them */}
+              {/* Pillars (ADR-0086): only an objective in this workspace carries them */}
               {workspace && goal.workspaceId === workspace.id && (
                 <EntityPillars
                   entityType="goal"

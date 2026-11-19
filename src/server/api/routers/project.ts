@@ -69,7 +69,7 @@ export const projectRouter = createTRPCRouter({
         id: z.string(),
         name: z.string(),
         slug: z.string(),
-        // The project's Pillars (ADR-0085), so a capture picker can narrow
+        // The project's Pillars (ADR-0086), so a capture picker can narrow
         // projects to ticked Pillars and pre-tick a chosen project's.
         pillarTagIds: z.array(z.string()),
       }))
