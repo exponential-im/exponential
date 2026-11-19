@@ -36,6 +36,7 @@ async function tick(placement: Locator, pillar: string) {
 
 interface Seeded {
   pillarId: string;
+  pillarSlug: string;
   otherPillarId: string;
   projectIds: string[];
 }
@@ -87,6 +88,7 @@ test.describe("Capture with Pillars", () => {
     });
     seeded = {
       pillarId: pillar.id,
+      pillarSlug: pillar.slug,
       otherPillarId: otherPillar.id,
       projectIds: [pillarProject.id, otherProject.id],
     };
@@ -124,7 +126,7 @@ test.describe("Capture with Pillars", () => {
       )
       .toBe(1);
 
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     await expect(
       page.getByRole("region", { name: "Resources" }).getByRole("link", { name: names.savedHost }),
     ).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
@@ -161,7 +163,7 @@ test.describe("Capture with Pillars", () => {
   });
 
   test("the Create Action modal asks Pillars then Project, and files under the Pillar", async ({ page }) => {
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
       timeout: FIRST_PAINT_TIMEOUT,
     });

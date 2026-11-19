@@ -72,16 +72,46 @@ export interface PillarLooseWork {
   tickets: PillarPageTicket[];
 }
 
-export interface PillarPageInput {
+/**
+ * How a caller names a Pillar: by its tag id, or the way its page URL does,
+ * by workspace slug and tag slug (`/w/clear/pillars/devops`). In the URL form
+ * `pillar` may also be the tag's id: links made before Pillar URLs used slugs
+ * carry it there, and they keep working.
+ */
+export type PillarRef = { tagId: string } | { workspaceSlug: string; pillar: string };
+
+export type PillarPageInput = PillarRef & {
   db: PrismaClient;
   userId: string;
-  tagId: string;
   /** Show finished goals, projects, epics and work too. */
   includeCompleted?: boolean;
-}
+};
 
 function pillarNotFound(): TRPCError {
   return new TRPCError({ code: "NOT_FOUND", message: "Pillar not found" });
+}
+
+const withWorkspaceSlug = { workspace: { select: { slug: true } } } as const;
+
+/**
+ * Find the tag a ref names, Pillar or not. A URL ref is tried as a slug in
+ * that workspace first, then as an id, so a slug that happens to look like an
+ * id still wins in its own workspace. An id from another workspace is found
+ * too; the caller's page then moves to that workspace's URL.
+ *
+ * Only the current slug resolves: a rename recomputes the slug (`tag.update`)
+ * and nothing records the old one, so a link by an old slug is NOT_FOUND.
+ * Links by id never break.
+ */
+async function findPillarTag(db: PrismaClient, ref: PillarRef) {
+  if ("tagId" in ref) {
+    return db.tag.findUnique({ where: { id: ref.tagId }, include: withWorkspaceSlug });
+  }
+  const bySlug = await db.tag.findFirst({
+    where: { slug: ref.pillar, workspace: { slug: ref.workspaceSlug } },
+    include: withWorkspaceSlug,
+  });
+  return bySlug ?? db.tag.findUnique({ where: { id: ref.pillar }, include: withWorkspaceSlug });
 }
 
 /**
@@ -92,18 +122,19 @@ function pillarNotFound(): TRPCError {
 export async function loadReadablePillar(
   db: PrismaClient,
   userId: string,
-  tagId: string,
-): Promise<Tag & { workspaceId: string }> {
-  const tag = await db.tag.findUnique({ where: { id: tagId } });
-  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) {
+  ref: PillarRef,
+): Promise<Tag & { workspaceId: string; workspaceSlug: string }> {
+  const found = await findPillarTag(db, ref);
+  if (!found || found.category !== PILLAR_CATEGORY || !found.workspaceId || !found.workspace) {
     throw pillarNotFound();
   }
   try {
-    await assertWorkspaceMembership(db, userId, tag.workspaceId);
+    await assertWorkspaceMembership(db, userId, found.workspaceId);
   } catch {
     throw pillarNotFound();
   }
-  return { ...tag, workspaceId: tag.workspaceId };
+  const { workspace, ...tag } = found;
+  return { ...tag, workspaceId: found.workspaceId, workspaceSlug: workspace.slug };
 }
 
 /**
@@ -165,6 +196,7 @@ export async function listPillars({
     select: {
       id: true,
       name: true,
+      slug: true,
       color: true,
       description: true,
       archivedAt: true,
@@ -352,9 +384,10 @@ function sortUnassignedFirst<T>(items: T[], isAssigned: (item: T) => boolean): T
  * for the membership rule. Finished items are left out unless
  * `includeCompleted` is set.
  */
-export async function getPillarPage({ db, userId, tagId, includeCompleted = false }: PillarPageInput) {
-  const pillar = await loadReadablePillar(db, userId, tagId);
-  const workspaceId = pillar.workspaceId;
+export async function getPillarPage(input: PillarPageInput) {
+  const { db, userId, includeCompleted = false } = input;
+  const pillar = await loadReadablePillar(db, userId, input);
+  const { workspaceId, id: tagId } = pillar;
   const actionAccess = buildActionAccessWhere(userId);
   const ticketAccess = buildTicketAccessWhere(userId);
   const actionStatus: Prisma.ActionWhereInput = {
@@ -564,6 +597,9 @@ export async function getPillarPage({ db, userId, tagId, includeCompleted = fals
     pillar: {
       id: pillar.id,
       name: pillar.name,
+      // The page URL is built from these; the page moves an id URL onto them.
+      slug: pillar.slug,
+      workspaceSlug: pillar.workspaceSlug,
       color: pillar.color,
       description: pillar.description,
       archivedAt: pillar.archivedAt,

@@ -50,6 +50,7 @@ function tagRow(overrides: Record<string, unknown> = {}) {
     archivedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+    workspace: { slug: "acme" },
     ...overrides,
   };
 }
@@ -288,6 +289,56 @@ describe("getPillarPage", () => {
     membershipMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
     await expect(getPillarPage({ db, userId: USER, tagId: "tag-devops" })).rejects.toMatchObject({
       code: "NOT_FOUND",
+    });
+  });
+
+  describe("by URL (workspace slug and tag slug)", () => {
+    const byUrl = (pillar: string) => ({ db, userId: USER, workspaceSlug: "acme", pillar });
+
+    it("finds the Pillar by its slug in that workspace, and returns the URL parts", async () => {
+      db.tag.findFirst.mockResolvedValue(tagRow() as never);
+
+      const page = await getPillarPage(byUrl("devops"));
+
+      expect(db.tag.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { slug: "devops", workspace: { slug: "acme" } } }),
+      );
+      expect(db.tag.findUnique).not.toHaveBeenCalled();
+      expect(page.pillar).toMatchObject({ id: "tag-devops", slug: "devops", workspaceSlug: "acme" });
+    });
+
+    it("is NOT_FOUND for a slug nothing in the workspace has (an old slug after a rename, say)", async () => {
+      db.tag.findFirst.mockResolvedValue(null);
+      db.tag.findUnique.mockResolvedValue(null);
+      await expect(getPillarPage(byUrl("ops"))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
+
+    it("is NOT_FOUND for a slug that names a label, not a Pillar", async () => {
+      db.tag.findFirst.mockResolvedValue(tagRow({ category: null }) as never);
+      await expect(getPillarPage(byUrl("devops"))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
+
+    it("hides a Pillar found by slug from someone outside its workspace", async () => {
+      db.tag.findFirst.mockResolvedValue(tagRow() as never);
+      membershipMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+      await expect(getPillarPage(byUrl("devops"))).rejects.toMatchObject({ code: "NOT_FOUND" });
+    });
+
+    it("still resolves an id in the slug's place (links made before slugs), with the slug to move to", async () => {
+      db.tag.findFirst.mockResolvedValue(null);
+
+      const page = await getPillarPage(byUrl("tag-devops"));
+
+      expect(db.tag.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: "tag-devops" } }),
+      );
+      expect(page.pillar).toMatchObject({ id: "tag-devops", slug: "devops", workspaceSlug: "acme" });
+    });
+
+    it("hides a Pillar found by id from someone outside its workspace", async () => {
+      db.tag.findFirst.mockResolvedValue(null);
+      membershipMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+      await expect(getPillarPage(byUrl("tag-devops"))).rejects.toMatchObject({ code: "NOT_FOUND" });
     });
   });
 

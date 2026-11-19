@@ -26,6 +26,7 @@ const names = {
 
 interface Seeded {
   pillarId: string;
+  pillarSlug: string;
   positionId: string;
   recurringTaskId: string;
   oldProjectId: string;
@@ -91,6 +92,7 @@ test.describe("Pillar accountability", () => {
     });
     seeded = {
       pillarId: pillar.id,
+      pillarSlug: pillar.slug,
       positionId: position.id,
       recurringTaskId: recurring.id,
       oldProjectId: oldProject.id,
@@ -109,7 +111,7 @@ test.describe("Pillar accountability", () => {
   });
 
   test("a Pillar with no Position is flagged; adding one shows it with its holder", async ({ page }) => {
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     const accountable = page.getByRole("region", { name: "Accountable" });
     await expect(accountable.getByText("No one accountable")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
 
@@ -122,7 +124,7 @@ test.describe("Pillar accountability", () => {
       .poll(() => db.pillarPosition.count({ where: { tagId: seeded.pillarId } }))
       .toBe(1);
 
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     await expect(accountable.getByText(names.position)).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     await expect(accountable.getByText("No one accountable")).toHaveCount(0);
     await expect(accountable.getByText("Dev Fixture")).toBeVisible();
@@ -135,7 +137,7 @@ test.describe("Pillar accountability", () => {
     });
     expect(response.ok(), await response.text()).toBe(true);
 
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     const duties = page.getByRole("region", { name: "Recurring duties" });
     await expect(duties.getByText(names.recurring)).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     await expect(duties.getByText("Every week on Mon")).toBeVisible();
@@ -180,7 +182,7 @@ test.describe("Pillar accountability", () => {
   });
 
   test("a suggested Pillar removed through the Tags picker is not ticked again", async ({ page }) => {
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarId}`);
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
       timeout: FIRST_PAINT_TIMEOUT,
     });

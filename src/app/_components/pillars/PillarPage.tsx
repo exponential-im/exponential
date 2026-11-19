@@ -2,7 +2,7 @@
 
 import { PillarIcon } from "./PillarIcon";
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Avatar,
   Container,
@@ -30,6 +30,7 @@ import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
+import { pillarPath } from "~/lib/pillars/pillarPath";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
@@ -52,7 +53,8 @@ function isFinished(status: string): boolean {
 }
 
 interface PillarPageProps {
-  tagId: string;
+  /** The tag's slug from the URL, or its id from a link made before slugs. */
+  pillarSlug: string;
   workspaceSlug: string;
 }
 
@@ -60,12 +62,22 @@ interface PillarPageProps {
  * A Pillar's page (ADR-0086): everything happening in one standing area of
  * the workspace's work. Sections run top to bottom in the order the PRD gives.
  */
-export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
+export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   const [includeCompleted, setIncludeCompleted] = useState(false);
   const { data, isLoading, error } = api.pillar.get.useQuery(
-    { tagId, includeCompleted },
+    { workspaceSlug, pillar: pillarSlug, includeCompleted },
     { placeholderData: (previous) => previous },
   );
+
+  // Opened by id (an old link): show the slug URL instead. Replacing the
+  // history entry rather than navigating keeps this query, so nothing reloads
+  // (Next.js syncs its router with the native history call).
+  const canonicalPath = data ? pillarPath(data.pillar.workspaceSlug, data.pillar.slug) : null;
+  useEffect(() => {
+    if (canonicalPath && window.location.pathname !== canonicalPath) {
+      window.history.replaceState(null, "", canonicalPath + window.location.search);
+    }
+  }, [canonicalPath]);
 
   if (isLoading) {
     return (

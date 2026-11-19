@@ -9,6 +9,7 @@ import { IconArchive, IconArrowBackUp, IconPencil, IconPlus } from "@tabler/icon
 import { api, type RouterOutputs } from "~/trpc/react";
 import { TAG_COLORS, type TagColor, PILLAR_CATEGORY } from "~/types/tag";
 import { getTagMantineColor } from "~/utils/tagColors";
+import { pillarPath } from "~/lib/pillars/pillarPath";
 import { Panel, EmptyState } from "~/app/_components/ui";
 import { MarkdownInput } from "~/app/_components/shared/MarkdownInput";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
@@ -232,7 +233,7 @@ function PillarRow({
       <Group justify="space-between" align="center" mb="xs" wrap="wrap">
         <Badge
           component={Link}
-          href={`/w/${workspaceSlug}/pillars/${tag.id}`}
+          href={pillarPath(workspaceSlug, tag.slug)}
           variant="light"
           color={getTagMantineColor(tag.color)}
           leftSection={<PillarIcon size={11} />}

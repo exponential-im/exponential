@@ -35,13 +35,23 @@ export const pillarRouter = createTRPCRouter({
       }),
     ),
 
+  // The Pillar page, named the way its URL names it: workspace slug, then the
+  // tag's slug (or its id, from links made before slugs; the page then moves
+  // to the slug URL).
   get: protectedProcedure
-    .input(z.object({ tagId: z.string(), includeCompleted: z.boolean().optional() }))
+    .input(
+      z.object({
+        workspaceSlug: z.string(),
+        pillar: z.string(),
+        includeCompleted: z.boolean().optional(),
+      }),
+    )
     .query(({ ctx, input }) =>
       getPillarPage({
         db: ctx.db,
         userId: ctx.session.user.id,
-        tagId: input.tagId,
+        workspaceSlug: input.workspaceSlug,
+        pillar: input.pillar,
         includeCompleted: input.includeCompleted ?? false,
       }),
     ),
