@@ -11,6 +11,10 @@
  * - confirmed decisions from this meeting → `alreadyPublished`, no model call.
  */
 
+import {
+  participantDisplayName,
+  participantEmail,
+} from "~/lib/meetings/participantIdentity";
 import type { PrismaClient } from "@prisma/client";
 import { parseTranscript, type TranscriptTurn } from "~/lib/transcript";
 import { summaryDecisionText } from "~/server/services/decisions/summaryDecisionText";
@@ -119,8 +123,10 @@ export function resolveDeciders(
 ): DecisionDeciderInput[] {
   const toDecider = (p: ParticipantRow): DecisionDeciderInput => ({
     userId: p.userId,
-    name: p.name ?? p.email ?? "Unknown",
-    email: p.email,
+    name: participantDisplayName(p),
+    // Never the raw column: a transcript-only speaker's key is
+    // `name:<lowercased>`, not an address.
+    email: participantEmail(p),
   });
   if (deciderNames.length === 0) return participants.map(toDecider);
 

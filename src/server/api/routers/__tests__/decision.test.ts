@@ -654,6 +654,98 @@ describe("decision router", () => {
       });
     });
 
+    // A transcript-only speaker has no address, so their participant row keys
+    // on the `name:<lowercased>` identity sentinel. That value reached this
+    // path and was stored as the decider's email.
+    it("meeting-linked: a transcript-only speaker becomes a decider with no email", async () => {
+      withWorkspaceRole(db, "member");
+      withMeeting(db);
+      withTransaction(db);
+      db.transcriptionSession.findUnique.mockResolvedValue({
+        id: MEETING_ID,
+        userId: "someone-else",
+        projectId: null,
+        workspaceId: WORKSPACE_ID,
+        occurrenceId: null,
+        meetingDate: new Date("2026-09-08T07:00:00.000Z"),
+        participants: [
+          { userId: USER_ID, name: "Dev Fixture", email: "dev@example.test" },
+          { userId: null, name: "Inès", email: "name:inès" },
+          // Name column never filled: the sentinel is all there is to go on.
+          { userId: null, name: null, email: "name:selim" },
+        ],
+        transcription: MEETING_TRANSCRIPT,
+        sentencesJson: null,
+      } as never);
+      db.workspace.update.mockResolvedValue({ decisionCounter: 1 } as never);
+      db.decision.create.mockResolvedValue({
+        id: "dec-1",
+        number: 1,
+        statement: "Park it",
+        status: "ACCEPTED",
+        source: "MEETING",
+        transcriptionSessionId: MEETING_ID,
+      } as never);
+
+      await caller(db).decision.create({
+        workspaceId: WORKSPACE_ID,
+        statement: "Park it",
+        status: "ACCEPTED",
+        transcriptionSessionId: MEETING_ID,
+      });
+
+      const data = (db.decision.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+      expect(data.deciders).toEqual({
+        create: [
+          { userId: USER_ID, name: "Dev Fixture", email: "dev@example.test" },
+          { userId: null, name: "Inès", email: null },
+          { userId: null, name: "selim", email: null },
+        ],
+      });
+    });
+
+    // Open questions take the SAME meeting-default decider path: the
+    // `status === "OPEN"` empty-deciders rule only applies when there is no
+    // transcriptionSessionId, so a meeting-linked open question still fills
+    // deciders from the participants — sentinel included, before the fix.
+    it("meeting-linked OPEN question: transcript-only speakers get no email either", async () => {
+      withWorkspaceRole(db, "member");
+      withMeeting(db);
+      withTransaction(db);
+      db.transcriptionSession.findUnique.mockResolvedValue({
+        id: MEETING_ID,
+        userId: "someone-else",
+        projectId: null,
+        workspaceId: WORKSPACE_ID,
+        occurrenceId: null,
+        meetingDate: new Date("2026-09-08T07:00:00.000Z"),
+        participants: [{ userId: null, name: "Inès", email: "name:inès" }],
+        transcription: MEETING_TRANSCRIPT,
+        sentencesJson: null,
+      } as never);
+      db.workspace.update.mockResolvedValue({ decisionCounter: 1 } as never);
+      db.decision.create.mockResolvedValue({
+        id: "dec-1",
+        number: 1,
+        statement: "Which events count as analytic data?",
+        status: "OPEN",
+        source: "MEETING",
+        transcriptionSessionId: MEETING_ID,
+      } as never);
+
+      await caller(db).decision.create({
+        workspaceId: WORKSPACE_ID,
+        statement: "Which events count as analytic data?",
+        status: "OPEN",
+        transcriptionSessionId: MEETING_ID,
+      });
+
+      const data = (db.decision.create.mock.calls[0]![0] as { data: Record<string, unknown> }).data;
+      expect(data.deciders).toEqual({
+        create: [{ userId: null, name: "Inès", email: null }],
+      });
+    });
+
     it("drops evidence turns that do not resolve to a real transcript turn", async () => {
       withWorkspaceRole(db, "member");
       withMeeting(db);

@@ -23,6 +23,10 @@ import {
 } from "~/app/_components/shared/LinkedActionsPanel";
 import { formatEvidenceTime, type DecisionEvidenceTurn } from "~/lib/decision-evidence";
 import { api } from "~/trpc/react";
+import {
+  participantDisplayName,
+  participantEmail,
+} from "~/lib/meetings/participantIdentity";
 
 /**
  * "Log a decision" — the manual create path (ADR-0060). Opened from a
@@ -139,7 +143,14 @@ export function LogDecisionModal({
     const deciders = meeting
       ? meeting.participants
           .filter((p) => deciderIds.includes(p.id))
-          .map((p) => ({ userId: p.userId, name: p.name ?? p.email, email: p.email }))
+          .map((p) => ({
+            userId: p.userId,
+            name: participantDisplayName(p),
+            // A transcript-only speaker's `email` is an identity sentinel,
+            // not an address — sending it fails `decision.create`'s email
+            // validation and rejects the whole decision.
+            email: participantEmail(p),
+          }))
       : undefined;
     create.mutate({
       workspaceId,
@@ -214,7 +225,7 @@ export function LogDecisionModal({
               <Group gap={6}>
                 {meeting.participants.map((p) => (
                   <Chip key={p.id} value={p.id} size="xs" variant="light">
-                    {p.name ?? p.email}
+                    {participantDisplayName(p)}
                   </Chip>
                 ))}
               </Group>

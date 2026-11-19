@@ -19,6 +19,11 @@ export interface MeetingCardSession {
   actions: Array<{ id: string }>;
 }
 
+import {
+  participantDisplayName as identityDisplayName,
+  participantEmail,
+} from "~/lib/meetings/participantIdentity";
+
 export interface MeetingCardParticipant {
   id: string;
   email: string;
@@ -97,7 +102,11 @@ function participantDisplayName(p: MeetingCardParticipant): string {
   for (const c of candidates) {
     if (c && c.trim()) return c.trim();
   }
-  return emailLocalPart(p.email);
+  // `p.email` is an identity key, so it may be the `name:<lowercased>`
+  // sentinel — which has no "@" for the local-part fallback to cut on and
+  // would render verbatim. The shared helper recovers the name instead.
+  const email = participantEmail(p);
+  return email ? emailLocalPart(email) : identityDisplayName(p, "?");
 }
 
 function participantStableKey(p: MeetingCardParticipant): string {

@@ -58,6 +58,11 @@ function formatLocalDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+import {
+  participantDisplayName as identityDisplayName,
+  participantEmail,
+} from "~/lib/meetings/participantIdentity";
+
 function participantKey(p: {
   userId: string | null;
   contactId: string | null;
@@ -85,7 +90,11 @@ function participantDisplayName(p: {
     if (full) return full;
   }
   if (p.name && p.name.trim()) return p.name.trim();
-  return emailLocalPart(p.email);
+  // `p.email` is an identity key, so it may be the `name:<lowercased>`
+  // sentinel — which has no "@" for the local-part fallback to cut on and
+  // would render verbatim in the weekly roll-up.
+  const email = participantEmail(p);
+  return email ? emailLocalPart(email) : identityDisplayName(p, "?");
 }
 
 /**
