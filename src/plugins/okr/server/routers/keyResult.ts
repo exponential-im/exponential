@@ -301,6 +301,9 @@ export const keyResultRouter = createTRPCRouter({
           driUser: {
             select: { id: true, name: true, email: true, image: true },
           },
+          // The Pillars this objective is filed under, for the Goals page's
+          // Pillar filter (ADR-0086).
+          pillarTags: { select: { tagId: true } },
           keyResults: {
             where: {
               ...periodFilter,

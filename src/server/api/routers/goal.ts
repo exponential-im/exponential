@@ -139,6 +139,10 @@ export const goalRouter = createTRPCRouter({
           },
           workspace: { select: { id: true, name: true, slug: true } },
           driUser: { select: { id: true, name: true, image: true } },
+          // The Pillars this goal is filed under, for the Goals page's
+          // Pillar filter (ADR-0086). Ids only: the page already has the
+          // workspace's Pillars from pillar.list.
+          pillarTags: { select: { tagId: true } },
           _count: { select: { keyResults: true } },
         },
         orderBy: { displayOrder: "asc" },

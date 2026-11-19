@@ -9,7 +9,7 @@ import {
   statusToConfidence,
   type Confidence,
 } from "~/plugins/okr/client/utils/okrDashboardUtils";
-import type { HealthFilterValue } from "./goalFilters";
+import { matchesPillarFilter, type HealthFilterValue } from "./goalFilters";
 
 export interface KeyResultRowUser {
   id: string;
@@ -26,6 +26,8 @@ export interface KeyResultRowData {
   objectiveTitle: string;
   /** The parent objective's lifecycle status — what the Status filter reads. */
   objectiveStatus: string;
+  /** The parent objective's Pillars — what the Pillar filter reads. */
+  objectivePillarIds: string[];
   driUserId: string | null;
   driUser: KeyResultRowUser | null;
   currentValue: number;
@@ -49,10 +51,14 @@ export interface KeyResultRowData {
  * to a period (D-0041).
  */
 export function flattenKeyResultRows(
-  objectives: (ObjectiveCardObjective & { status?: string })[],
+  objectives: (ObjectiveCardObjective & {
+    status?: string;
+    pillarTags?: ReadonlyArray<{ tagId: string }>;
+  })[],
 ): KeyResultRowData[] {
-  return objectives.flatMap((objective) =>
-    objective.keyResults.map((kr: ObjectiveCardKeyResult): KeyResultRowData => {
+  return objectives.flatMap((objective) => {
+    const objectivePillarIds = (objective.pillarTags ?? []).map((t) => t.tagId);
+    return objective.keyResults.map((kr: ObjectiveCardKeyResult): KeyResultRowData => {
       const status = effectiveStatus(kr.statusOverride, kr.status) ?? "not-started";
       const latestCheckIn = kr.checkIns?.[0];
       return {
@@ -61,6 +67,7 @@ export function flattenKeyResultRows(
         objectiveId: objective.id,
         objectiveTitle: objective.title,
         objectiveStatus: objective.status ?? "active",
+        objectivePillarIds,
         driUserId: kr.driUser?.id ?? null,
         driUser: kr.driUser ?? null,
         currentValue: kr.currentValue,
@@ -74,8 +81,8 @@ export function flattenKeyResultRows(
         lastCheckInAt: latestCheckIn ? new Date(latestCheckIn.createdAt) : null,
         period: kr.period,
       };
-    }),
-  );
+    });
+  });
 }
 
 /** Unit-aware value label: "40%", "$1,200", "12h", "7 deals", "7". */
@@ -170,8 +177,9 @@ const CONFIDENCE_TO_HEALTH: Record<Confidence, HealthFilterValue> = {
  * shared with the other views, so each keeps its meaning: Status is the
  * parent objective's lifecycle (a completed objective's KRs go with it),
  * Health is the key result's own effective-status bucket (the same four
- * values the objective badge uses), Owner is the key result's DRI, and
- * search matches the key result or its objective by title.
+ * values the objective badge uses), Owner is the key result's DRI, Pillar is
+ * the parent objective's Pillars (key results are not filed under Pillars
+ * themselves), and search matches the key result or its objective by title.
  */
 export function filterKeyResultRows(
   rows: KeyResultRowData[],
@@ -182,6 +190,7 @@ export function filterKeyResultRows(
   const status = filters.status as string[] | undefined;
   const health = filters.health as string[] | undefined;
   const dri = filters.driId as string[] | undefined;
+  const pillar = filters.pillar as string[] | undefined;
   return rows.filter((r) => {
     if (status && status.length > 0 && !status.includes(r.objectiveStatus)) return false;
     if (health && health.length > 0 && !health.includes(CONFIDENCE_TO_HEALTH[r.confidence])) {
@@ -190,6 +199,7 @@ export function filterKeyResultRows(
     if (dri && dri.length > 0) {
       if (!r.driUserId || !dri.includes(r.driUserId)) return false;
     }
+    if (!matchesPillarFilter(r.objectivePillarIds, pillar)) return false;
     if (q) {
       const haystack = `${r.title} ${r.objectiveTitle}`.toLowerCase();
       if (!haystack.includes(q)) return false;
