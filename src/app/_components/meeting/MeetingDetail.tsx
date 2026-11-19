@@ -36,6 +36,7 @@ import { DraftDecisionReviewList } from "~/app/_components/decisions/DraftDecisi
 import type { MeetingOccurrenceOption } from "./MeetingOccurrencePicker";
 import type { MeetingFeatureOption } from "./MeetingFeaturePicker";
 import { api, type RouterOutputs } from "~/trpc/react";
+import { participantEmail } from "~/lib/meetings/participantIdentity";
 
 type TranscriptAction = RouterOutputs["action"]["getByTranscription"][number];
 
@@ -268,7 +269,10 @@ export function MeetingDetail({
     for (const p of session.participants) {
       if (p.userId) keys.add(`user:${p.userId}`);
       if (p.contactId) keys.add(`contact:${p.contactId}`);
-      if (p.email?.includes("@")) keys.add(`email:${p.email.toLowerCase()}`);
+      // Only a real address is an `email:` key — a `name:<...>` identity
+      // sentinel is not one (`participantEmail` returns null for it).
+      const email = participantEmail(p);
+      if (email) keys.add(`email:${email.toLowerCase()}`);
     }
     return keys;
   }, [session.participants]);

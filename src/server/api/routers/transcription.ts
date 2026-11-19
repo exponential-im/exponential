@@ -8,6 +8,7 @@ import {
   protectedProcedure,
 } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
+import { participantIdentityKey } from "~/lib/meetings/participantIdentity";
 //import { getSetups } from "~/server/services/videoService";
 import { uploadToBlob } from "~/lib/blob";
 import { FirefliesSyncService } from "~/server/services/FirefliesSyncService";
@@ -281,8 +282,10 @@ async function upsertMeetingParticipant(
 
   // The unique key is [transcriptionSessionId, email]. Real people have an
   // email; name-only entries fall back to a stable `name:<lowercased>` sentinel
-  // so repeated adds dedupe instead of colliding on "".
-  const dedupeKey = email ?? `name:${(name ?? "").toLowerCase()}`;
+  // so repeated adds dedupe instead of colliding on "". Anything *reading* the
+  // column back out must go through `participantEmail` — see
+  // `~/lib/meetings/participantIdentity`.
+  const dedupeKey = participantIdentityKey({ email, name });
   const baseData = { workspaceId, userId, contactId, name };
   return tx.transcriptionSessionParticipant.upsert({
     where: {

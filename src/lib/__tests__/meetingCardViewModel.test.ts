@@ -113,6 +113,16 @@ describe("buildMeetingCardViewModel — participants → avatars", () => {
     expect(vm.avatars[0]!.key).toBe("e:carla.dee@example.com");
   });
 
+  it("recovers a transcript-only speaker's name from their identity key", () => {
+    // `email` is an identity key: a speaker with no address keys on
+    // `name:<lowercased>`, which has no "@" for the local-part fallback to
+    // cut on and used to render verbatim as "name:inès".
+    const participant = makeParticipant({ email: "name:inès", name: null });
+    const vm = buildMeetingCardViewModel(baseSession(), [participant]);
+    expect(vm.avatars[0]!.displayName).toBe("inès");
+    expect(vm.avatars[0]!.displayName).not.toContain("name:");
+  });
+
   it("falls back to invite display name when neither user nor contact is linked", () => {
     const participant = makeParticipant({
       email: "dan@example.com",

@@ -13,6 +13,10 @@
  */
 
 import type { DecisionRejectReason } from "~/lib/draft-reject-reasons";
+import {
+  participantDisplayName,
+  participantEmail,
+} from "~/lib/meetings/participantIdentity";
 import type {
   DecisionSource,
   DecisionStatus,
@@ -294,8 +298,10 @@ export async function createDecision(db: PrismaClient, input: CreateDecisionInpu
     deciders ??= normaliseDeciders(
       meeting.participants.map((p) => ({
         userId: p.userId,
-        name: p.name ?? p.email,
-        email: p.email,
+        name: participantDisplayName(p),
+        // Past Zod by this point, so reading the raw column here stored the
+        // `name:<...>` identity sentinel as a decider's email address.
+        email: participantEmail(p),
       })),
     );
   }
