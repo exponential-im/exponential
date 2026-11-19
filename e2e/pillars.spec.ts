@@ -33,6 +33,7 @@ const names = {
 
 interface Seeded {
   tagId: string;
+  tagSlug: string;
   projectId: string;
   projectSlug: string;
   actionId: string;
@@ -55,6 +56,8 @@ test.describe("Pillars", () => {
 
   let db: PrismaClient;
   let seeded: Seeded;
+  // The Pillar page's URL: workspace slug, then the tag's slug (ADR-0086).
+  const pillarUrl = () => `/w/${fixture.workspaceSlug}/pillars/${seeded.tagSlug}`;
 
   test.beforeAll(async () => {
     loadDevEnvOrThrow();
@@ -181,6 +184,7 @@ test.describe("Pillars", () => {
       extraTicketIds: [epicTicket.id, inheritedTicket.id],
       doneActionId: doneAction.id,
       tagId: tag.id,
+      tagSlug: tag.slug,
       projectId: project.id,
       projectSlug,
       actionId: action.id,
@@ -246,6 +250,8 @@ test.describe("Pillars", () => {
     await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
       timeout: FIRST_PAINT_TIMEOUT,
     });
+    // Its URL names the Pillar by the tag's slug, not its id.
+    await expect(page).toHaveURL(new RegExp(`${pillarUrl()}$`));
     await expect(page.getByText("production")).toBeVisible();
     const projects = page.getByRole("region", { name: "Projects" });
     await expect(projects.getByRole("link", { name: names.project })).toBeVisible();
@@ -254,6 +260,14 @@ test.describe("Pillars", () => {
     await expect(loose.getByRole("link", { name: names.ticket })).toBeVisible();
     await expect(loose.getByText("Unassigned")).toBeVisible();
     await page.screenshot({ path: test.info().outputPath("pillar-page.png"), fullPage: true });
+  });
+
+  test("a link by the Pillar's id, from before slugs, lands on the slug URL", async ({ page }) => {
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
+      timeout: FIRST_PAINT_TIMEOUT,
+    });
+    await expect(page).toHaveURL(new RegExp(`${pillarUrl()}$`));
   });
 
   test("a goal and a resource filed under the Pillar from their own pages appear on it", async ({ page }) => {
@@ -274,7 +288,7 @@ test.describe("Pillars", () => {
     await page.goto(`/w/${fixture.workspaceSlug}/knowledge-base/${seeded.resourceId}`);
     await fileUnder("Add Pillar");
 
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await page.goto(pillarUrl());
     await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
       timeout: FIRST_PAINT_TIMEOUT,
     });
@@ -286,7 +300,7 @@ test.describe("Pillars", () => {
   });
 
   test("epics, work filed from other containers, and finished work behind the toggle", async ({ page }) => {
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await page.goto(pillarUrl());
     await expect(page.getByRole("heading", { name: names.pillar, level: 1 })).toBeVisible({
       timeout: FIRST_PAINT_TIMEOUT,
     });
@@ -344,7 +358,7 @@ test.describe("Pillars", () => {
     // The project still carries it, and its page still opens, marked inactive.
     await page.goto(`/w/${fixture.workspaceSlug}/projects/${seeded.projectSlug}-${seeded.projectId}`);
     await expect(page.getByRole("link", { name: names.pillar })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
-    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.tagId}`);
+    await page.goto(pillarUrl());
     await expect(page.getByText("Inactive", { exact: true })).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
     // With no active Pillar left, the sidebar row goes away.
     await expect(

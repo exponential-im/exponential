@@ -8,6 +8,7 @@ import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { Panel, Pill, EmptyState } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
+import { pillarPath } from "~/lib/pillars/pillarPath";
 import { PillarIcon } from "./PillarIcon";
 
 /**
@@ -76,7 +77,7 @@ export function PillarsList() {
             <Panel
               key={pillar.id}
               as={Link}
-              href={`/w/${workspace.slug}/pillars/${pillar.id}`}
+              href={pillarPath(workspace.slug, pillar)}
               interactive
               padding="md"
             >

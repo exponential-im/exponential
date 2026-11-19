@@ -9,6 +9,7 @@ import { notifications } from "@mantine/notifications";
 import { api } from "~/trpc/react";
 import { PILLAR_CATEGORY, isPillarTag } from "~/types/tag";
 import { getTagMantineColor } from "~/utils/tagColors";
+import { pillarPath } from "~/lib/pillars/pillarPath";
 
 /** Entities that take Pillars only (never ordinary labels). */
 export type PillarEntityType = "project" | "goal" | "resource";
@@ -98,7 +99,7 @@ export function EntityPillars({
           <Badge
             key={tag.id}
             component={Link}
-            href={`/w/${workspaceSlug}/pillars/${tag.id}`}
+            href={pillarPath(workspaceSlug, tag)}
             variant="light"
             color={getTagMantineColor(tag.color)}
             leftSection={<PillarIcon size={11} />}

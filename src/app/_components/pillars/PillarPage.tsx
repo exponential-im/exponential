@@ -2,7 +2,8 @@
 
 import { PillarIcon } from "./PillarIcon";
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Avatar,
   Container,
@@ -30,6 +31,7 @@ import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
+import { pillarPath } from "~/lib/pillars/pillarPath";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
@@ -52,7 +54,8 @@ function isFinished(status: string): boolean {
 }
 
 interface PillarPageProps {
-  tagId: string;
+  /** The tag's slug from the URL, or its id from a link made before slugs. */
+  pillarSlug: string;
   workspaceSlug: string;
 }
 
@@ -60,12 +63,30 @@ interface PillarPageProps {
  * A Pillar's page (ADR-0086): everything happening in one standing area of
  * the workspace's work. Sections run top to bottom in the order the PRD gives.
  */
-export function PillarPage({ tagId, workspaceSlug }: PillarPageProps) {
+export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   const [includeCompleted, setIncludeCompleted] = useState(false);
   const { data, isLoading, error } = api.pillar.get.useQuery(
-    { tagId, includeCompleted },
+    { workspaceSlug, pillar: pillarSlug, includeCompleted },
     { placeholderData: (previous) => previous },
   );
+
+  // Opened by id (an old link): show the slug URL instead. In the same
+  // workspace, replacing the history entry keeps this query, so nothing
+  // reloads (Next.js syncs its router with the native history call). An id
+  // from another workspace navigates, so the sidebar and workspace context
+  // follow the URL.
+  const router = useRouter();
+  const canonicalPath = data ? pillarPath(data.pillar.workspaceSlug, data.pillar) : null;
+  const otherWorkspace = data ? data.pillar.workspaceSlug !== workspaceSlug : false;
+  useEffect(() => {
+    if (!canonicalPath || window.location.pathname === canonicalPath) return;
+    const target = canonicalPath + window.location.search;
+    if (otherWorkspace) {
+      router.replace(target);
+    } else {
+      window.history.replaceState(null, "", target);
+    }
+  }, [canonicalPath, otherWorkspace, router]);
 
   if (isLoading) {
     return (
