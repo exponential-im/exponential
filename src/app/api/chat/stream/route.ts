@@ -939,9 +939,17 @@ export async function POST(req: Request) {
                   // same result shape also carries the model's own bad
                   // arguments ("input validation failed"), which is a slip it
                   // retries, not a fault to file.
-                  if (isMastraToolFailure && mastraResultFault(readString(result, 'message')) === 'output') {
+                  const mastraFault = isMastraToolFailure ? mastraResultFault(readString(result, 'message')) : undefined;
+                  if (mastraFault === 'output') {
                     const fault = reportToolFault(name, `ZodError: output failed its schema: ${maskTokenLike(errorCode ?? '')}`);
                     if (logged && fault.faultSummary) logged.faultSummary = fault.faultSummary;
+                  } else if (mastraFault === 'other') {
+                    // Neither of Mastra's validation wordings matched. If an
+                    // upgrade rewords them, every output fault lands here and
+                    // stops being filed, so say so where someone will see it.
+                    console.warn(
+                      `⚠️ [chat/stream] Unrecognised Mastra tool failure from ${name}; not filed as a fault: ${maskTokenLike(errorCode ?? '').slice(0, 200)}`,
+                    );
                   }
                 }
                 toolFrame({ phase: 'result', id, name });
