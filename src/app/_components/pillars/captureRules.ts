@@ -1,5 +1,5 @@
 /**
- * Capture asks Workspace, then Pillars, then an optional Project (ADR-0085).
+ * Capture asks Workspace, then Pillars, then an optional Project (ADR-0086).
  * The pure rules of that picker, shared by every capture surface.
  */
 

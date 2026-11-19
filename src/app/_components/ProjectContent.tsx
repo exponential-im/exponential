@@ -514,7 +514,7 @@ export function ProjectContent({
         </div>
       </div>
 
-      {/* A long-running project with no end date may be a Pillar (ADR-0085). */}
+      {/* A long-running project with no end date may be a Pillar (ADR-0086). */}
       {workspace && myAccess?.canEdit && (
         <LooksOngoingHint project={project} workspaceSlug={workspace.slug} className="mb-4" />
       )}

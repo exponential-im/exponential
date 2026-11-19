@@ -44,7 +44,7 @@ export function LabelsCombobox({
   const [search, setSearch] = useState("");
 
   const filtered = allTags.filter((t) => t.name.toLowerCase().includes(search.toLowerCase().trim()));
-  // Pillars (ADR-0085) get their own group above the labels; inactive ones only while carried.
+  // Pillars (ADR-0086) get their own group above the labels; inactive ones only while carried.
   const { pillars, labels } = splitPillarTags(filtered, selectedIds);
   const exactMatch = allTags.some((t) => t.name.toLowerCase() === search.toLowerCase().trim());
 

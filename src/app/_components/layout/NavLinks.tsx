@@ -414,7 +414,7 @@ export function GlobalNavLinks(): React.ReactElement {
 }
 
 /**
- * The Pillars row (ADR-0085), in a fixed slot above the configurable sections
+ * The Pillars row (ADR-0086), in a fixed slot above the configurable sections
  * rather than in the saved layout, so sidebars people have already arranged
  * get it too. Shown only while the workspace has an active Pillar.
  */

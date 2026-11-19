@@ -212,7 +212,7 @@ function TagManagementSection({
     ...optimisticAdds,
   ];
 
-  // Pillars (ADR-0085) are managed in workspace settings; this page makes labels.
+  // Pillars (ADR-0086) are managed in workspace settings; this page makes labels.
   const pillars = allTags.filter((t) => t.category === PILLAR_CATEGORY);
   const labels = allTags.filter((t) => t.category !== PILLAR_CATEGORY);
 

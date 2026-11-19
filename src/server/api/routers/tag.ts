@@ -276,7 +276,7 @@ export const tagRouter = createTRPCRouter({
       });
     }),
 
-  // Promote a workspace tag to a Pillar, or demote it (ADR-0085). Admins only.
+  // Promote a workspace tag to a Pillar, or demote it (ADR-0086). Admins only.
   setPillar: protectedProcedure
     .input(z.object({ tagId: z.string(), isPillar: z.boolean() }))
     .mutation(({ ctx, input }) =>

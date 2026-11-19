@@ -17,7 +17,7 @@ interface LooksOngoingHintProps {
 
 /**
  * On a Project that has run a long time with no end date: a dismissible hint
- * that it may be a Pillar. Converting is done by hand (ADR-0085).
+ * that it may be a Pillar. Converting is done by hand (ADR-0086).
  */
 export function LooksOngoingHint({ project, workspaceSlug, className }: LooksOngoingHintProps) {
   if (!looksOngoing(project)) return null;

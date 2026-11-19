@@ -2441,7 +2441,7 @@ export const actionRouter = createTRPCRouter({
         parseNaturalLanguage: z.boolean().default(true),
         // The workspace to file into when there is no project.
         workspaceId: z.string().optional(),
-        // Pillars the capture ticked (ADR-0085): active Pillars of one
+        // Pillars the capture ticked (ADR-0086): active Pillars of one
         // workspace. With no project or workspace named, they name it.
         tagIds: z.array(z.string()).max(20).optional(),
       }),

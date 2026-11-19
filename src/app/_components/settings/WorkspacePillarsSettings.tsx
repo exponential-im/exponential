@@ -28,7 +28,7 @@ function onError(title: string) {
 }
 
 /**
- * Workspace settings → Pillars (ADR-0085): promote a tag to a Pillar or
+ * Workspace settings → Pillars (ADR-0086): promote a tag to a Pillar or
  * create a new one, say what good looks like, retire one, or turn it back into
  * a label. Owners and admins only; promoting never changes which items carry
  * the tag.

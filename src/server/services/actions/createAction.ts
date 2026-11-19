@@ -172,7 +172,7 @@ export async function createAction(
   //    refused attachment means no row is written at all.
   if (uniqueTagIds.length > 0) {
     await assertTagsInWorkspace(db, actor.userId, targetWorkspaceId, uniqueTagIds);
-    // An inactive Pillar is never put on new work (ADR-0085).
+    // An inactive Pillar is never put on new work (ADR-0086).
     const inactive = await db.tag.count({
       where: { id: { in: uniqueTagIds }, archivedAt: { not: null } },
     });

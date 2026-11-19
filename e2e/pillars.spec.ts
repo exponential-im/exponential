@@ -1,5 +1,5 @@
 /**
- * Pillars V1 (ADR-0085, ticket smooth.quill): a workspace tag promoted to a
+ * Pillars V1 (ADR-0086, ticket smooth.quill): a workspace tag promoted to a
  * Pillar, and the Pillar page that gathers everything filed under it.
  *
  * Runs as the fixture user (an owner of the dev-fixture workspace). Each run

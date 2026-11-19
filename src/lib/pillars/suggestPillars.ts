@@ -1,5 +1,5 @@
 /**
- * Which Pillars a capture probably belongs to (ADR-0085, V3): a cheap keyword
+ * Which Pillars a capture probably belongs to (ADR-0086, V3): a cheap keyword
  * match of the captured text (page title and URL, a pasted note, an Action's
  * name) against each Pillar's name and description. Used only to pre-tick
  * Pillars a person can see and untick; never to file anything by itself.

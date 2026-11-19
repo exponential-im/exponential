@@ -448,7 +448,7 @@ export const resourceRouter = createTRPCRouter({
         // Filed for reference, not to read: the save leaves the Reading list
         // alone and `readStatus` is ignored. See `saveReadState`.
         forReference: z.boolean().default(false),
-        // Pillars the capture ticked (ADR-0085): active Pillars of one
+        // Pillars the capture ticked (ADR-0086): active Pillars of one
         // workspace. With no workspace or Project named, they name it. Added
         // to the Pillars the Resource already has; never removes one.
         tagIds: z.array(z.string()).max(20).optional(),

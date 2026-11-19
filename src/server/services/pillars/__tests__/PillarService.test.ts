@@ -1,5 +1,5 @@
 /**
- * PillarService (ADR-0085): promotion guards and which items land in which
+ * PillarService (ADR-0086): promotion guards and which items land in which
  * section of a Pillar page. Mocked Prisma; the access resolvers are mocked to
  * fixed clauses so these tests cover the service's own rules.
  */

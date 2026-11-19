@@ -31,7 +31,7 @@ export type TagColor = (typeof TAG_COLORS)[number];
 
 /**
  * `Tag.category` of a Pillar: a workspace tag promoted to have its own page
- * (ADR-0085). Every other category value, null included, is an ordinary label.
+ * (ADR-0086). Every other category value, null included, is an ordinary label.
  */
 export const PILLAR_CATEGORY = 'pillar';
 
@@ -46,7 +46,7 @@ export interface Tag {
   slug: string;
   color: TagColor;
   description: string | null;
-  category: string | null; // "pillar" = a Pillar (ADR-0085); null or "label" = an ordinary label
+  category: string | null; // "pillar" = a Pillar (ADR-0086); null or "label" = an ordinary label
   isSystem: boolean;
   archivedAt?: Date | null; // set on an inactive Pillar
   workspaceId: string | null;

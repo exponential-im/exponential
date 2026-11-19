@@ -44,7 +44,7 @@ export const NO_PILLAR_LABEL = "No pillar";
 
 /**
  * A group-by value from a saved preference or an older link. "area" grouped
- * by the retired area tag category, which Pillar replaced (ADR-0085).
+ * by the retired area tag category, which Pillar replaced (ADR-0086).
  */
 export function parseGroupBy(value: string | null | undefined): GroupByField | undefined {
   if (value === "area") return "pillar";
@@ -108,7 +108,7 @@ function bucketsForTicket(
       return [{ key: name, label: name }];
     }
     case "pillar": {
-      // A ticket is under its own Pillars and its epic's (a read rule; ADR-0085).
+      // A ticket is under its own Pillars and its epic's (a read rule; ADR-0086).
       const pillars = new Map<string, string>();
       for (const x of [...(t.tags ?? []), ...(t.epic?.tags ?? [])]) {
         if (x.tag.category === PILLAR_CATEGORY) pillars.set(x.tag.id, x.tag.name);
