@@ -16,6 +16,7 @@ import {
 import { computeGoalHealth } from "~/server/services/goalService";
 import { resolveGoalProgress } from "~/server/services/goalProgress";
 import { objectiveScopeWhere } from "../objectiveScope";
+import { PILLAR_CATEGORY } from "~/types/tag";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import {
   mergeObjectiveActivity,
@@ -303,7 +304,13 @@ export const keyResultRouter = createTRPCRouter({
           },
           // The Pillars this objective is filed under, for the Goals page's
           // Pillar filter (ADR-0086).
-          pillarTags: { select: { tagId: true } },
+          pillarTags: {
+            // Only tags that are still Pillars: a Pillar turned back into a
+            // label keeps its assignments, but no longer files the goal.
+            // Inactive (archived) Pillars still count.
+            where: { tag: { category: PILLAR_CATEGORY } },
+            select: { tagId: true },
+          },
           keyResults: {
             where: {
               ...periodFilter,
