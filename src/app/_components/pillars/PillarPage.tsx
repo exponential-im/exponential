@@ -8,6 +8,7 @@ import {
   Avatar,
   Container,
   Group,
+  Progress,
   Skeleton,
   Switch,
   Text,
@@ -23,19 +24,29 @@ import {
   IconStack2,
   IconTarget,
   IconTicket,
+  IconTrophy,
   IconRepeat,
   IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
-import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
+import { Panel, Pill, SectionHeader, EmptyState, type PillTone } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
 import { pillarPath } from "~/lib/pillars/pillarPath";
+import { formatKrValue } from "~/app/_components/goals/keyResultRows";
+import {
+  effectiveStatus,
+  krProgress,
+  statusToConfidence,
+  type Confidence,
+} from "~/plugins/okr/client/utils/okrDashboardUtils";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
 type PageTicket = PillarPageData["looseWork"]["tickets"][number];
+type PageGoal = PillarPageData["goals"][number];
+type PageKeyResult = PageGoal["keyResults"][number];
 type PageUser = { id: string; name: string | null; image: string | null };
 
 /** Statuses, across goals, projects, epics, tickets and actions, that read as finished. */
@@ -213,22 +224,11 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
           {goals.length === 0 ? (
             <EmptyState compact message={`No ${doneHint}goal is filed under this Pillar.`} />
           ) : (
-            <Panel padding="sm">
-              <WorkList>
-                {goals.map((goal) => (
-                  <WorkRow
-                    key={goal.id}
-                    href={`/w/${workspaceSlug}/goals/${goal.id}`}
-                    icon={<IconTarget size={14} />}
-                    label={goal.title}
-                    finished={isFinished(goal.status)}
-                    meta={goal.period ? <MetaText>{goal.period}</MetaText> : undefined}
-                    people={goal.driUser ? [goal.driUser] : []}
-                    emptyPeopleLabel="No DRI"
-                  />
-                ))}
-              </WorkList>
-            </Panel>
+            <div className="flex flex-col gap-3">
+              {goals.map((goal) => (
+                <GoalCard key={goal.id} goal={goal} workspaceSlug={workspaceSlug} />
+              ))}
+            </div>
           )}
         </PageSection>
 
@@ -471,10 +471,13 @@ function WorkRow({
   people,
   finished = false,
   emptyPeopleLabel = "Unassigned",
+  labelClassName = "",
 }: {
   href: string;
   icon: ReactNode;
   label: string;
+  /** Extra classes for the label link, such as a heavier weight. */
+  labelClassName?: string;
   meta?: ReactNode;
   people: PageUser[];
   finished?: boolean;
@@ -485,7 +488,7 @@ function WorkRow({
       <span className="inline-flex shrink-0 text-text-muted">{icon}</span>
       <Link
         href={href}
-        className={`min-w-0 flex-1 truncate text-sm hover:underline ${
+        className={`min-w-0 flex-1 truncate text-sm hover:underline ${labelClassName} ${
           finished ? "text-text-muted line-through" : "text-text-primary"
         }`}
       >
@@ -504,6 +507,93 @@ function WorkRow({
             </Tooltip>
           ))}
         </Avatar.Group>
+      )}
+    </li>
+  );
+}
+
+/** How a key result's effective status (ADR-0004) reads on the page. */
+const KEY_RESULT_STATUS: Record<Confidence, { tone: PillTone; color: string; label: string }> = {
+  ok: { tone: "brand", color: "green", label: "On track" },
+  warn: { tone: "warning", color: "yellow", label: "At risk" },
+  bad: { tone: "danger", color: "red", label: "Off track" },
+  idle: { tone: "neutral", color: "gray", label: "Not started" },
+};
+
+/** An Objective under the Pillar, with its key results beside it. */
+function GoalCard({ goal, workspaceSlug }: { goal: PageGoal; workspaceSlug: string }) {
+  const href = `/w/${workspaceSlug}/goals/${goal.id}`;
+  const finished = isFinished(goal.status);
+  const hasKeyResults = goal.keyResults.length > 0;
+  return (
+    <Panel padding="md">
+      <WorkList>
+        <WorkRow
+          href={href}
+          icon={<IconTarget size={14} />}
+          label={goal.title}
+          labelClassName="font-medium"
+          finished={finished}
+          meta={goal.period ? <MetaText>{goal.period}</MetaText> : undefined}
+          people={goal.driUser ? [goal.driUser] : []}
+          emptyPeopleLabel="No DRI"
+        />
+      </WorkList>
+      {hasKeyResults ? (
+        <ul
+          aria-label={`Key results of ${goal.title}`}
+          className="m-0 mt-2 flex list-none flex-col gap-1 border-l border-border-subtle p-0 pl-3 ml-[6px]"
+        >
+          {goal.keyResults.map((keyResult) => (
+            <KeyResultRow key={keyResult.id} keyResult={keyResult} href={href} />
+          ))}
+        </ul>
+      ) : (
+        <Text size="xs" className="mt-1 pl-[22px] text-text-muted">
+          No key results yet.
+        </Text>
+      )}
+    </Panel>
+  );
+}
+
+function KeyResultRow({ keyResult, href }: { keyResult: PageKeyResult; href: string }) {
+  const status = effectiveStatus(keyResult.statusOverride, keyResult.status) ?? "not-started";
+  const look = KEY_RESULT_STATUS[statusToConfidence(status)];
+  const label = status === "achieved" ? "Achieved" : look.label;
+  const progress = Math.round(krProgress(keyResult) * 100);
+  return (
+    <li className="flex items-center gap-2 py-1">
+      <span className="inline-flex shrink-0 text-text-muted">
+        <IconTrophy size={14} />
+      </span>
+      <Link href={href} className="min-w-0 flex-1 truncate text-sm text-text-primary hover:underline">
+        {keyResult.title}
+      </Link>
+      <MetaText>
+        {formatKrValue(keyResult.currentValue, keyResult.unit, keyResult.unitLabel)} /{" "}
+        {formatKrValue(keyResult.targetValue, keyResult.unit, keyResult.unitLabel)}
+      </MetaText>
+      <Progress
+        value={progress}
+        size="sm"
+        w={64}
+        color={look.color}
+        className="hidden shrink-0 sm:block"
+        aria-label={`${keyResult.title}: ${progress}%`}
+      />
+      <Text size="xs" className="w-9 shrink-0 text-right text-text-secondary">
+        {progress}%
+      </Text>
+      <Pill size="xs" tone={look.tone} className="shrink-0">
+        {label}
+      </Pill>
+      {keyResult.driUser && (
+        <Tooltip label={keyResult.driUser.name ?? "Someone"}>
+          <Avatar src={keyResult.driUser.image} size={20} radius="xl" alt={keyResult.driUser.name ?? ""}>
+            {keyResult.driUser.name?.charAt(0) ?? "?"}
+          </Avatar>
+        </Tooltip>
       )}
     </li>
   );

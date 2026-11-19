@@ -472,6 +472,23 @@ export async function getPillarPage(input: PillarPageInput) {
         period: true,
         dueDate: true,
         driUser: { select: userSelect },
+        // Every key result of the objective, finished ones too: an achieved
+        // key result still tells the reader how the goal is going.
+        keyResults: {
+          select: {
+            id: true,
+            title: true,
+            currentValue: true,
+            targetValue: true,
+            startValue: true,
+            unit: true,
+            unitLabel: true,
+            status: true,
+            statusOverride: true,
+            driUser: { select: userSelect },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
       orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { title: "asc" }],
     }),
