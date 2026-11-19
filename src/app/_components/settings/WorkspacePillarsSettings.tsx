@@ -233,7 +233,7 @@ function PillarRow({
       <Group justify="space-between" align="center" mb="xs" wrap="wrap">
         <Badge
           component={Link}
-          href={pillarPath(workspaceSlug, tag.slug)}
+          href={pillarPath(workspaceSlug, tag)}
           variant="light"
           color={getTagMantineColor(tag.color)}
           leftSection={<PillarIcon size={11} />}

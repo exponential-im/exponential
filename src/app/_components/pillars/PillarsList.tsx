@@ -77,7 +77,7 @@ export function PillarsList() {
             <Panel
               key={pillar.id}
               as={Link}
-              href={pillarPath(workspace.slug, pillar.slug)}
+              href={pillarPath(workspace.slug, pillar)}
               interactive
               padding="md"
             >

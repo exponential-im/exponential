@@ -99,7 +99,7 @@ export function EntityPillars({
           <Badge
             key={tag.id}
             component={Link}
-            href={pillarPath(workspaceSlug, tag.slug)}
+            href={pillarPath(workspaceSlug, tag)}
             variant="light"
             color={getTagMantineColor(tag.color)}
             leftSection={<PillarIcon size={11} />}

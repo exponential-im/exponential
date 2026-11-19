@@ -72,7 +72,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   // Opened by id (an old link): show the slug URL instead. Replacing the
   // history entry rather than navigating keeps this query, so nothing reloads
   // (Next.js syncs its router with the native history call).
-  const canonicalPath = data ? pillarPath(data.pillar.workspaceSlug, data.pillar.slug) : null;
+  const canonicalPath = data ? pillarPath(data.pillar.workspaceSlug, data.pillar) : null;
   useEffect(() => {
     if (canonicalPath && window.location.pathname !== canonicalPath) {
       window.history.replaceState(null, "", canonicalPath + window.location.search);
