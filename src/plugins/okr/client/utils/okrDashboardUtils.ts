@@ -8,6 +8,8 @@
  *   - weekly trajectory synthesis from check-in history
  */
 
+import { periodDateRange } from "~/lib/okr/period";
+
 export type Confidence = "ok" | "warn" | "bad" | "idle";
 
 export interface TrajectoryPoint {
@@ -107,35 +109,6 @@ export function krProgressAt(kr: KrForCompute, at: Date): number {
 
   const value = history[0]?.value ?? kr.startValue;
   return clamp01((value - kr.startValue) / range);
-}
-
-/**
- * Parse `"Q1-2026" | "Q2-2026" | ... | "Annual-2026" | "H1-2026"` into date range.
- */
-export function periodDateRange(period: string): { start: Date; end: Date } | null {
-  const match = /^(Q[1-4]|H[12]|Annual)-(\d{4})$/.exec(period);
-  if (!match) return null;
-  const [, type, yearStr] = match;
-  const year = parseInt(yearStr ?? "0", 10);
-
-  switch (type) {
-    case "Q1":
-      return { start: new Date(year, 0, 1), end: new Date(year, 2, 31) };
-    case "Q2":
-      return { start: new Date(year, 3, 1), end: new Date(year, 5, 30) };
-    case "Q3":
-      return { start: new Date(year, 6, 1), end: new Date(year, 8, 30) };
-    case "Q4":
-      return { start: new Date(year, 9, 1), end: new Date(year, 11, 31) };
-    case "H1":
-      return { start: new Date(year, 0, 1), end: new Date(year, 5, 30) };
-    case "H2":
-      return { start: new Date(year, 6, 1), end: new Date(year, 11, 31) };
-    case "Annual":
-      return { start: new Date(year, 0, 1), end: new Date(year, 11, 31) };
-    default:
-      return null;
-  }
 }
 
 export function expectedProgress(period: string, now: Date = new Date()): number {

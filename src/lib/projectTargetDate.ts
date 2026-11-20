@@ -7,7 +7,7 @@
  */
 
 import { differenceInCalendarDays, startOfDay } from "date-fns";
-import { periodDateRange } from "~/plugins/okr/client/utils/okrDashboardUtils";
+import { periodDateRange } from "~/lib/okr/period";
 
 export interface TargetDateGoal {
   title: string;
