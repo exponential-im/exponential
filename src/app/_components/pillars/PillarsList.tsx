@@ -89,6 +89,11 @@ export function PillarsList() {
                   {pillar.name}
                 </Text>
                 {pillar.archivedAt && <Pill size="xs">Inactive</Pill>}
+                {pillar.hasNoDri && (
+                  <Pill size="xs" tone="warning">
+                    No DRI
+                  </Pill>
+                )}
               </Group>
               {pillar.description && (
                 <div className="line-clamp-3 text-sm text-text-secondary">

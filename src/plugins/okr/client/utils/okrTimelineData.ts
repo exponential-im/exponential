@@ -17,9 +17,9 @@ import type {
 import {
   clamp01,
   krProgress,
-  periodDateRange,
   statusToConfidence,
 } from "./okrDashboardUtils";
+import { periodDateRange } from "~/lib/okr/period";
 import {
   getAvatarColor,
   getColorSeed,

@@ -49,6 +49,12 @@ export function WorkspacePillarsSettings({
   const positionIdsByPillar = new Map(
     (pillarRows ?? []).map((p) => [p.id, p.positions.map((x) => x.positionId)]),
   );
+  const driByPillar = new Map((pillarRows ?? []).map((p) => [p.id, p.driUserId]));
+  const { data: members } = api.workspace.listMembers.useQuery({ workspaceId });
+  // A Pillar's DRI is a person who is a direct member (ADR-0087): never an agent.
+  const driOptions = (members ?? [])
+    .filter((m) => !m.isAgent && m.source === "workspace")
+    .map((m) => ({ value: m.id, label: m.name ?? m.email ?? "Unnamed member" }));
   const workspaceTags = data?.workspaceTags ?? [];
   const pillars = workspaceTags.filter((t) => t.category === PILLAR_CATEGORY);
   const active = pillars.filter((t) => !t.archivedAt);
@@ -105,6 +111,8 @@ export function WorkspacePillarsSettings({
                 onSaved={refresh}
                 positionOptions={positionOptions}
                 positionIds={positionIdsByPillar.get(tag.id) ?? []}
+                driOptions={driOptions}
+                driUserId={driByPillar.get(tag.id) ?? null}
                 actions={
                   <>
                     <Button
@@ -205,6 +213,8 @@ function PillarRow({
   onSaved,
   positionOptions,
   positionIds,
+  driOptions,
+  driUserId,
 }: {
   tag: WorkspaceTag;
   workspaceSlug: string;
@@ -213,7 +223,14 @@ function PillarRow({
   /** When given, the Positions accountable for this Pillar can be chosen. */
   positionOptions?: { value: string; label: string }[];
   positionIds?: string[];
+  /** When given, the Pillar's DRI can be chosen from these people. */
+  driOptions?: { value: string; label: string }[];
+  driUserId?: string | null;
 }) {
+  const setDri = api.tag.setPillarDri.useMutation({
+    onSuccess: onSaved,
+    onError: onError("DRI not saved"),
+  });
   const setPositions = api.tag.setPillarPositions.useMutation({
     onSuccess: onSaved,
     onError: onError("Positions not saved"),
@@ -288,6 +305,23 @@ function PillarRow({
         <Text size="sm" className="text-text-muted">
           No description yet.
         </Text>
+      )}
+      {driOptions && (
+        <Select
+          mt="sm"
+          size="xs"
+          label="DRI"
+          description="The one person accountable for this Pillar, told when one of its Metrics breaches or goes stale."
+          placeholder="Choose a person"
+          data={driOptions}
+          value={driUserId ?? null}
+          disabled={setDri.isPending}
+          searchable
+          clearable
+          clearButtonProps={{ "aria-label": "Clear DRI" }}
+          onChange={(next) => setDri.mutate({ tagId: tag.id, userId: next })}
+          comboboxProps={{ withinPortal: true }}
+        />
       )}
       {positionOptions && (
         <MultiSelect
