@@ -2,6 +2,7 @@ import type { MetadataRoute } from 'next';
 import { getAllBlogPosts } from '~/lib/blog/getBlogPost';
 import { getAllFeatureSlugs } from '~/app/(home)/features/_data/features';
 import { getAllIntegrationSlugs } from '~/app/(home)/features/integrations/_data/integrations';
+import { getAllComparisonSlugs } from '~/app/(home)/compare/_data/comparisons';
 import { getAllLearnArticles } from '~/lib/learn/getLearnArticle';
 import { getAllDocSlugs } from '~/lib/docs/getDoc';
 import { getPublicBaseUrl } from '~/lib/urls';
@@ -109,6 +110,22 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     })),
   ];
 
+  // Comparison pages, and the index that lists them
+  const comparisonPages: MetadataRoute.Sitemap = [
+    {
+      url: `${baseUrl}/compare`,
+      lastModified: new Date(),
+      changeFrequency: 'monthly' as const,
+      priority: 0.6,
+    },
+    ...getAllComparisonSlugs().map((slug) => ({
+      url: `${baseUrl}/compare/${slug}`,
+      lastModified: new Date(),
+      changeFrequency: 'monthly' as const,
+      priority: 0.7,
+    })),
+  ];
+
   // Doc pages
   const docSlugs = await getAllDocSlugs();
   const docPages: MetadataRoute.Sitemap = docSlugs.map((slugParts) => ({
@@ -149,6 +166,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     ...learnPages,
     ...featurePages,
     ...integrationPages,
+    ...comparisonPages,
     ...docPages,
     ...publicPagePaths,
   ];

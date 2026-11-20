@@ -59,6 +59,7 @@ export const PUBLIC_PREFIXES = [
   '/blog',
   '/learn',
   '/product-timeline',
+  '/compare', // marketing comparison pages (Exponential vs …)
   '/features/', // marketing feature pages — bare /features is the app's
   /**
    * RFC 8615 well-known URIs: the OAuth discovery documents MCP clients read
