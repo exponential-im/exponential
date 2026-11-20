@@ -157,6 +157,22 @@ describe("listPillars", () => {
   });
 });
 
+describe("listPillars hasNoDri", () => {
+  it("flags each Pillar that has no DRI", async () => {
+    db.tag.findMany.mockResolvedValue([
+      { id: "a", name: "A", driUserId: null },
+      { id: "b", name: "B", driUserId: "u2" },
+    ] as never);
+
+    const pillars = await listPillars({ db, userId: USER, workspaceId: WS });
+    expect(db.tag.findMany.mock.calls[0]![0]!.select).toMatchObject({ driUserId: true });
+    expect(pillars.map((p) => [p.id, p.hasNoDri])).toEqual([
+      ["a", true],
+      ["b", false],
+    ]);
+  });
+});
+
 describe("setPillarPositions", () => {
   beforeEach(() => {
     db.tag.findUnique.mockResolvedValue(tagRow() as never);

@@ -125,6 +125,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   const {
     pillar,
     dri,
+    hasNoDri,
     positions,
     hasNoPosition,
     goals,
@@ -173,7 +174,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
             .
           </Text>
         )}
-        <PillarDriLine dri={dri} />
+        <PillarDriLine dri={dri} hasNoDri={hasNoDri} workspaceSlug={workspaceSlug} />
       </header>
 
       <div className="flex flex-col gap-8">
@@ -518,13 +519,34 @@ function WorkRow({
  * The Pillar's DRI (ADR-0087): the one person accountable for the area, shown
  * apart from its Positions, which only say who to ask.
  */
-function PillarDriLine({ dri }: { dri: PageUser | null }) {
+function PillarDriLine({
+  dri,
+  hasNoDri,
+  workspaceSlug,
+}: {
+  dri: PageUser | null;
+  hasNoDri: boolean;
+  workspaceSlug: string;
+}) {
   return (
     <Group gap="xs" mt="sm" data-testid="pillar-dri">
       <Text size="xs" fw={600} tt="uppercase" className="text-text-muted">
         DRI
       </Text>
-      {dri ? (
+      {hasNoDri || !dri ? (
+        <>
+          <Pill size="xs" tone="warning">
+            No DRI
+          </Pill>
+          <Text size="sm" className="text-text-secondary">
+            Nobody is accountable for this Pillar yet.{" "}
+            <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+              Set a DRI in workspace settings
+            </Link>
+            .
+          </Text>
+        </>
+      ) : (
         <Group gap={6} wrap="nowrap">
           <Avatar src={dri.image} size={22} radius="xl" alt={dri.name ?? ""}>
             {dri.name?.charAt(0) ?? "?"}
@@ -533,10 +555,6 @@ function PillarDriLine({ dri }: { dri: PageUser | null }) {
             {dri.name ?? "Someone"}
           </Text>
         </Group>
-      ) : (
-        <Text size="sm" className="text-text-muted">
-          Nobody yet
-        </Text>
       )}
     </Group>
   );

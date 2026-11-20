@@ -187,7 +187,7 @@ export async function listPillars({
   includeArchived?: boolean;
 }) {
   await assertWorkspaceMembership(db, userId, workspaceId);
-  return db.tag.findMany({
+  const pillars = await db.tag.findMany({
     where: {
       workspaceId,
       category: PILLAR_CATEGORY,
@@ -200,10 +200,13 @@ export async function listPillars({
       color: true,
       description: true,
       archivedAt: true,
+      driUserId: true,
       positions: { select: { positionId: true } },
     },
     orderBy: { name: "asc" },
   });
+  // A Pillar with no DRI is flagged in the Pillars list as on its page (ADR-0087).
+  return pillars.map((pillar) => ({ ...pillar, hasNoDri: pillar.driUserId === null }));
 }
 
 /**

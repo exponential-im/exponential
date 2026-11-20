@@ -132,6 +132,14 @@ test.describe("Pillar accountability", () => {
   });
 
   test("the Pillar's DRI is shown apart from its Positions once an admin sets one", async ({ page }) => {
+    // With no DRI, the Pillar is flagged on its page and in the Pillars list.
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
+    await expect(page.getByTestId("pillar-dri").getByText("No DRI")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars`);
+    const card = page.getByRole("link", { name: new RegExp(names.pillar) });
+    await expect(card.getByText("No DRI")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await page.screenshot({ path: test.info().outputPath("pillars-no-dri.png"), fullPage: true });
+
     const response = await page.request.post("/api/trpc/tag.setPillarDri", {
       data: { json: { tagId: seeded.pillarId, userId: fixture.userId } },
     });
@@ -140,6 +148,7 @@ test.describe("Pillar accountability", () => {
     await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
     const dri = page.getByTestId("pillar-dri");
     await expect(dri.getByText("Dev Fixture")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await expect(dri.getByText("No DRI")).toHaveCount(0);
     await page.screenshot({ path: test.info().outputPath("pillar-dri.png"), fullPage: true });
   });
 
