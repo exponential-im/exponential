@@ -124,6 +124,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
 
   const {
     pillar,
+    dri,
     positions,
     hasNoPosition,
     goals,
@@ -172,6 +173,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
             .
           </Text>
         )}
+        <PillarDriLine dri={dri} />
       </header>
 
       <div className="flex flex-col gap-8">
@@ -509,6 +511,34 @@ function WorkRow({
         </Avatar.Group>
       )}
     </li>
+  );
+}
+
+/**
+ * The Pillar's DRI (ADR-0087): the one person accountable for the area, shown
+ * apart from its Positions, which only say who to ask.
+ */
+function PillarDriLine({ dri }: { dri: PageUser | null }) {
+  return (
+    <Group gap="xs" mt="sm" data-testid="pillar-dri">
+      <Text size="xs" fw={600} tt="uppercase" className="text-text-muted">
+        DRI
+      </Text>
+      {dri ? (
+        <Group gap={6} wrap="nowrap">
+          <Avatar src={dri.image} size={22} radius="xl" alt={dri.name ?? ""}>
+            {dri.name?.charAt(0) ?? "?"}
+          </Avatar>
+          <Text size="sm" className="text-text-primary">
+            {dri.name ?? "Someone"}
+          </Text>
+        </Group>
+      ) : (
+        <Text size="sm" className="text-text-muted">
+          Nobody yet
+        </Text>
+      )}
+    </Group>
   );
 }
 

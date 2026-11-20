@@ -25,6 +25,7 @@ import {
   listPillars,
   setPillar,
   setPillarArchived,
+  setPillarDri,
   setPillarPositions,
   suggestPillarsFor,
 } from "../PillarService";
@@ -196,6 +197,64 @@ describe("setPillarPositions", () => {
     await expect(
       setPillarPositions({ db, userId: USER, tagId: "tag-devops", positionIds: [] }),
     ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+describe("setPillarDri", () => {
+  beforeEach(() => {
+    db.tag.findUnique.mockResolvedValue(tagRow() as never);
+  });
+
+  it("sets a human member of the workspace as DRI, for an admin", async () => {
+    db.user.findFirst.mockResolvedValue({ id: "u2", isAgent: false } as never);
+
+    await expect(setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: "u2" })).resolves.toEqual({
+      driUserId: "u2",
+    });
+
+    expect(roleMock).toHaveBeenCalledWith(db, USER, WS, ["owner", "admin"]);
+    expect(db.user.findFirst).toHaveBeenCalledWith({
+      where: { id: "u2", workspaceMemberships: { some: { workspaceId: WS } } },
+      select: { id: true, isAgent: true },
+    });
+    expect(db.tag.update).toHaveBeenCalledWith({ where: { id: "tag-devops" }, data: { driUserId: "u2" } });
+  });
+
+  it("clears the DRI without looking anyone up", async () => {
+    await setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: null });
+    expect(db.user.findFirst).not.toHaveBeenCalled();
+    expect(db.tag.update).toHaveBeenCalledWith({ where: { id: "tag-devops" }, data: { driUserId: null } });
+  });
+
+  it("refuses someone outside the workspace", async () => {
+    db.user.findFirst.mockResolvedValue(null as never);
+    await expect(
+      setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: "stranger" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.tag.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent account", async () => {
+    db.user.findFirst.mockResolvedValue({ id: "agent-1", isAgent: true } as never);
+    await expect(
+      setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: "agent-1" }),
+    ).rejects.toMatchObject({ code: "BAD_REQUEST", message: expect.stringContaining("not an agent") });
+    expect(db.tag.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses a member who is not an admin", async () => {
+    roleMock.mockRejectedValue(new TRPCError({ code: "FORBIDDEN" }));
+    await expect(
+      setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: null }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.tag.update).not.toHaveBeenCalled();
+  });
+
+  it("only applies to Pillars", async () => {
+    db.tag.findUnique.mockResolvedValue(tagRow({ category: null }) as never);
+    await expect(
+      setPillarDri({ db, userId: USER, tagId: "tag-devops", driUserId: null }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
 
@@ -529,6 +588,23 @@ describe("getPillarPage", () => {
         holders: [{ id: "u2", name: "Ana", image: null }],
       },
     ]);
+  });
+
+  it("returns the Pillar's DRI apart from its Positions, and flags a Pillar with none", async () => {
+    let page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(page.dri).toBeNull();
+    expect(page.hasNoDri).toBe(true);
+    expect(db.user.findUnique).not.toHaveBeenCalled();
+
+    db.tag.findUnique.mockResolvedValue(tagRow({ driUserId: "u2" }) as never);
+    db.user.findUnique.mockResolvedValue({ id: "u2", name: "Ana", image: null } as never);
+    page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(db.user.findUnique).toHaveBeenCalledWith({
+      where: { id: "u2" },
+      select: { id: true, name: true, image: true },
+    });
+    expect(page.dri).toEqual({ id: "u2", name: "Ana", image: null });
+    expect(page.hasNoDri).toBe(false);
   });
 
   it("lists running recurring duties the viewer can see, through the project or as creator", async () => {

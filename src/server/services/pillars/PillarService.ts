@@ -281,6 +281,49 @@ export async function setPillarPositions({
 }
 
 /**
+ * Set or clear a Pillar's DRI: the one person accountable for it, and the
+ * person told when one of its Metrics breaches or goes stale (ADR-0087).
+ * Admin-only, like the rest of a Pillar's settings. The DRI must be a human
+ * member of the Pillar's workspace: a notification to an agent's inbox
+ * reaches nobody. Separate from the Pillar's Positions, which stay display-only.
+ */
+export async function setPillarDri({
+  db,
+  userId,
+  tagId,
+  driUserId,
+}: {
+  db: PrismaClient;
+  userId: string;
+  tagId: string;
+  driUserId: string | null;
+}): Promise<{ driUserId: string | null }> {
+  const tag = await db.tag.findUnique({ where: { id: tagId } });
+  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) throw pillarNotFound();
+  await assertWorkspaceRole(db, userId, tag.workspaceId, PILLAR_ADMIN_ROLES);
+  if (driUserId) {
+    const dri = await db.user.findFirst({
+      where: { id: driUserId, workspaceMemberships: { some: { workspaceId: tag.workspaceId } } },
+      select: { id: true, isAgent: true },
+    });
+    if (!dri) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "A Pillar's DRI must be a member of its workspace",
+      });
+    }
+    if (dri.isAgent) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "A Pillar's DRI must be a person, not an agent",
+      });
+    }
+  }
+  await db.tag.update({ where: { id: tagId }, data: { driUserId } });
+  return { driUserId };
+}
+
+/**
  * Pillars to pre-tick for a capture's text, best first (ADR-0086, V3): the
  * workspace's active Pillars matched by keyword against their names and
  * descriptions. Suggestions only; nothing is filed.
@@ -430,6 +473,7 @@ export async function getPillarPage(input: PillarPageInput) {
   } satisfies Prisma.ActionWhereInput;
 
   const [
+    dri,
     positions,
     goals,
     projects,
@@ -441,6 +485,10 @@ export async function getPillarPage(input: PillarPageInput) {
     recurring,
     resources,
   ] = await Promise.all([
+    // The one person accountable for the Pillar (ADR-0087), if set.
+    pillar.driUserId
+      ? db.user.findUnique({ where: { id: pillar.driUserId }, select: userSelect })
+      : Promise.resolve(null),
     // Who is accountable: Positions and their holders, readable by any member.
     db.pillarPosition.findMany({
       where: { tagId },
@@ -628,6 +676,9 @@ export async function getPillarPage(input: PillarPageInput) {
     })),
     // A Pillar nobody is accountable for is flagged on its page.
     hasNoPosition: positions.length === 0,
+    // The Pillar's single DRI, shown apart from its Positions (ADR-0087).
+    dri,
+    hasNoDri: dri === null,
     goals,
     projects,
     epics,

@@ -13,6 +13,7 @@ import {
   setPillar as setPillarService,
   setPillarArchived as setPillarArchivedService,
   setPillarPositions as setPillarPositionsService,
+  setPillarDri as setPillarDriService,
 } from "~/server/services/pillars/PillarService";
 import { PILLAR_CATEGORY } from "~/types/tag";
 
@@ -323,6 +324,18 @@ export const tagRouter = createTRPCRouter({
         userId: ctx.session.user.id,
         tagId: input.tagId,
         positionIds: input.positionIds,
+      }),
+    ),
+
+  // Set or clear a Pillar's DRI (ADR-0087). Admins only; a human workspace member.
+  setPillarDri: protectedProcedure
+    .input(z.object({ tagId: z.string(), userId: z.string().nullable() }))
+    .mutation(({ ctx, input }) =>
+      setPillarDriService({
+        db: ctx.db,
+        userId: ctx.session.user.id,
+        tagId: input.tagId,
+        driUserId: input.userId,
       }),
     ),
 

@@ -131,6 +131,18 @@ test.describe("Pillar accountability", () => {
     await page.screenshot({ path: test.info().outputPath("pillar-accountable.png"), fullPage: true });
   });
 
+  test("the Pillar's DRI is shown apart from its Positions once an admin sets one", async ({ page }) => {
+    const response = await page.request.post("/api/trpc/tag.setPillarDri", {
+      data: { json: { tagId: seeded.pillarId, userId: fixture.userId } },
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+
+    await page.goto(`/w/${fixture.workspaceSlug}/pillars/${seeded.pillarSlug}`);
+    const dri = page.getByTestId("pillar-dri");
+    await expect(dri.getByText("Dev Fixture")).toBeVisible({ timeout: FIRST_PAINT_TIMEOUT });
+    await page.screenshot({ path: test.info().outputPath("pillar-dri.png"), fullPage: true });
+  });
+
   test("a recurring task filed under the Pillar shows under its recurring duties", async ({ page }) => {
     const response = await page.request.post("/api/trpc/tag.setEntityTags", {
       data: { json: { entityType: "recurringTask", entityId: seeded.recurringTaskId, tagIds: [seeded.pillarId] } },
