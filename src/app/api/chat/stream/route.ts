@@ -16,6 +16,7 @@ import { checkRateLimit, clientIpFrom } from "~/server/utils/rateLimit";
 import { db } from "~/server/db";
 import { getDecryptedKey } from "~/server/utils/credentialHelper";
 import { sanitizeAIOutput } from "~/lib/sanitize-output";
+import { intentFirst, splitStepIntent } from "~/lib/chat/stepIntent";
 import { getAiInteractionLogger } from "~/server/services/AiInteractionLogger";
 import {
   capToolCallsForTurn,
@@ -892,17 +893,24 @@ export async function POST(req: Request) {
               } else if (chunk.type === "tool-call") {
                 const name = readString(chunk.payload, 'toolName') ?? 'tool';
                 const id = readString(chunk.payload, 'toolCallId') ?? `${name}-${toolCallNames.length}`;
-                const args = truncateArgs(readUnknown(chunk.payload, 'args'));
+                const rawArgs = readUnknown(chunk.payload, 'args');
+                // The model-written step label (ticket silver.walnut) rides on
+                // the frame as `intent`, cleaned, and leaves the frame's args.
+                // Tool frames skip sanitizeAIOutput, so splitStepIntent cleans it.
+                const { intent, args: displayArgs } = splitStepIntent(rawArgs);
+                const args = truncateArgs(displayArgs);
                 toolCallNames.push(name);
                 loggedToolCallIndexById.set(id, loggedToolCalls.length);
                 loggedToolCalls.push({
                   name,
-                  args: redactToolArgs(readUnknown(chunk.payload, 'args')),
+                  // The persisted args keep the intent, first so the per-call cut
+                  // cannot hide it from traces and judges.
+                  args: redactToolArgs(intentFirst(rawArgs)),
                   ...(readUnknown(chunk.payload, 'providerExecuted') === true
                     ? { providerExecuted: true }
                     : {}),
                 });
-                toolFrame({ phase: 'call', id, name, args });
+                toolFrame({ phase: 'call', id, name, args, ...(intent ? { intent } : {}) });
               } else if (chunk.type === "tool-result") {
                 const name = readString(chunk.payload, 'toolName') ?? 'tool';
                 const id = readString(chunk.payload, 'toolCallId') ?? `${name}-${Math.max(0, toolCallNames.length - 1)}`;

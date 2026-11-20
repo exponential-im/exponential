@@ -25,6 +25,12 @@ export interface ToolCall {
   id: string;
   name: string;
   args?: Record<string, unknown>;
+  /**
+   * The model-written step label ("Find Andi's open tickets in Cycle 17"),
+   * cleaned by the route. Absent when the model wrote none; the row then
+   * falls back to its table label.
+   */
+  intent?: string;
   status: 'running' | 'success' | 'error';
   /** What the failure means; drives the plain sentence the person sees. */
   errorKind?: ToolErrorKind;
@@ -67,7 +73,7 @@ const KEEPALIVE_RE = /​/g;
 const RECORD_SEPARATOR_RE = /\u001E/g;
 
 type ToolFramePayload =
-  | { phase: 'call'; id: string; name: string; args?: Record<string, unknown> }
+  | { phase: 'call'; id: string; name: string; args?: Record<string, unknown>; intent?: string }
   | { phase: 'result'; id: string; name: string }
   | { phase: 'error'; id: string; name: string; kind?: string; msg?: string };
 
@@ -98,7 +104,7 @@ export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
   displayText = displayText.replace(KEEPALIVE_RE, '');
 
   // Extract every complete tool frame and fold it into the call map. A
-  // `result`/`error` frame inherits `args` from its earlier `call` frame,
+  // `result`/`error` frame inherits `args` and `intent` from its earlier `call` frame,
   // which necessarily precedes it in the buffer.
   const toolCallsById = new Map<string, ToolCall>();
   // Characters removed so far, to map a frame's buffer offset to its position
@@ -115,6 +121,7 @@ export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
           id: payload.id,
           name: payload.name,
           args: payload.args,
+          ...(typeof payload.intent === 'string' && payload.intent !== '' ? { intent: payload.intent } : {}),
           status: 'running',
         });
       } else if (payload.phase === 'result') {
@@ -123,6 +130,7 @@ export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
           id: payload.id,
           name: payload.name,
           args: existing?.args,
+          ...(existing?.intent ? { intent: existing.intent } : {}),
           status: 'success',
         });
       } else {
@@ -131,6 +139,7 @@ export function parseChatStreamBuffer(rawBuffer: string): ParsedChatStream {
           id: payload.id,
           name: payload.name,
           args: existing?.args,
+          ...(existing?.intent ? { intent: existing.intent } : {}),
           status: 'error',
           // A frame from before `kind` existed still classifies from its text.
           errorKind: asToolErrorKind(payload.kind) ?? classifyToolError(payload.msg),

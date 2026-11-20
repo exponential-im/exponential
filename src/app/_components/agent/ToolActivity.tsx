@@ -60,9 +60,12 @@ function formatCount(template: string, n: number, total?: number): string {
   return template.replace('{n}', String(n)).replace('{total}', String(total ?? n));
 }
 
-// Only a curated pickArg may surface an arg value. An unmapped tool shows its
-// humanized verb alone — never a guessed arg (no ids, booleans, or JSON).
+// The model-written intent wins when the call has one (ticket silver.walnut).
+// Otherwise only a curated pickArg may surface an arg value. An unmapped tool
+// shows its humanized verb alone — never a guessed arg (no ids, booleans, or
+// JSON).
 function callLabel(call: ToolCall, display: ToolDisplay | undefined): string {
+  if (call.intent) return call.intent;
   const arg = display?.pickArg(call.args);
   if (arg) return arg;
   return display ? display.verb : humanizeToolName(call.name);
@@ -109,13 +112,18 @@ const ToolGroupRow = memo(function ToolGroupRow({ group }: { group: ToolGroup })
   if (singleCall) {
     headerIcon = <StatusIcon status={singleCall.status} />;
     if (singleCall.status === 'error') {
-      // Calm failure line: verb only, no arg, no raw error. What went wrong,
-      // in plain words, lives behind the row's click-to-expand (rendered below).
+      // Calm failure line: the intent or the verb, no arg, no raw error. What
+      // went wrong, in plain words, lives behind the row's click-to-expand
+      // (rendered below).
       headerLabel = (
         <span className="text-text-secondary text-xs">
-          {display?.verb ?? humanizeToolName(toolName)} — failed
+          {singleCall.intent ?? display?.verb ?? humanizeToolName(toolName)} — failed
         </span>
       );
+    } else if (singleCall.intent) {
+      // The icon carries the state (spinner, check), so the intent reads the
+      // same while running and when done.
+      headerLabel = <span className="text-text-secondary text-xs">{singleCall.intent}</span>;
     } else {
       const verb =
         singleCall.status === 'running'

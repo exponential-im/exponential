@@ -70,9 +70,10 @@ export const ThinkingStatus = memo(function ThinkingStatus({
 
   let message: string;
   if (hasTools) {
-    // Narrate the most recent running tool; if all have settled, she's composing.
+    // Narrate the most recent running tool — its model-written intent when it
+    // has one — and if all have settled, she's composing.
     const running = [...toolCalls].reverse().find((c) => c.status === "running");
-    message = running ? narrateTool(running.name) : COMPOSING_MESSAGE;
+    message = running ? running.intent ?? narrateTool(running.name) : COMPOSING_MESSAGE;
   } else if (ack && !ackElapsed) {
     message = ack;
   } else {

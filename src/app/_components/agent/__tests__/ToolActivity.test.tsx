@@ -214,3 +214,67 @@ describe('ToolActivity — finished turns and plumbing', () => {
     expect(screen.queryByText(/Tool search|Used/)).not.toBeInTheDocument();
   });
 });
+
+// Ticket silver.walnut: the model-written intent replaces the table label.
+describe('ToolActivity — step intent', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  const intent = "Find Andi's open tickets in Cycle 17";
+
+  it('shows the intent for a running single call, and falls back to the table label without one', () => {
+    render(<ToolActivity calls={[call({ name: 'quickCreateActionTool', status: 'running', args: { name: 'Pay Malte' }, intent: 'Add a task to pay Malte' })]} />);
+    expect(screen.getByText('Add a task to pay Malte')).toBeInTheDocument();
+    expect(screen.queryByText(/Create task/)).not.toBeInTheDocument();
+    cleanup();
+
+    render(<ToolActivity calls={[call({ name: 'quickCreateActionTool', status: 'running', args: { name: 'Pay Malte' } })]} />);
+    expect(screen.getByText('Create task: Pay Malte')).toBeInTheDocument();
+  });
+
+  it('shows the same intent when the single call is done (the icon carries the state)', () => {
+    render(<ToolActivity calls={[call({ args: { name: 'Website relaunch' }, intent: 'Start the website relaunch project' })]} />);
+    expect(screen.getByText('Start the website relaunch project')).toBeInTheDocument();
+    expect(screen.queryByText(/Created project/)).not.toBeInTheDocument();
+  });
+
+  it('reads "{intent} — failed" for a failed single call, and the verb without one', () => {
+    render(<ToolActivity calls={[call({ name: 'getAllProjectsTool', status: 'error', errorKind: 'contract', intent })]} />);
+    expect(screen.getByRole('button')).toHaveTextContent(`${intent} — failed`);
+    cleanup();
+
+    render(<ToolActivity calls={[call({ name: 'getAllProjectsTool', status: 'error', errorKind: 'contract' })]} />);
+    expect(screen.getByRole('button')).toHaveTextContent('Get projects — failed');
+  });
+
+  it('shows each call\'s intent inside an expanded group, with the table label as fallback, and keeps the group header', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({ id: 'a', name: 'quickCreateActionTool', args: { name: 'Pay Malte' }, intent: 'Add a task to pay Malte' }),
+          call({ id: 'b', name: 'quickCreateActionTool', args: { name: 'Book venue' } }),
+        ]}
+      />,
+    );
+    const header = screen.getByRole('button', { name: /Created 2 tasks/ });
+    expect(screen.queryByText('Add a task to pay Malte')).not.toBeVisible();
+    fireEvent.click(header);
+    expect(screen.getByText('Add a task to pay Malte')).toBeInTheDocument();
+    expect(screen.getByText('Book venue')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Created 2 tasks/ })).toBeInTheDocument();
+  });
+
+  it('keeps the folded summary for a finished turn', () => {
+    render(
+      <ToolActivity
+        calls={[
+          call({ id: 'a', name: 'getTodaysActionsTool', intent: "Check today's tasks" }),
+          call({ id: 'b', name: 'checkCalendarConnectionTool', intent: 'Check the calendar is connected' }),
+        ]}
+        finished
+      />,
+    );
+    expect(screen.getByRole('button', { name: /Used 2 tools/ })).toBeInTheDocument();
+  });
+});
