@@ -29,6 +29,7 @@ import {
   IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
+import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { Panel, Pill, SectionHeader, EmptyState, type PillTone } from "~/app/_components/ui";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { getTagMantineColor } from "~/utils/tagColors";
@@ -76,6 +77,8 @@ interface PillarPageProps {
  */
 export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   const [includeCompleted, setIncludeCompleted] = useState(false);
+  const { userRole } = useWorkspace();
+  const canManage = userRole === "owner" || userRole === "admin";
   const { data, isLoading, error } = api.pillar.get.useQuery(
     { workspaceSlug, pillar: pillarSlug, includeCompleted },
     { placeholderData: (previous) => previous },
@@ -124,6 +127,8 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
 
   const {
     pillar,
+    dri,
+    hasNoDri,
     positions,
     hasNoPosition,
     goals,
@@ -172,6 +177,12 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
             .
           </Text>
         )}
+        <PillarDriLine
+          dri={dri}
+          hasNoDri={hasNoDri}
+          workspaceSlug={workspaceSlug}
+          canManage={canManage}
+        />
       </header>
 
       <div className="flex flex-col gap-8">
@@ -509,6 +520,59 @@ function WorkRow({
         </Avatar.Group>
       )}
     </li>
+  );
+}
+
+/**
+ * The Pillar's DRI (ADR-0087): the one person accountable for the area, shown
+ * apart from its Positions, which only say who to ask.
+ */
+function PillarDriLine({
+  dri,
+  hasNoDri,
+  workspaceSlug,
+  canManage,
+}: {
+  dri: PageUser | null;
+  hasNoDri: boolean;
+  workspaceSlug: string;
+  /** Owners and admins set the DRI in workspace settings; others only see it. */
+  canManage: boolean;
+}) {
+  return (
+    <Group gap="xs" mt="sm" data-testid="pillar-dri">
+      <Text size="xs" fw={600} tt="uppercase" className="text-text-muted">
+        DRI
+      </Text>
+      {hasNoDri || !dri ? (
+        <>
+          <Pill size="xs" tone="warning">
+            No DRI
+          </Pill>
+          <Text size="sm" className="text-text-secondary">
+            Nobody is accountable for this Pillar yet.
+            {canManage && (
+              <>
+                {" "}
+                <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+                  Set a DRI in workspace settings
+                </Link>
+                .
+              </>
+            )}
+          </Text>
+        </>
+      ) : (
+        <Group gap={6} wrap="nowrap">
+          <Avatar src={dri.image} size={22} radius="xl" alt={dri.name ?? ""}>
+            {dri.name?.charAt(0) ?? "?"}
+          </Avatar>
+          <Text size="sm" className="text-text-primary">
+            {dri.name ?? "Someone"}
+          </Text>
+        </Group>
+      )}
+    </Group>
   );
 }
 

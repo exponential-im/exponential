@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { clearPillarDriForRemovedMember } from "~/server/services/pillars/PillarService";
 import { createTRPCRouter, protectedProcedure, publicProcedure, humanOnlyProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
 import {
@@ -937,6 +938,9 @@ export const workspaceRouter = createTRPCRouter({
       // lose their memberships here too — agent access never outlives its owner's.
       await cascadeOwnerRemovedFromWorkspace(ctx.db, input.userId, input.workspaceId);
 
+      // A Pillar's DRI must be a member of its workspace (ADR-0087).
+      await clearPillarDriForRemovedMember(ctx.db, input.userId, input.workspaceId);
+
       // An agent removed here — someone's Assistant or External agent, which
       // an owner or admin may take out of their workspace — also loses the
       // direct project grants it held in it, as when its owner revokes it.
@@ -1808,6 +1812,7 @@ export const workspaceRouter = createTRPCRouter({
         name: true,
         email: true,
         image: true,
+        isAgent: true,
       } as const;
 
       const [direct, viaTeam] = await Promise.all([
@@ -1833,6 +1838,8 @@ export const workspaceRouter = createTRPCRouter({
         name: string | null;
         email: string | null;
         image: string | null;
+        /** An agent's shadow user (ADR-0049), not a person. */
+        isAgent: boolean;
         /**
          * The member's WORKSPACE role. Team-based members get "member", the
          * same synthesized role `workspace.list` gives them — a team `owner`

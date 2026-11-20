@@ -200,6 +200,10 @@ model User {
   driKeyResults                  KeyResult[]                     @relation("KeyResultDRI")
   // Tag relations
   tagsCreated                    Tag[]                           @relation("TagCreator")
+  pillarsDri                     Tag[]                           @relation("PillarDri")
+  metricsCreated                 Metric[]                        @relation("MetricCreator")
+  metricValuesRecorded           MetricValue[]                   @relation("MetricValueCreator")
+  metricChangesMade              MetricChange[]                  @relation("MetricChangeCreator")
   // View relations
   viewsCreated                   View[]                          @relation("ViewsCreated")
   // List relations
@@ -652,6 +656,7 @@ model Workspace {
   // Plugin and OKR relations
   pluginConfigs           PluginConfig[]
   keyResults              KeyResult[]
+  metrics                 Metric[]
   favorites               Favorite[]
   // Tag relations
   tags                    Tag[]
@@ -3224,11 +3229,13 @@ model Tag {
   archivedAt  DateTime? // An inactive Pillar: kept on every item, hidden from pickers and the sidebar
   workspaceId String? // null = global tag, available in all workspaces
   createdById String? // null for system tags
+  driUserId   String? // A Pillar's single DRI: the human member accountable for it (ADR-0087)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   workspace Workspace?   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   createdBy User?        @relation("TagCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  driUser   User?        @relation("PillarDri", fields: [driUserId], references: [id], onDelete: SetNull)
   actions   ActionTag[]
   tickets   TicketTag[]
   features  FeatureTag[]
@@ -3239,11 +3246,13 @@ model Tag {
   resources ResourceTag[]
   recurringTasks RecurringTaskTag[]
   positions PillarPosition[] // Positions accountable for a Pillar (shown, never routed)
+  metrics   Metric[] // A Pillar's standing numbers (ADR-0087)
 
   // Global tags: unique by slug (when workspaceId is null)
   // Workspace tags: unique by slug within workspace
   @@unique([slug, workspaceId])
   @@index([workspaceId])
+  @@index([driUserId])
   @@index([isSystem])
   @@index([slug])
 }
@@ -4389,6 +4398,7 @@ model KeyResult {
   userId             String
   driUserId          String?
   workspaceId        String?
+  metricId           String? // The Pillar Metric this KR moves; its values arrive as check-ins (ADR-0087)
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
@@ -4396,6 +4406,7 @@ model KeyResult {
   user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   driUser   User?              @relation("KeyResultDRI", fields: [driUserId], references: [id])
   workspace Workspace?         @relation(fields: [workspaceId], references: [id])
+  metric    Metric?            @relation(fields: [metricId], references: [id], onDelete: SetNull)
   checkIns  KeyResultCheckIn[]
   comments  KeyResultComment[] // Discussion comments on this key result
   projects  KeyResultProject[] // Projects linked to this key result
@@ -4406,8 +4417,77 @@ model KeyResult {
   @@index([userId])
   @@index([driUserId])
   @@index([workspaceId])
+  @@index([metricId])
   @@index([period])
   @@index([status])
+}
+
+/// A standing number that says whether part of a Pillar is healthy right now
+/// (ADR-0087). Not a Key result: no Objective, no period. Its state (healthy,
+/// warning, breached, stale) is derived on read; `lastState` only caches it to
+/// detect transitions for notifications.
+model Metric {
+  id            String    @id @default(cuid())
+  tagId         String // The owning Pillar
+  workspaceId   String
+  name          String
+  unit          String // Same vocabulary as KeyResult.unit
+  unitLabel     String?
+  direction     String // "higher_is_better" | "lower_is_better"
+  healthyValue  Float
+  breachedValue Float
+  warningValue  Float? // Lies between healthyValue and breachedValue
+  cadence       String // "hourly" | "daily" | "weekly" | "monthly"
+  source        String // Free-text label shown on the tile
+  pinnedAt      DateTime? // Non-null = a vital sign; ordered by pinnedAt
+  archivedAt    DateTime?
+  lastState     String? // Cached derived state, for transition detection only
+  lastStateAt   DateTime?
+  createdById   String
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tag        Tag            @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  workspace  Workspace      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy  User           @relation("MetricCreator", fields: [createdById], references: [id])
+  values     MetricValue[]
+  changes    MetricChange[]
+  keyResults KeyResult[]
+
+  @@index([tagId])
+  @@index([workspaceId])
+}
+
+/// A value recorded for a Metric, by hand or through the API, CLI or MCP.
+model MetricValue {
+  id          String   @id @default(cuid())
+  metricId    String
+  value       Float
+  notes       String?
+  recordedAt  DateTime @default(now()) // The caller may backdate, never future-date
+  createdById String
+  createdAt   DateTime @default(now())
+
+  metric    Metric @relation(fields: [metricId], references: [id], onDelete: Cascade)
+  createdBy User   @relation("MetricValueCreator", fields: [createdById], references: [id])
+
+  @@index([metricId, recordedAt])
+}
+
+/// A Metric's non-value history: lines changed, archived, restored.
+model MetricChange {
+  id          String   @id @default(cuid())
+  metricId    String
+  kind        String // "lines_changed" | "archived" | "restored"
+  before      Json?
+  after       Json?
+  createdById String
+  createdAt   DateTime @default(now())
+
+  metric    Metric @relation(fields: [metricId], references: [id], onDelete: Cascade)
+  createdBy User   @relation("MetricChangeCreator", fields: [createdById], references: [id])
+
+  @@index([metricId, createdAt])
 }
 
 model KeyResultCheckIn {
