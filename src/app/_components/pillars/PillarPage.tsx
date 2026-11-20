@@ -13,9 +13,9 @@ import {
   Switch,
   Text,
   ThemeIcon,
-  Title,
   Tooltip,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import {
   IconArrowsSplit,
   IconBookmark,
@@ -31,10 +31,12 @@ import {
 import { api, type RouterOutputs } from "~/trpc/react";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { Panel, Pill, SectionHeader, EmptyState, type PillTone } from "~/app/_components/ui";
-import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { InlineEditableTitle } from "~/app/_components/shared/InlineEditableTitle";
+import { MarkdownFieldEditor } from "~/app/_components/shared/MarkdownFieldEditor";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
 import { pillarPath } from "~/lib/pillars/pillarPath";
+import { TAG_DESCRIPTION_MAX } from "~/types/tag";
 import { formatKrValue } from "~/app/_components/goals/keyResultRows";
 import {
   effectiveStatus,
@@ -147,13 +149,19 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
     <Container size="lg" className="py-8">
       <header className="mb-8">
         <Group justify="space-between" align="flex-start" wrap="nowrap" mb="xs">
-          <Group gap="sm" align="center">
-            <ThemeIcon variant="light" size="lg" radius="md" color={getTagMantineColor(pillar.color)}>
+          <Group gap="sm" align="center" wrap="nowrap" className="min-w-0 flex-1">
+            <ThemeIcon
+              variant="light"
+              size="lg"
+              radius="md"
+              color={getTagMantineColor(pillar.color)}
+              className="shrink-0"
+            >
               <PillarIcon size={20} />
             </ThemeIcon>
-            <Title order={1} className="text-text-primary">
-              {pillar.name}
-            </Title>
+            <div className="min-w-0 flex-1">
+              <PillarTitle data={data} includeCompleted={includeCompleted} />
+            </div>
             {pillar.archivedAt && <Pill tone="warning">Inactive</Pill>}
           </Group>
           <Switch
@@ -164,19 +172,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
             className="shrink-0 pt-2"
           />
         </Group>
-        {pillar.description ? (
-          <div className="max-w-3xl text-text-secondary">
-            <MarkdownRenderer content={pillar.description} variant="compact" />
-          </div>
-        ) : (
-          <Text size="sm" className="text-text-muted">
-            No description yet. Say what good looks like for this area in{" "}
-            <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
-              workspace settings
-            </Link>
-            .
-          </Text>
-        )}
+        <PillarDescription data={data} queryKey={{ workspaceSlug, pillar: pillarSlug }} />
         <PillarDriLine
           dri={dri}
           hasNoDri={hasNoDri}
@@ -398,6 +394,105 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
         </PageSection>
       </div>
     </Container>
+  );
+}
+
+/**
+ * The Pillar's name, edited in place the way a Knowledge Page's title is.
+ * The name is the tag's, so renaming moves its slug, and with it the page's
+ * URL: the page follows to the new URL without reloading.
+ */
+function PillarTitle({ data, includeCompleted }: { data: PillarPageData; includeCompleted: boolean }) {
+  const { pillar } = data;
+  const router = useRouter();
+  const utils = api.useUtils();
+  const rename = api.tag.update.useMutation({
+    onSuccess: (updated) => {
+      const moved = { ...data, pillar: { ...pillar, name: updated.name, slug: updated.slug } };
+      // Seed the new URL's query so the page does not fall back to its
+      // skeleton while it moves there; the old slug no longer resolves.
+      // `||`, not `??`: a name made only of characters the slug rule drops
+      // has an empty slug, and its URL keeps the id (see pillarPath).
+      utils.pillar.get.setData(
+        { workspaceSlug: pillar.workspaceSlug, pillar: updated.slug || updated.id, includeCompleted },
+        moved,
+      );
+      const target = pillarPath(pillar.workspaceSlug, updated);
+      if (window.location.pathname !== target) {
+        router.replace(target + window.location.search);
+      }
+      // The sidebar, pickers and settings list Pillars by name.
+      void utils.pillar.list.invalidate();
+      void utils.tag.list.invalidate();
+    },
+    onError: (error) => {
+      notifications.show({ title: "Pillar not renamed", message: error.message, color: "red" });
+    },
+  });
+
+  return (
+    <InlineEditableTitle
+      value={pillar.name}
+      editable={pillar.canEdit}
+      ariaLabel="Pillar name"
+      placeholder="Pillar name"
+      // Mantine's h1 size, which the heading had before it was editable.
+      fontSize="2.125rem"
+      onCommit={(name) => rename.mutateAsync({ id: pillar.id, name })}
+    />
+  );
+}
+
+/**
+ * The Pillar's "what good looks like", edited in place with the same surface
+ * as a Knowledge Page (autosaves as you type). Read-only for viewers.
+ */
+function PillarDescription({
+  data,
+  queryKey,
+}: {
+  data: PillarPageData;
+  /** The URL parts the page queried with, which name its cache entries. */
+  queryKey: { workspaceSlug: string; pillar: string };
+}) {
+  const { pillar } = data;
+  const utils = api.useUtils();
+  const update = api.tag.update.useMutation();
+
+  if (!pillar.canEdit && !pillar.description) {
+    return (
+      <Text size="sm" className="text-text-muted">
+        No description yet.
+      </Text>
+    );
+  }
+
+  return (
+    <div className="max-w-3xl text-text-secondary">
+      <MarkdownFieldEditor
+        // The editor loads its content once per mount: one mount per Pillar.
+        key={pillar.id}
+        markdown={pillar.description}
+        editable={pillar.canEdit}
+        placeholder="Say what good looks like for this area… type / for blocks."
+        onSave={async (next) => {
+          if (next && next.length > TAG_DESCRIPTION_MAX) {
+            throw new Error(
+              `A Pillar's description fits ${TAG_DESCRIPTION_MAX.toLocaleString()} characters; this one has ${next.length.toLocaleString()}.`,
+            );
+          }
+          await update.mutateAsync({ id: pillar.id, description: next ?? "" });
+          // Patch rather than refetch: autosave runs as the person types, and
+          // the page query is heavy. Both "Show completed" variants are cached.
+          for (const includeCompleted of [false, true]) {
+            utils.pillar.get.setData(
+              { ...queryKey, includeCompleted },
+              (old) => (old ? { ...old, pillar: { ...old.pillar, description: next } } : old),
+            );
+          }
+        }}
+      />
+    </div>
   );
 }
 

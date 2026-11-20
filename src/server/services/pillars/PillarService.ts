@@ -20,6 +20,8 @@ import {
   buildSharedResourceWhere,
   buildTicketAccessWhere,
   buildWorkspaceProjectAccessWhere,
+  canEditWorkspaceContent,
+  type WorkspaceRole,
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
 import { suggestPillars } from "~/lib/pillars/suggestPillars";
@@ -123,18 +125,19 @@ export async function loadReadablePillar(
   db: PrismaClient,
   userId: string,
   ref: PillarRef,
-): Promise<Tag & { workspaceId: string; workspaceSlug: string }> {
+): Promise<Tag & { workspaceId: string; workspaceSlug: string; viewerRole: WorkspaceRole }> {
   const found = await findPillarTag(db, ref);
   if (!found || found.category !== PILLAR_CATEGORY || !found.workspaceId || !found.workspace) {
     throw pillarNotFound();
   }
+  let viewerRole: WorkspaceRole;
   try {
-    await assertWorkspaceMembership(db, userId, found.workspaceId);
+    ({ role: viewerRole } = await assertWorkspaceMembership(db, userId, found.workspaceId));
   } catch {
     throw pillarNotFound();
   }
   const { workspace, ...tag } = found;
-  return { ...tag, workspaceId: found.workspaceId, workspaceSlug: workspace.slug };
+  return { ...tag, workspaceId: found.workspaceId, workspaceSlug: workspace.slug, viewerRole };
 }
 
 /**
@@ -689,6 +692,9 @@ export async function getPillarPage(input: PillarPageInput) {
       description: pillar.description,
       archivedAt: pillar.archivedAt,
       workspaceId,
+      // Whether the viewer may rename it and edit its description in place
+      // (`tag.update` asks for the same write role).
+      canEdit: canEditWorkspaceContent(pillar.viewerRole),
     },
     positions: positions.map(({ position: { holders, ...position } }) => ({
       ...position,
