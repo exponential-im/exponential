@@ -44,6 +44,27 @@ describe('parseChatStreamBuffer', () => {
       ]);
     });
 
+    it('reads the intent off a call frame and keeps it through result and error frames', () => {
+      const buffer =
+        toolFrame({ phase: 'call', id: 't1', name: 'listTicketsTool', args: { assignee: 'Andi' }, intent: "Find Andi's open tickets" }) +
+        toolFrame({ phase: 'result', id: 't1', name: 'listTicketsTool' }) +
+        toolFrame({ phase: 'call', id: 't2', name: 'createAction', args: {}, intent: 'Add the follow-up task' }) +
+        toolFrame({ phase: 'error', id: 't2', name: 'createAction', kind: 'rejected' });
+      const [first, second] = parseChatStreamBuffer(buffer).toolCalls;
+      expect(first).toMatchObject({ id: 't1', intent: "Find Andi's open tickets", status: 'success' });
+      expect(second).toMatchObject({ id: 't2', intent: 'Add the follow-up task', status: 'error' });
+      // While it runs, too.
+      expect(parseChatStreamBuffer(toolFrame({ phase: 'call', id: 't3', name: 'x', intent: 'Look it up' })).toolCalls[0])
+        .toMatchObject({ intent: 'Look it up', status: 'running' });
+    });
+
+    it('leaves intent off a call with none, or with a non-string intent', () => {
+      const buffer =
+        toolFrame({ phase: 'call', id: 't1', name: 'a' }) +
+        toolFrame({ phase: 'call', id: 't2', name: 'b', intent: { text: 'x' } });
+      for (const call of parseChatStreamBuffer(buffer).toolCalls) expect(call).not.toHaveProperty('intent');
+    });
+
     it('folds call → result into success, preserving args from the call frame', () => {
       const buffer =
         toolFrame({ phase: 'call', id: 't1', name: 'createAction', args: { name: 'x' } }) +
