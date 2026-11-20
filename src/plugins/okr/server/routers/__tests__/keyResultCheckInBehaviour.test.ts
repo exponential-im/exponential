@@ -6,8 +6,9 @@
  *   path) both write the check-in row and the KR's new value and auto status
  *   in one transaction, with the same progress thresholds, and never touch
  *   the manual `statusOverride` (ADR-0004).
- * - Only `okr.checkIn` schedules the goal-health recompute after the
- *   response and records a `checked_in` activity event.
+ * - Both schedule the goal-health recompute after the response and record a
+ *   `checked_in` activity event. Before the shared service only `okr.checkIn`
+ *   did; agent check-ins gained both (James, 2026-11-20).
  *
  * Mocked Prisma (CLAUDE.md "Test database safety"); the goal-health
  * recompute and the after-response scheduler are mocked so the test sees
@@ -207,14 +208,20 @@ describe("okr.checkIn side effects", () => {
 });
 
 describe("mastra.checkInOkrKeyResult side effects", () => {
-  it("looks the KR up by owner, and schedules no goal-health recompute and no activity event", async () => {
+  it("looks the KR up by owner, schedules the goal-health recompute and records one checked_in event", async () => {
     await createMockCaller({ userId: OWNER_ID, db }).mastra.checkInOkrKeyResult({
       keyResultId: KR_ID,
       newValue: 70,
     });
     expect(db.keyResult.findFirst).toHaveBeenCalledWith({ where: { id: KR_ID, userId: OWNER_ID } });
-    expect(scheduled.labels).toEqual([]);
-    expect(db.workspaceActivityEvent.create).not.toHaveBeenCalled();
+    expect(scheduled.labels).toEqual(["keyResult.checkIn.goalHealth"]);
+    expect(db.workspaceActivityEvent.create).toHaveBeenCalledTimes(1);
+    expect(db.workspaceActivityEvent.create.mock.calls[0]![0]!.data).toMatchObject({
+      entityType: "key_result",
+      action: "checked_in",
+      entityId: "checkin-1",
+      userId: OWNER_ID,
+    });
   });
 
   it("returns the check-in and the updated KR in the agent's shape", async () => {

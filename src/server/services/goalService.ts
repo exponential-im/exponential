@@ -665,7 +665,7 @@ export async function getGoalTree({ ctx, workspaceId, status }: { ctx: Context, 
  * 2. Linked project progress
  * 3. Child goal health (recursive rollup)
  */
-export async function computeGoalHealth({ ctx, goalId }: { ctx: Context, goalId: number }) {
+export async function computeGoalHealth({ ctx, goalId }: { ctx: Pick<Context, "db">, goalId: number }) {
   const goal = await ctx.db.goal.findUnique({
     where: { id: goalId },
     include: {
