@@ -44,6 +44,10 @@ const OPEN_GOAL_STATUSES = new Set(["planned", "active"]);
  * that can't be parsed, with no `periodEnd`, is treated as ended, so nothing
  * writes to a Key result whose dates nobody can tell.
  *
+ * The cut-off is the same instant on every machine: UTC midnight after the
+ * last calendar day. `periodEnd` is a date stored at UTC midnight, so its
+ * calendar day is read in UTC; a period string names its days directly.
+ *
  * Pillar Metrics feed only open Key results (ADR-0087).
  */
 export function isKeyResultOpen(
@@ -52,8 +56,17 @@ export function isKeyResultOpen(
   now: Date = new Date(),
 ): boolean {
   if (!OPEN_GOAL_STATUSES.has(goal.status)) return false;
-  const lastDay = keyResult.periodEnd ?? periodDateRange(keyResult.period)?.end ?? null;
-  if (!lastDay) return false;
-  const endsAt = new Date(lastDay.getFullYear(), lastDay.getMonth(), lastDay.getDate() + 1);
-  return now < endsAt;
+  let lastDay: [number, number, number];
+  if (keyResult.periodEnd) {
+    const end = keyResult.periodEnd;
+    lastDay = [end.getUTCFullYear(), end.getUTCMonth(), end.getUTCDate()];
+  } else {
+    // periodDateRange builds local dates, so local getters return the
+    // calendar day it names, whatever the timezone.
+    const end = periodDateRange(keyResult.period)?.end;
+    if (!end) return false;
+    lastDay = [end.getFullYear(), end.getMonth(), end.getDate()];
+  }
+  const [year, month, day] = lastDay;
+  return now.getTime() < Date.UTC(year, month, day + 1);
 }
