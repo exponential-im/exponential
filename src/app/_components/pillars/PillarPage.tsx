@@ -400,6 +400,8 @@ function PillarTitle({ data, includeCompleted }: { data: PillarPageData; include
       const moved = { ...data, pillar: { ...pillar, name: updated.name, slug: updated.slug } };
       // Seed the new URL's query so the page does not fall back to its
       // skeleton while it moves there; the old slug no longer resolves.
+      // `||`, not `??`: a name made only of characters the slug rule drops
+      // has an empty slug, and its URL keeps the id (see pillarPath).
       utils.pillar.get.setData(
         { workspaceSlug: pillar.workspaceSlug, pillar: updated.slug || updated.id, includeCompleted },
         moved,
