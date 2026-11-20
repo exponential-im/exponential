@@ -327,6 +327,23 @@ export async function setPillarDri({
 }
 
 /**
+ * A member removed from a workspace stops being the DRI of its Pillars, so
+ * those Pillars are flagged "No DRI" again and nobody outside the workspace is
+ * told about its Metrics (ADR-0087). Deleting the user clears it through the
+ * foreign key; this covers removal from the workspace alone.
+ */
+export async function clearPillarDriForRemovedMember(
+  db: PrismaClient,
+  userId: string,
+  workspaceId: string,
+): Promise<void> {
+  await db.tag.updateMany({
+    where: { workspaceId, driUserId: userId },
+    data: { driUserId: null },
+  });
+}
+
+/**
  * Pillars to pre-tick for a capture's text, best first (ADR-0086, V3): the
  * workspace's active Pillars matched by keyword against their names and
  * descriptions. Suggestions only; nothing is filed.

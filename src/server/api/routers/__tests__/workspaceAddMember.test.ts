@@ -253,6 +253,24 @@ describe("workspace.removeMember (invite landing cleanup)", () => {
     );
   });
 
+  it("clears the removed member as DRI of the workspace's Pillars", async () => {
+    db.user.findUnique.mockResolvedValueOnce({ isAgent: false } as never);
+    db.workspaceUser.findUnique
+      .mockResolvedValueOnce({ role: "owner" } as never)
+      .mockResolvedValueOnce({ role: "member", user: { email: INVITEE_EMAIL } } as never);
+    db.workspaceUser.delete.mockResolvedValue({} as never);
+    db.externalAgent.findMany.mockResolvedValue([] as never);
+    db.tag.updateMany.mockResolvedValue({ count: 1 } as never);
+    db.workspaceInvitation.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await caller(db).workspace.removeMember({ workspaceId: WORKSPACE_ID, userId: INVITEE_ID });
+
+    expect(db.tag.updateMany).toHaveBeenCalledWith({
+      where: { workspaceId: WORKSPACE_ID, driUserId: INVITEE_ID },
+      data: { driUserId: null },
+    });
+  });
+
   it("still removes the member when expiring the invitation fails", async () => {
     db.user.findUnique.mockResolvedValueOnce({ isAgent: false } as never);
     db.workspaceUser.findUnique

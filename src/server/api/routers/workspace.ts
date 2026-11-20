@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { clearPillarDriForRemovedMember } from "~/server/services/pillars/PillarService";
 import { createTRPCRouter, protectedProcedure, publicProcedure, humanOnlyProcedure } from "~/server/api/trpc";
 import { TRPCError } from "@trpc/server";
 import {
@@ -936,6 +937,9 @@ export const workspaceRouter = createTRPCRouter({
       // Delegation invariant (ADR-0049): the removed member's external agents
       // lose their memberships here too — agent access never outlives its owner's.
       await cascadeOwnerRemovedFromWorkspace(ctx.db, input.userId, input.workspaceId);
+
+      // A Pillar's DRI must be a member of its workspace (ADR-0087).
+      await clearPillarDriForRemovedMember(ctx.db, input.userId, input.workspaceId);
 
       // An agent removed here — someone's Assistant or External agent, which
       // an owner or admin may take out of their workspace — also loses the
