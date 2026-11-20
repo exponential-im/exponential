@@ -14,7 +14,7 @@ import {
   setPillarArchived as setPillarArchivedService,
   setPillarPositions as setPillarPositionsService,
 } from "~/server/services/pillars/PillarService";
-import { PILLAR_CATEGORY } from "~/types/tag";
+import { PILLAR_CATEGORY, TAG_DESCRIPTION_MAX } from "~/types/tag";
 
 const tagEntityTypeSchema = z.enum([
   "action",
@@ -42,8 +42,6 @@ function assertNotPillarCategory(category: string | null | undefined): void {
 
 const tagColorSchema = z.enum(TAG_COLORS);
 
-/** Room for a Pillar's "what good looks like" (Markdown); a label's stays short in practice. */
-const TAG_DESCRIPTION_MAX = 2000;
 
 export const tagRouter = createTRPCRouter({
   // List all tags available for a workspace (global + workspace-specific)

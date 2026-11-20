@@ -16,6 +16,9 @@ vi.mock("~/server/services/access", () => ({
   buildTicketAccessWhere: vi.fn(() => ({ ticketAccess: true })),
   buildWorkspaceProjectAccessWhere: vi.fn(() => Promise.resolve({ projectAccess: true })),
   buildSharedResourceWhere: vi.fn(() => Promise.resolve({ sharedResource: true })),
+  // The real rule: members and up may edit workspace content.
+  canEditWorkspaceContent: (role: string | null) =>
+    role === "member" || role === "admin" || role === "owner",
 }));
 
 import { assertWorkspaceMembership, assertWorkspaceRole } from "~/server/services/access";
@@ -267,6 +270,7 @@ describe("setPillarArchived", () => {
 
 describe("getPillarPage", () => {
   beforeEach(() => {
+    membershipMock.mockResolvedValue({ role: "member", workspaceId: WS });
     db.tag.findUnique.mockResolvedValue(tagRow() as never);
     db.project.findMany.mockResolvedValue([] as never);
     db.action.findMany.mockResolvedValue([] as never);
@@ -389,6 +393,15 @@ describe("getPillarPage", () => {
 
     expect(page.looseWork.actions.map((a) => a.id)).toEqual(["a-free-1", "a-free-2", "a-assigned"]);
     expect(page.looseWork.tickets.map((t) => t.id)).toEqual(["t-free", "t-assigned"]);
+  });
+
+  it("lets a member edit the Pillar in place, and not a viewer", async () => {
+    const asMember = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(asMember.pillar.canEdit).toBe(true);
+
+    membershipMock.mockResolvedValue({ role: "viewer", workspaceId: WS });
+    const asViewer = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+    expect(asViewer.pillar.canEdit).toBe(false);
   });
 
   it("still returns the page of an inactive Pillar", async () => {

@@ -36,6 +36,9 @@ export type TagColor = (typeof TAG_COLORS)[number];
 export const PILLAR_CATEGORY = 'pillar';
 
 /** True when the tag is a Pillar (active or not). */
+/** Room for a Pillar's "what good looks like" (Markdown); a label's stays short in practice. */
+export const TAG_DESCRIPTION_MAX = 2000;
+
 export function isPillarTag(tag: { category: string | null }): boolean {
   return tag.category === PILLAR_CATEGORY;
 }
