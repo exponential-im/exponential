@@ -15,6 +15,8 @@ import { maskTokenLike } from '~/server/utils/redactToolArgs';
 
 export const STEP_INTENT_FIELD = 'intent';
 export const STEP_INTENT_MAX_CHARS = 80;
+/** Mastra's schema caps `intent` at 120; the persisted copy is held to the same. */
+export const PERSISTED_STEP_INTENT_MAX_CHARS = 120;
 
 // A scheme ("https://", "mailto:"), a "www." host, or a bare domain with a path.
 const URL_LIKE = /[a-z][a-z0-9+.-]*:\/\/|\bmailto:|\bwww\.|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\//i;
@@ -37,8 +39,14 @@ export function cleanStepIntent(raw: unknown): string | undefined {
   if (URL_LIKE.test(text)) return undefined;
   if (maskTokenLike(text) !== text) return undefined;
   if (sanitizeAIOutput(text).redacted) return undefined;
-  if (text.length <= STEP_INTENT_MAX_CHARS) return text;
-  return `${text.slice(0, STEP_INTENT_MAX_CHARS - 1).trimEnd()}…`;
+  return cutToChars(text, STEP_INTENT_MAX_CHARS);
+}
+
+// Cut on code points, not UTF-16 units, so an emoji at the cut is never split.
+function cutToChars(text: string, max: number): string {
+  const chars = Array.from(text);
+  if (chars.length <= max) return text;
+  return `${chars.slice(0, max - 1).join('').trimEnd()}…`;
 }
 
 /**
@@ -56,15 +64,28 @@ export function splitStepIntent(args: unknown): { intent?: string; args: unknown
 }
 
 /**
+ * The intent as persisted for traces and judges. Unlike the display copy it is
+ * never dropped, so a fill-rate count sees every intent the model wrote, but
+ * it is scrubbed (token-like runs and secret shapes redacted) and cut to 120
+ * characters so it cannot crowd the real args out of the 500-character cut.
+ */
+function persistableIntent(raw: string): string {
+  const text = raw.replace(/\s+/g, ' ').trim();
+  return cutToChars(sanitizeAIOutput(maskTokenLike(text)).text, PERSISTED_STEP_INTENT_MAX_CHARS);
+}
+
+/**
  * The args with `intent` moved to the front, for the persisted copy. That copy
  * is cut at 500 characters per call, and the model writes `intent` last (it is
  * the last field in the schema), so on a large call the cut would hide it from
- * traces and judges.
+ * traces and judges. The intent is scrubbed and capped (`persistableIntent`).
+ * A non-string intent is left where it is.
  */
 export function intentFirst(args: unknown): unknown {
   if (!args || typeof args !== 'object' || Array.isArray(args) || !(STEP_INTENT_FIELD in args)) {
     return args;
   }
   const { [STEP_INTENT_FIELD]: intent, ...rest } = args as Record<string, unknown>;
-  return { [STEP_INTENT_FIELD]: intent, ...rest };
+  if (typeof intent !== 'string') return args;
+  return { [STEP_INTENT_FIELD]: persistableIntent(intent), ...rest };
 }

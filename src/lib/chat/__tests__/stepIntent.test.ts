@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { cleanStepIntent, intentFirst, splitStepIntent, STEP_INTENT_MAX_CHARS } from '../stepIntent';
+import { cleanStepIntent, intentFirst, splitStepIntent, PERSISTED_STEP_INTENT_MAX_CHARS, STEP_INTENT_MAX_CHARS } from '../stepIntent';
 import { redactToolArgs } from '~/server/utils/redactToolArgs';
 
 describe('cleanStepIntent', () => {
@@ -17,6 +17,15 @@ describe('cleanStepIntent', () => {
     expect(out.length).toBe(STEP_INTENT_MAX_CHARS);
     expect(out.endsWith('…')).toBe(true);
     expect(long.startsWith(out.slice(0, -1))).toBe(true);
+  });
+
+  it('never splits an emoji at the cut', () => {
+    const head = 'Celebrate the launch with the whole team on Friday at the office party, yes!!!';
+    expect(head.length).toBe(78);
+    const raw = `${head}🎉🎉 and more words after the cut`;
+    const out = cleanStepIntent(raw)!;
+    expect(out).toBe(`${head}🎉…`);
+    expect(out).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
   });
 
   it('leaves an 80-character phrase whole', () => {
@@ -104,8 +113,25 @@ describe('intentFirst', () => {
     expect(redactToolArgs(args)).not.toContain('Write the project brief');
   });
 
-  it('leaves args with no intent as they are', () => {
+  it('leaves args with no intent, or a non-string intent, as they are', () => {
     const args = { a: 1 };
     expect(intentFirst(args)).toBe(args);
+    const odd = { a: 1, intent: { x: 1 } };
+    expect(intentFirst(odd)).toBe(odd);
+  });
+
+  it('keeps an intent the display drops, but with secret shapes redacted', () => {
+    const out = intentFirst({ q: 'x', intent: 'Use sk_abcdefghijklmnopqrstuvwx now' }) as Record<string, string>;
+    expect(out.intent).toContain('[REDACTED_API_KEY]');
+    expect(out.intent).not.toContain('sk_abcdefghijklmnopqrstuvwx');
+    expect(cleanStepIntent('Use sk_abcdefghijklmnopqrstuvwx now')).toBeUndefined();
+  });
+
+  it('caps the persisted intent at 120 characters, so the real args survive the cut', () => {
+    const intent = 'Find the tickets for this week '.repeat(30);
+    const out = intentFirst({ assignee: 'Andi', intent }) as Record<string, string>;
+    expect(Array.from(out.intent!).length).toBeLessThanOrEqual(PERSISTED_STEP_INTENT_MAX_CHARS);
+    expect(out.intent!.endsWith('…')).toBe(true);
+    expect(redactToolArgs(out)).toContain('"assignee":"Andi"');
   });
 });
