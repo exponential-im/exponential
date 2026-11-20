@@ -1808,6 +1808,7 @@ export const workspaceRouter = createTRPCRouter({
         name: true,
         email: true,
         image: true,
+        isAgent: true,
       } as const;
 
       const [direct, viaTeam] = await Promise.all([
@@ -1833,6 +1834,8 @@ export const workspaceRouter = createTRPCRouter({
         name: string | null;
         email: string | null;
         image: string | null;
+        /** An agent's shadow user (ADR-0049), not a person. */
+        isAgent: boolean;
         /**
          * The member's WORKSPACE role. Team-based members get "member", the
          * same synthesized role `workspace.list` gives them — a team `owner`
