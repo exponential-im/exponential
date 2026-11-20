@@ -22,6 +22,7 @@ import { emitNotification } from "~/server/services/notifications/emit/emitNotif
 import { NOTIFICATION_CATEGORIES } from "~/server/services/notifications/emit/constants";
 import { isMastraServerRequest } from "~/server/utils/mastraServerAuth";
 import { runAfterResponse } from "~/server/utils/runAfterResponse";
+import { recordKeyResultCheckIn } from "~/server/services/okr/recordKeyResultCheckIn";
 import { TRPCError } from "@trpc/server";
 // import { mastraClient } from "~/lib/mastra";
 import { PRIORITY_VALUES } from "~/types/priority";
@@ -3765,42 +3766,14 @@ export const mastraRouter = createTRPCRouter({
       }
       await assertCanEditKeyResult(ctx.db, userId, keyResult);
 
-      // Auto-calculate status based on progress
-      const range = keyResult.targetValue - keyResult.startValue;
-      const progress =
-        range > 0
-          ? ((input.newValue - keyResult.startValue) / range) * 100
-          : 0;
-
-      let newStatus = keyResult.status;
-      if (progress >= 100) {
-        newStatus = "achieved";
-      } else if (progress >= 70) {
-        newStatus = "on-track";
-      } else if (progress >= 40) {
-        newStatus = "at-risk";
-      } else {
-        newStatus = "off-track";
-      }
-
-      const [checkIn, updatedKR] = await ctx.db.$transaction([
-        ctx.db.keyResultCheckIn.create({
-          data: {
-            keyResultId: input.keyResultId,
-            previousValue: keyResult.currentValue,
-            newValue: input.newValue,
-            notes: input.notes,
-            createdById: userId,
-          },
-        }),
-        ctx.db.keyResult.update({
-          where: { id: input.keyResultId },
-          data: {
-            currentValue: input.newValue,
-            status: newStatus,
-          },
-        }),
-      ]);
+      // The same write path as the UI (ADR-0050): status, transaction, goal
+      // health after the response, and the activity event.
+      const { checkIn, keyResult: updatedKR } = await recordKeyResultCheckIn(ctx.db, {
+        keyResult,
+        newValue: input.newValue,
+        notes: input.notes,
+        actorUserId: userId,
+      });
 
       return {
         checkIn: {
