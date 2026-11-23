@@ -154,6 +154,7 @@ export default function FormEditorPage() {
     null,
   );
   const [insightBodyField, setInsightBodyField] = useState<string | null>(null);
+  const [insightExposeStatus, setInsightExposeStatus] = useState(false);
   const [dirty, setDirty] = useState(false);
   // Mirror `dirty` in a ref so the hydration effect can read it without
   // re-subscribing to it. We only re-hydrate from the server when there are
@@ -284,6 +285,7 @@ export default function FormEditorPage() {
         typeof imap.title === 'string' ? imap.title : null,
       );
       setInsightBodyField(typeof imap.body === 'string' ? imap.body : null);
+      setInsightExposeStatus(insight.config.exposeStatus === true);
     } else {
       setInsightEnabled(false);
     }
@@ -484,6 +486,7 @@ export default function FormEditorPage() {
             title: insightTitleField,
             ...(insightBodyField ? { body: insightBodyField } : {}),
           },
+          ...(insightExposeStatus ? { exposeStatus: true } : {}),
         },
       });
     }
@@ -993,6 +996,15 @@ export default function FormEditorPage() {
                 w={220}
               />
             </Group>
+            <Switch
+              label="Let the submitter follow the insight's status"
+              description="The submission response carries a signed reference that reads this insight's triage state (status, published, linked feature status) and nothing else. For in-app feedback boards."
+              checked={insightExposeStatus}
+              onChange={(e) => {
+                setInsightExposeStatus(e.currentTarget.checked);
+                touch();
+              }}
+            />
           </Stack>
         )}
       </Card>
