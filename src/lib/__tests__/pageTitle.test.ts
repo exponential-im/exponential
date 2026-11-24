@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { PRODUCT_NAME } from "~/lib/brand";
 import { sectionTitleForPath } from "../pageTitle";
 
 describe("sectionTitleForPath", () => {
@@ -22,9 +23,9 @@ describe("sectionTitleForPath", () => {
     expect(sectionTitleForPath("/welcome/menu")).toBeNull();
   });
 
-  test("names no unknown route", () => {
-    expect(sectionTitleForPath("/not-a-route")).toBeNull();
-    expect(sectionTitleForPath("/w/clear/not-a-route")).toBeNull();
+  test("names an unknown route after the product, so no stale name lingers", () => {
+    expect(sectionTitleForPath("/not-a-route")).toBe(PRODUCT_NAME);
+    expect(sectionTitleForPath("/w/clear/not-a-route")).toBe(PRODUCT_NAME);
   });
 
   test("doesn't match a key against a longer segment", () => {

@@ -1,3 +1,5 @@
+import { PRODUCT_NAME } from "~/lib/brand";
+
 /**
  * Browser-tab names for the signed-in app's sections, so a tab reads
  * "Projects" or "Pages" rather than the product name on every page. Detail
@@ -140,7 +142,9 @@ function startsWithSegments(segments: string[], key: string): boolean {
 
 /**
  * The section name for a pathname, or null when the route's page names the
- * tab itself through Next metadata (or the path isn't one this app renders).
+ * tab itself through Next metadata. A path this map doesn't know (a 404, or a
+ * route added without a key here) reads as the product name, so the previous
+ * page's name never lingers on the tab.
  */
 export function sectionTitleForPath(pathname: string): string | null {
   let segments = pathname.split("/").filter(Boolean);
@@ -156,6 +160,6 @@ export function sectionTitleForPath(pathname: string): string | null {
     if (best === null || depth(key) > depth(best)) best = key;
   }
   // "" (the workspace root) only matches the root itself, not unknown routes.
-  if (best === "" && segments.length > 0) return null;
-  return best === null ? null : SECTION_TITLES[best] ?? null;
+  if (best === null || (best === "" && segments.length > 0)) return PRODUCT_NAME;
+  return SECTION_TITLES[best] ?? PRODUCT_NAME;
 }
