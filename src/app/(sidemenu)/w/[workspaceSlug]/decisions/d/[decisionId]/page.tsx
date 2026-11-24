@@ -51,6 +51,7 @@ export default function DecisionPage() {
         workspaceId={workspace.id}
         workspaceSlug={workspace.slug}
         decisionId={decisionId}
+        namesTab
       />
     </Container>
   );

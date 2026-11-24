@@ -9,6 +9,7 @@ import { IconCalendarEvent } from '@tabler/icons-react';
 import { format, formatDistanceToNow } from 'date-fns';
 import type { JSONContent } from '@tiptap/core';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { PageDocument } from '~/app/_components/pages/PageDocument';
 import { PageShareMenu } from '~/app/_components/pages/PageShareMenu';
 import { PageActionsMenu } from '~/app/_components/pages/PageActionsMenu';
@@ -140,6 +141,7 @@ function PageEditorContent({
   workspaceSlug: string;
 }) {
   const { data: page, isLoading, error } = api.page.get.useQuery({ id: pageId });
+  useDocumentTitle(page?.title);
   const [fullWidth, setFullWidth] = useLocalStorage({
     key: FULL_WIDTH_STORAGE_KEY,
     defaultValue: false,

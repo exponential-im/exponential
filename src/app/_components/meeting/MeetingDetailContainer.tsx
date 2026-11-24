@@ -2,6 +2,7 @@
 
 import { useAiCapabilities } from "~/providers/AiCapabilitiesProvider";
 import { api, type RouterOutputs } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { Skeleton, Paper, Text } from "@mantine/core";
 import { useEffect, useMemo, useRef } from "react";
 import { useMutation } from "@tanstack/react-query";
@@ -15,9 +16,17 @@ import { MeetingDetail } from "~/app/_components/meeting/MeetingDetail";
  * A meeting's full detail with every handler wired up: the `/recording/[id]`
  * page, and the inbox's peek drawer.
  */
-export function MeetingDetailContainer({ id }: { id: string }) {
+export function MeetingDetailContainer({
+  id,
+  namesTab = false,
+}: {
+  id: string;
+  /** Name the browser tab after the meeting — the full page only, not the inbox peek. */
+  namesTab?: boolean;
+}) {
 
   const { data: session, isLoading } = api.transcription.getDetail.useQuery({ id });
+  useDocumentTitle(namesTab ? session?.title : null);
   const { data: transcriptActions = [], isLoading: isActionsLoading } =
     api.action.getByTranscription.useQuery(
       { transcriptionId: id },

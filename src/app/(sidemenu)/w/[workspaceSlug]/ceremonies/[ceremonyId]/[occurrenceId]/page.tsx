@@ -9,6 +9,7 @@ import { notifications } from "@mantine/notifications";
 import { modals } from "@mantine/modals";
 import { useSession } from "next-auth/react";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { AgendaView } from "~/app/_components/ceremonies/AgendaView";
 import { AgendaSentStatus } from "~/app/_components/ceremonies/AgendaSentStatus";
@@ -51,6 +52,7 @@ export default function OccurrencePage() {
     { workspaceId: workspaceId ?? "", occurrenceId: params.occurrenceId },
     { enabled: !!workspaceId },
   );
+  useDocumentTitle(occurrence?.ceremony.name);
   const generate = api.ceremony.generateAgenda.useMutation({
     onSuccess: async (res) => {
       notifications.show({

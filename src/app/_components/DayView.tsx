@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { IconArrowLeft, IconArrowRight } from '@tabler/icons-react';
 import { type Day } from "@prisma/client";
 import { StartupRoutineForm } from './StartupRoutineForm';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 
 interface DayViewProps {
   day: Day & {
@@ -15,6 +16,7 @@ interface DayViewProps {
 
 export function DayView({ day }: DayViewProps) {
   const router = useRouter();
+  useDocumentTitle(day.date.toLocaleDateString());
 
   return (
     <Container size="md" className="py-8">

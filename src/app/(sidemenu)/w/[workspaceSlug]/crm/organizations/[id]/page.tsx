@@ -42,6 +42,7 @@ import {
 } from '@tabler/icons-react';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import Link from 'next/link';
 import { notifications } from '@mantine/notifications';
 import { Panel } from "~/app/_components/ui";
@@ -360,6 +361,7 @@ export default function OrganizationDetailPage() {
     { id: organizationId, includeContacts: true },
     { enabled: !!organizationId }
   );
+  useDocumentTitle(organization?.name);
 
   // Get all organizations for prev/next navigation
   const { data: allOrgs } = api.crmOrganization.getAll.useQuery(

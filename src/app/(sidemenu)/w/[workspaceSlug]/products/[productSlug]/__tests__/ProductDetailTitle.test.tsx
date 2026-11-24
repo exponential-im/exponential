@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, test } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 import { useDocumentTitle } from "~/hooks/useDocumentTitle";
-import { PRODUCT_NAME } from "~/lib/brand";
 import { buildProductPageTitle } from "../productPageTitle";
 import {
   ProductDetailTitleProvider,
@@ -46,7 +45,7 @@ describe("product tab titles", () => {
         <Detail label="Fix the login loop" />
       </Layout>,
     );
-    expect(document.title).toBe(`Fix the login loop · CLEAR | ${PRODUCT_NAME}`);
+    expect(document.title).toBe(`Fix the login loop · CLEAR`);
   });
 
   test("shows the section until the entity loads, then its name", () => {
@@ -56,14 +55,14 @@ describe("product tab titles", () => {
         <Detail label={undefined} />
       </Layout>,
     );
-    expect(document.title).toBe(`Backlog · CLEAR | ${PRODUCT_NAME}`);
+    expect(document.title).toBe(`Backlog · CLEAR`);
 
     rerender(
       <Layout pathname={ticketPath}>
         <Detail label="Fix the login loop" />
       </Layout>,
     );
-    expect(document.title).toBe(`Fix the login loop · CLEAR | ${PRODUCT_NAME}`);
+    expect(document.title).toBe(`Fix the login loop · CLEAR`);
   });
 
   test("going back to the listing drops the entity's name", () => {
@@ -74,7 +73,7 @@ describe("product tab titles", () => {
       </Layout>,
     );
     rerender(<Layout pathname="/w/clear/products/clear/tickets" />);
-    expect(document.title).toBe(`Backlog · CLEAR | ${PRODUCT_NAME}`);
+    expect(document.title).toBe(`Backlog · CLEAR`);
   });
 
   test("leaving the product section restores the previous title", () => {

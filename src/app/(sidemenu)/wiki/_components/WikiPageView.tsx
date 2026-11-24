@@ -15,6 +15,7 @@ import type { WikiCommit } from "~/lib/localWiki";
 import { reportHandledError } from "~/lib/reportHandledError";
 import { pageTitle, remarkWikiLinks, WIKI_ROUTE } from "~/lib/wiki/wikiLinks";
 import { useRefreshOnWikiChange, useWikiBridge } from "~/lib/wiki/useWikiBridge";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { WikiCommitList } from "./WikiCommitList";
 import { WikiPageActions } from "./WikiPageActions";
 import styles from "./wiki.module.css";
@@ -57,6 +58,7 @@ export function WikiPageView({ path }: { path: string }) {
   /** What was last read from (or written to) disk — the base for a stale check. */
   const baseline = useRef<string | null>(null);
   const editing = draft !== null;
+  useDocumentTitle(pageTitle(path, content ?? undefined));
 
   const load = useCallback(async () => {
     if (!bridge) return;

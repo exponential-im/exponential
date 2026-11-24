@@ -21,6 +21,7 @@ import { IconArrowLeft, IconCalendarPlus, IconPencil } from "@tabler/icons-react
 import { notifications } from "@mantine/notifications";
 import type { CeremonyOccurrenceStatus } from "@prisma/client";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { describeCadence } from "~/lib/ceremonies/cadence";
@@ -82,6 +83,7 @@ export default function CeremonyPage() {
     { workspaceId: workspaceId ?? "", id: params.ceremonyId },
     { enabled: !!workspaceId },
   );
+  useDocumentTitle(ceremony?.name);
 
   // The full definition opens in the editor drawer (Edit, top right).
   const [editorOpened, setEditorOpened] = useState(false);

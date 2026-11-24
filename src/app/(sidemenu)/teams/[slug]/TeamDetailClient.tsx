@@ -37,6 +37,7 @@ import {
 import { useDisclosure } from '@mantine/hooks';
 import { notifications } from '@mantine/notifications';
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import Link from 'next/link';
 import { PersonLink } from '~/app/_components/people/PersonLink';
 import { useSearchParams, useRouter, usePathname } from 'next/navigation';
@@ -66,6 +67,7 @@ export default function TeamDetailClient({ team: initialTeam, currentUserId }: T
     { slug: initialTeam.slug },
     { initialData: initialTeam }
   );
+  useDocumentTitle(team.name);
 
   // Get current user's role in this team
   const currentMember = team.members.find((m: any) => m.userId === currentUserId);

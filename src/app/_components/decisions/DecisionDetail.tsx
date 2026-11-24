@@ -30,6 +30,7 @@ import {
   parseEvidence,
 } from "~/lib/decision-evidence";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { agentDecisionAuthor } from "~/lib/decision-log";
 
 /**
@@ -57,6 +58,7 @@ export function DecisionDetail({
   decisionId,
   preview,
   onReviewed,
+  namesTab = false,
 }: {
   workspaceId: string;
   workspaceSlug: string;
@@ -68,6 +70,8 @@ export function DecisionDetail({
    * the next draft; without it, a reject returns to the Decision Log.
    */
   onReviewed?: () => void;
+  /** Name the browser tab after the decision — the full page only, not a peek. */
+  namesTab?: boolean;
 }) {
   const {
     data: decision,
@@ -77,6 +81,7 @@ export function DecisionDetail({
     { workspaceId, decisionId },
     { enabled: !!workspaceId && !!decisionId },
   );
+  useDocumentTitle(namesTab ? decision?.statement : null);
   // Where this decision has been posted (ADR-0075). Read only once the decision itself
   // has loaded, since the read is gated on viewing it.
   const { data: outboundPosts } = api.decision.outboundPosts.useQuery(

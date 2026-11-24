@@ -46,7 +46,7 @@ export default function DecisionDetailPage() {
           All decisions
         </Group>
       </Anchor>
-      <AdrDetail workspaceId={workspace.id} workspaceSlug={workspace.slug} adrId={adrId} />
+      <AdrDetail workspaceId={workspace.id} workspaceSlug={workspace.slug} adrId={adrId} namesTab />
     </Container>
   );
 }

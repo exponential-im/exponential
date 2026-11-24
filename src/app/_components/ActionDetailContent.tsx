@@ -54,6 +54,7 @@ import { useImagePaste } from "~/hooks/useImagePaste";
 import { InlineImageRenderer } from "./shared/InlineImageRenderer";
 import { HTMLContent } from "./HTMLContent";
 import { toPlainText } from "~/lib/content/plainText";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 
 const KANBAN_STATUS_OPTIONS = [
   { value: "BACKLOG", label: "Backlog" },
@@ -98,6 +99,8 @@ export function ActionDetailContent({
     isLoading,
     error,
   } = api.action.getById.useQuery({ id: actionId });
+  // The inbox peek renders this too; only the full page names the tab.
+  useDocumentTitle(isPeek ? null : toPlainText(action?.name));
 
   // Fetch projects for the dropdown
   const { data: projects } = api.project.getAll.useQuery(

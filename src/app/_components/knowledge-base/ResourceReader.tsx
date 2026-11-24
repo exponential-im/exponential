@@ -1,5 +1,6 @@
 'use client';
 
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { EntityPillars } from '~/app/_components/pillars/EntityPillars';
 import { useEffect, useRef } from 'react';
 import Link from 'next/link';
@@ -96,15 +97,7 @@ export function ResourceReader({ resourceId, workspaceSlug }: ResourceReaderProp
     }
   }, [resource, mutateReadStatus]);
 
-  const title = resource?.title;
-  useEffect(() => {
-    if (!title) return;
-    const previous = document.title;
-    document.title = `${title} · Knowledge`;
-    return () => {
-      document.title = previous;
-    };
-  }, [title]);
+  useDocumentTitle(resource?.title);
 
   const backLink = (
     <Link href={backHref} className={styles.back}>

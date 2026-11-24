@@ -3,6 +3,7 @@
 import React from "react";
 import { useParams } from "next/navigation";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { 
   Container, 
   Title, 
@@ -37,6 +38,7 @@ export default function TeamMemberWeeklyReviewPage() {
   // Get user information
   const { data: targetUser, isLoading: userLoading, error: userError } = 
     api.user.getById.useQuery({ id: userId }, { enabled: !!userId });
+  useDocumentTitle(targetUser?.name ?? targetUser?.email);
 
   // Get current user to check if they can edit
   const { data: currentUser, isLoading: currentUserLoading, error: currentUserError } = 

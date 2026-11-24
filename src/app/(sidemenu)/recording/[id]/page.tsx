@@ -5,5 +5,5 @@ import { MeetingDetailContainer } from "~/app/_components/meeting/MeetingDetailC
 
 export default function SessionPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  return <MeetingDetailContainer id={id} />;
+  return <MeetingDetailContainer id={id} namesTab />;
 }

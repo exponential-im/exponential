@@ -20,6 +20,7 @@ import { IconUsers, IconPlus, IconTrash, IconBolt } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { ContactMultiSelect } from '~/app/_components/crm/CrmEntitySelect';
 
 function runStatusColor(status: string): string {
@@ -57,6 +58,13 @@ export default function CrmListDetailPage() {
     { workspaceId: workspaceId ?? '', collectionId, limit: 10 },
     { enabled: !!workspaceId },
   );
+
+  // members/runs don't carry the list's name; the lists index has it (usually cached).
+  const listsQuery = api.collection.list.useQuery(
+    { workspaceId: workspaceId ?? '' },
+    { enabled: !!workspaceId },
+  );
+  useDocumentTitle(listsQuery.data?.find((l) => l.id === collectionId)?.name);
 
   const invalidate = () =>
     utils.collection.members.invalidate({
