@@ -38,6 +38,7 @@ import {
   IconChartBar,
 } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { notifications } from "@mantine/notifications";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
@@ -138,6 +139,7 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
     void utils.project.getProjectsWithActions.invalidate();
   };
   const { data: goal, isLoading } = api.goal.getById.useQuery({ id: goalId });
+  useDocumentTitle(goal?.title);
 
   // Features belong to Products, so the Features tab exists only where the
   // `product` plugin does. Same query, key and gating as the nav's Products

@@ -37,6 +37,7 @@ import {
 import { FormQrModal } from './_components/FormQrModal';
 import { notifications } from '@mantine/notifications';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { slugify } from '~/utils/slugify';
 import { CRM_CUSTOMER_TYPE_OPTIONS } from '~/lib/crm/automationCatalog';
 import { DEFAULT_APPLICANT_ACCOUNT_PROMPT } from '~/lib/forms/applicantAccountPrompt';
@@ -115,6 +116,7 @@ export default function FormEditorPage() {
     { id },
     { enabled: !!id, refetchOnWindowFocus: false },
   );
+  useDocumentTitle(query.data?.name);
 
   const [name, setName] = useState('');
   const [slug, setSlug] = useState('');

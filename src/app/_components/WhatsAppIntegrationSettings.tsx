@@ -35,6 +35,7 @@ import {
   IconChartBar,
 } from '@tabler/icons-react';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { useRouter } from 'next/navigation';
 import { WhatsAppPhoneMapping } from './WhatsAppPhoneMapping';
 import { WhatsAppMonitoringDashboard } from './WhatsAppMonitoringDashboard';
@@ -58,6 +59,7 @@ export function WhatsAppIntegrationSettings({ integrationId }: WhatsAppIntegrati
       refetchInterval: 30000, // Refresh every 30 seconds
     }
   );
+  useDocumentTitle(config?.integration.name);
 
   // Test connection mutation
   const testConnection = api.whatsapp.testConnection.useQuery(

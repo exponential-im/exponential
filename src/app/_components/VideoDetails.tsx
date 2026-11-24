@@ -6,6 +6,7 @@ import {
 } from "@mantine/core";
 import { useState } from "react";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 // import type { TranscriptionSetups } from "~/types/transcription";
 import type { Video } from "~/types/video";
 import type { Caption } from "~/utils/vttParser";
@@ -27,6 +28,7 @@ export function VideoDetails({
   videoUrl,
   video,
 }: VideoDetailsProps) {
+  useDocumentTitle(video.title);
   const [creatingDescription, setCreatingDescription] = useState(false);
   const [creatingSummary, setCreatingSummary] = useState(false);
   const [summary, setSummary] = useState<string | null>(video.summary ?? null);

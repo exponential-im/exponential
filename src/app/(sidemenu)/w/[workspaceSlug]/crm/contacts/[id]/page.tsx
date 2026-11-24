@@ -51,6 +51,7 @@ import {
 } from '@tabler/icons-react';
 import { useWorkspace } from '~/providers/WorkspaceProvider';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import Link from 'next/link';
 import { notifications } from '@mantine/notifications';
 import { EditContactDrawer } from '~/app/_components/crm/EditContactDrawer';
@@ -375,6 +376,9 @@ export default function ContactDetailPage() {
   const { data: contact, isLoading } = api.crmContact.getById.useQuery(
     { id: contactId, includeInteractions: true },
     { enabled: !!contactId }
+  );
+  useDocumentTitle(
+    contact ? [contact.firstName, contact.lastName].filter(Boolean).join(' ') : null,
   );
 
   // Get the unified activity timeline (interactions + meetings); it also returns

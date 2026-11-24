@@ -29,6 +29,7 @@ import {
   IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { Panel, Pill, SectionHeader, EmptyState, type PillTone } from "~/app/_components/ui";
 import { InlineEditableTitle } from "~/app/_components/shared/InlineEditableTitle";
@@ -85,6 +86,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
     { workspaceSlug, pillar: pillarSlug, includeCompleted },
     { placeholderData: (previous) => previous },
   );
+  useDocumentTitle(data?.pillar.name);
 
   // Opened by id (an old link): show the slug URL instead. In the same
   // workspace, replacing the history entry keeps this query, so nothing

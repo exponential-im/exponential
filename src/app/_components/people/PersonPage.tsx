@@ -11,6 +11,7 @@ import { useEffect } from 'react';
 import { WeeklyWorkDigestPanel } from '~/app/_components/home/activity/WeeklyWorkDigestPanel';
 import { personHref } from '~/lib/personHref';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import { PersonFeed } from './PersonFeed';
 import { PersonHeader } from './PersonHeader';
 import { PersonWeekSummaryPanel } from './PersonWeekSummaryPanel';
@@ -40,6 +41,7 @@ export function PersonPage({ personRef }: PersonPageProps) {
   const utils = api.useUtils();
 
   const person = api.person.get.useQuery({ userId: personRef }, { retry: false });
+  useDocumentTitle(person.data?.user.name);
 
   // Canonical URL. Only `person.get` is keyed by the route segment (the feed
   // and the summary below are keyed by the subject's id), so handing it the

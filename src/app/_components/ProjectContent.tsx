@@ -25,6 +25,7 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import {
   IconLayoutKanban,
   IconSettings,
@@ -148,6 +149,7 @@ export function ProjectContent({
   const { data: project, isLoading, error: projectError } = api.project.getById.useQuery({
     id: projectId,
   });
+  useDocumentTitle(project?.name);
 
   // Register project context for agent chat — merges with workspace context.
   // Wait for the project to load so we register the resolved project id (not

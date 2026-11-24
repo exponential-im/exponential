@@ -44,6 +44,7 @@ import {
 } from '@tabler/icons-react';
 import { notifications } from '@mantine/notifications';
 import { api } from '~/trpc/react';
+import { useDocumentTitle } from '~/hooks/useDocumentTitle';
 import {
   CRM_AUTOMATION_STEP_CATALOG,
   CRM_AUTOMATION_TRIGGER_LABEL,
@@ -187,6 +188,7 @@ export default function CrmAutomationBuilderPage() {
   const colorScheme = useComputedColorScheme('dark');
 
   const query = api.crmAutomation.get.useQuery({ id }, { enabled: !!id });
+  useDocumentTitle(query.data?.name);
 
   const [name, setName] = useState('');
   const [targetType, setTargetType] = useState<string | null>(null);

@@ -17,6 +17,7 @@ import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { ImplementedByPicker } from "~/app/_components/decisions/ImplementedByPicker";
 import { DetailPreview, adrStatusBadge, type PeekPreview } from "./DetailPreview";
 import { api } from "~/trpc/react";
+import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 
 /**
  * An ADR's content. Deliberately read-only: git is the source of truth and
@@ -31,12 +32,15 @@ export function AdrDetail({
   workspaceSlug,
   adrId,
   preview,
+  namesTab = false,
 }: {
   workspaceId: string;
   workspaceSlug: string;
   adrId: string;
   /** The Decision Log row's header, painted while the detail loads. */
   preview?: PeekPreview;
+  /** Name the browser tab after the ADR — the full page only, not the peek. */
+  namesTab?: boolean;
 }) {
   const {
     data: adr,
@@ -46,6 +50,7 @@ export function AdrDetail({
     { workspaceId, adrId },
     { enabled: !!workspaceId && !!adrId },
   );
+  useDocumentTitle(namesTab ? adr?.title : null);
   // Decisions formalised as this ADR (ADR-0060). Read through the decision
   // router so the meeting resolver, not this component, decides what is shown.
   const { data: decidedIn } = api.decision.listForAdr.useQuery(

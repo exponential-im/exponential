@@ -27,6 +27,7 @@ import { SessionProvider } from "next-auth/react";
 import { auth } from "~/server/auth";
 import { WorkspaceProvider } from '~/providers/WorkspaceProvider';
 import { ActiveTimerProvider } from '~/hooks/useActiveTimer';
+import { DocumentTitleProvider } from '~/hooks/useDocumentTitle';
 import { ServiceWorkerRegistration } from '~/app/_components/ServiceWorkerRegistration';
 import { PRODUCT_NAME } from '~/lib/brand';
 import { getPublicBaseUrlFromEnv } from '~/lib/urls';
@@ -83,6 +84,7 @@ export default async function RootLayout({
                 <AgentModalProvider>
                   <BugReportProvider>
                     <WorkspaceProvider>
+                      <DocumentTitleProvider>
                       <ActiveTimerProvider>
                         <Layout domain={domain}>
                           {children}
@@ -97,6 +99,7 @@ export default async function RootLayout({
                         <ZoeFab />
                         <CommandPalette />
                       </ActiveTimerProvider>
+                      </DocumentTitleProvider>
                     </WorkspaceProvider>
                   </BugReportProvider>
                 </AgentModalProvider>
