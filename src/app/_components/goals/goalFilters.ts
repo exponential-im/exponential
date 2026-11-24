@@ -1,5 +1,6 @@
 import { IconActivity, IconCircleDot, IconUser } from "@tabler/icons-react";
 import type { FilterBarConfig, FilterState } from "~/types/filter";
+import { PillarIcon } from "~/app/_components/pillars/PillarIcon";
 import {
   effectiveStatus,
   objectiveEffectiveConfidence,
@@ -7,7 +8,10 @@ import {
 } from "~/plugins/okr/client/utils/okrDashboardUtils";
 
 /** URL query params the Goals page FilterBar owns. */
-export const GOAL_FILTER_KEYS = ["status", "health", "driId"] as const;
+export const GOAL_FILTER_KEYS = ["status", "health", "driId", "pillar"] as const;
+
+/** The Pillar filter's value for "filed under no Pillar". Not a tag id. */
+export const NO_PILLAR_FILTER_VALUE = "none";
 
 /** Archived is never offered: archived objectives are hidden everywhere. */
 export const STATUS_FILTER_OPTIONS = [
@@ -45,6 +49,22 @@ export interface GoalLike {
   health?: string | null;
   healthOverride?: string | null;
   keyResults?: ReadonlyArray<{ status: string; statusOverride?: string | null }>;
+  /** The Pillars the goal is filed under (ADR-0086). */
+  pillarTags?: ReadonlyArray<{ tagId: string }>;
+}
+
+/**
+ * True when an item filed under `pillarIds` passes the Pillar filter: it is
+ * under at least one selected Pillar, or carries none while "No Pillar" is
+ * selected. An empty selection passes everything.
+ */
+export function matchesPillarFilter(
+  pillarIds: readonly string[],
+  selected: readonly string[] | undefined,
+): boolean {
+  if (!selected || selected.length === 0) return true;
+  if (pillarIds.length === 0) return selected.includes(NO_PILLAR_FILTER_VALUE);
+  return pillarIds.some((id) => selected.includes(id));
 }
 
 /**
@@ -73,6 +93,7 @@ export function filterGoalRows<T extends GoalLike>(
   const status = filters.status as string[] | undefined;
   const health = filters.health as string[] | undefined;
   const dri = filters.driId as string[] | undefined;
+  const pillar = filters.pillar as string[] | undefined;
   return goals.filter((g) => {
     if (status && status.length > 0 && !status.includes(g.status)) return false;
     if (health && health.length > 0 && !health.includes(goalEffectiveHealth(g))) {
@@ -80,6 +101,9 @@ export function filterGoalRows<T extends GoalLike>(
     }
     if (dri && dri.length > 0) {
       if (!g.driUserId || !dri.includes(g.driUserId)) return false;
+    }
+    if (!matchesPillarFilter((g.pillarTags ?? []).map((t) => t.tagId), pillar)) {
+      return false;
     }
     if (q) {
       const haystack = `${g.title} ${g.description ?? ""}`.toLowerCase();
@@ -117,3 +141,44 @@ export const GOAL_FILTER_CONFIG: FilterBarConfig = {
     },
   ],
 };
+
+export interface PillarFilterOption {
+  id: string;
+  name: string;
+  archivedAt?: Date | string | null;
+}
+
+/**
+ * The Goals page filters with a Pillar field added when the workspace has
+ * Pillars. An inactive Pillar is still offered, marked as such: goals keep it,
+ * so it still narrows the list. With no Pillars the field is left out, unless
+ * the URL or saved view still selects one, so that selection can be seen and
+ * cleared.
+ */
+export function buildGoalFilterConfig(
+  pillars: readonly PillarFilterOption[],
+  filters: FilterState,
+): FilterBarConfig {
+  const selected = filters.pillar;
+  const hasSelection = Array.isArray(selected) && selected.length > 0;
+  if (pillars.length === 0 && !hasSelection) return GOAL_FILTER_CONFIG;
+  return {
+    fields: [
+      ...GOAL_FILTER_CONFIG.fields,
+      {
+        key: "pillar",
+        label: "Pillar",
+        type: "multi-select",
+        icon: PillarIcon,
+        badgeColor: "grape",
+        options: [
+          ...pillars.map((p) => ({
+            value: p.id,
+            label: p.archivedAt ? `${p.name} (inactive)` : p.name,
+          })),
+          { value: NO_PILLAR_FILTER_VALUE, label: "No Pillar" },
+        ],
+      },
+    ],
+  };
+}

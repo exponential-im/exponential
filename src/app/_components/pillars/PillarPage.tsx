@@ -8,13 +8,14 @@ import {
   Avatar,
   Container,
   Group,
+  Progress,
   Skeleton,
   Switch,
   Text,
   ThemeIcon,
-  Title,
   Tooltip,
 } from "@mantine/core";
+import { notifications } from "@mantine/notifications";
 import {
   IconArrowsSplit,
   IconBookmark,
@@ -23,20 +24,33 @@ import {
   IconStack2,
   IconTarget,
   IconTicket,
+  IconTrophy,
   IconRepeat,
   IconUserCheck,
 } from "@tabler/icons-react";
 import { api, type RouterOutputs } from "~/trpc/react";
 import { useDocumentTitle } from "~/hooks/useDocumentTitle";
-import { Panel, Pill, SectionHeader, EmptyState } from "~/app/_components/ui";
-import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { useWorkspace } from "~/providers/WorkspaceProvider";
+import { Panel, Pill, SectionHeader, EmptyState, type PillTone } from "~/app/_components/ui";
+import { InlineEditableTitle } from "~/app/_components/shared/InlineEditableTitle";
+import { MarkdownFieldEditor } from "~/app/_components/shared/MarkdownFieldEditor";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
 import { pillarPath } from "~/lib/pillars/pillarPath";
+import { TAG_DESCRIPTION_MAX } from "~/types/tag";
+import { formatKrValue } from "~/app/_components/goals/keyResultRows";
+import {
+  effectiveStatus,
+  krProgress,
+  statusToConfidence,
+  type Confidence,
+} from "~/plugins/okr/client/utils/okrDashboardUtils";
 
 type PillarPageData = RouterOutputs["pillar"]["get"];
 type PageAction = PillarPageData["looseWork"]["actions"][number];
 type PageTicket = PillarPageData["looseWork"]["tickets"][number];
+type PageGoal = PillarPageData["goals"][number];
+type PageKeyResult = PageGoal["keyResults"][number];
 type PageUser = { id: string; name: string | null; image: string | null };
 
 /** Statuses, across goals, projects, epics, tickets and actions, that read as finished. */
@@ -66,6 +80,8 @@ interface PillarPageProps {
  */
 export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   const [includeCompleted, setIncludeCompleted] = useState(false);
+  const { userRole } = useWorkspace();
+  const canManage = userRole === "owner" || userRole === "admin";
   const { data, isLoading, error } = api.pillar.get.useQuery(
     { workspaceSlug, pillar: pillarSlug, includeCompleted },
     { placeholderData: (previous) => previous },
@@ -115,6 +131,8 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
 
   const {
     pillar,
+    dri,
+    hasNoDri,
     positions,
     hasNoPosition,
     goals,
@@ -133,13 +151,19 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
     <Container size="lg" className="py-8">
       <header className="mb-8">
         <Group justify="space-between" align="flex-start" wrap="nowrap" mb="xs">
-          <Group gap="sm" align="center">
-            <ThemeIcon variant="light" size="lg" radius="md" color={getTagMantineColor(pillar.color)}>
+          <Group gap="sm" align="center" wrap="nowrap" className="min-w-0 flex-1">
+            <ThemeIcon
+              variant="light"
+              size="lg"
+              radius="md"
+              color={getTagMantineColor(pillar.color)}
+              className="shrink-0"
+            >
               <PillarIcon size={20} />
             </ThemeIcon>
-            <Title order={1} className="text-text-primary">
-              {pillar.name}
-            </Title>
+            <div className="min-w-0 flex-1">
+              <PillarTitle data={data} includeCompleted={includeCompleted} />
+            </div>
             {pillar.archivedAt && <Pill tone="warning">Inactive</Pill>}
           </Group>
           <Switch
@@ -150,19 +174,13 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
             className="shrink-0 pt-2"
           />
         </Group>
-        {pillar.description ? (
-          <div className="max-w-3xl text-text-secondary">
-            <MarkdownRenderer content={pillar.description} variant="compact" />
-          </div>
-        ) : (
-          <Text size="sm" className="text-text-muted">
-            No description yet. Say what good looks like for this area in{" "}
-            <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
-              workspace settings
-            </Link>
-            .
-          </Text>
-        )}
+        <PillarDescription data={data} queryKey={{ workspaceSlug, pillar: pillarSlug }} />
+        <PillarDriLine
+          dri={dri}
+          hasNoDri={hasNoDri}
+          workspaceSlug={workspaceSlug}
+          canManage={canManage}
+        />
       </header>
 
       <div className="flex flex-col gap-8">
@@ -215,22 +233,11 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
           {goals.length === 0 ? (
             <EmptyState compact message={`No ${doneHint}goal is filed under this Pillar.`} />
           ) : (
-            <Panel padding="sm">
-              <WorkList>
-                {goals.map((goal) => (
-                  <WorkRow
-                    key={goal.id}
-                    href={`/w/${workspaceSlug}/goals/${goal.id}`}
-                    icon={<IconTarget size={14} />}
-                    label={goal.title}
-                    finished={isFinished(goal.status)}
-                    meta={goal.period ? <MetaText>{goal.period}</MetaText> : undefined}
-                    people={goal.driUser ? [goal.driUser] : []}
-                    emptyPeopleLabel="No DRI"
-                  />
-                ))}
-              </WorkList>
-            </Panel>
+            <div className="flex flex-col gap-3">
+              {goals.map((goal) => (
+                <GoalCard key={goal.id} goal={goal} workspaceSlug={workspaceSlug} />
+              ))}
+            </div>
           )}
         </PageSection>
 
@@ -392,6 +399,105 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
   );
 }
 
+/**
+ * The Pillar's name, edited in place the way a Knowledge Page's title is.
+ * The name is the tag's, so renaming moves its slug, and with it the page's
+ * URL: the page follows to the new URL without reloading.
+ */
+function PillarTitle({ data, includeCompleted }: { data: PillarPageData; includeCompleted: boolean }) {
+  const { pillar } = data;
+  const router = useRouter();
+  const utils = api.useUtils();
+  const rename = api.tag.update.useMutation({
+    onSuccess: (updated) => {
+      const moved = { ...data, pillar: { ...pillar, name: updated.name, slug: updated.slug } };
+      // Seed the new URL's query so the page does not fall back to its
+      // skeleton while it moves there; the old slug no longer resolves.
+      // `||`, not `??`: a name made only of characters the slug rule drops
+      // has an empty slug, and its URL keeps the id (see pillarPath).
+      utils.pillar.get.setData(
+        { workspaceSlug: pillar.workspaceSlug, pillar: updated.slug || updated.id, includeCompleted },
+        moved,
+      );
+      const target = pillarPath(pillar.workspaceSlug, updated);
+      if (window.location.pathname !== target) {
+        router.replace(target + window.location.search);
+      }
+      // The sidebar, pickers and settings list Pillars by name.
+      void utils.pillar.list.invalidate();
+      void utils.tag.list.invalidate();
+    },
+    onError: (error) => {
+      notifications.show({ title: "Pillar not renamed", message: error.message, color: "red" });
+    },
+  });
+
+  return (
+    <InlineEditableTitle
+      value={pillar.name}
+      editable={pillar.canEdit}
+      ariaLabel="Pillar name"
+      placeholder="Pillar name"
+      // Mantine's h1 size, which the heading had before it was editable.
+      fontSize="2.125rem"
+      onCommit={(name) => rename.mutateAsync({ id: pillar.id, name })}
+    />
+  );
+}
+
+/**
+ * The Pillar's "what good looks like", edited in place with the same surface
+ * as a Knowledge Page (autosaves as you type). Read-only for viewers.
+ */
+function PillarDescription({
+  data,
+  queryKey,
+}: {
+  data: PillarPageData;
+  /** The URL parts the page queried with, which name its cache entries. */
+  queryKey: { workspaceSlug: string; pillar: string };
+}) {
+  const { pillar } = data;
+  const utils = api.useUtils();
+  const update = api.tag.update.useMutation();
+
+  if (!pillar.canEdit && !pillar.description) {
+    return (
+      <Text size="sm" className="text-text-muted">
+        No description yet.
+      </Text>
+    );
+  }
+
+  return (
+    <div className="max-w-3xl text-text-secondary">
+      <MarkdownFieldEditor
+        // The editor loads its content once per mount: one mount per Pillar.
+        key={pillar.id}
+        markdown={pillar.description}
+        editable={pillar.canEdit}
+        placeholder="Say what good looks like for this area… type / for blocks."
+        onSave={async (next) => {
+          if (next && next.length > TAG_DESCRIPTION_MAX) {
+            throw new Error(
+              `A Pillar's description fits ${TAG_DESCRIPTION_MAX.toLocaleString()} characters; this one has ${next.length.toLocaleString()}.`,
+            );
+          }
+          await update.mutateAsync({ id: pillar.id, description: next ?? "" });
+          // Patch rather than refetch: autosave runs as the person types, and
+          // the page query is heavy. Both "Show completed" variants are cached.
+          for (const includeCompleted of [false, true]) {
+            utils.pillar.get.setData(
+              { ...queryKey, includeCompleted },
+              (old) => (old ? { ...old, pillar: { ...old.pillar, description: next } } : old),
+            );
+          }
+        }}
+      />
+    </div>
+  );
+}
+
 function PageSection({
   label,
   title,
@@ -473,10 +579,13 @@ function WorkRow({
   people,
   finished = false,
   emptyPeopleLabel = "Unassigned",
+  labelClassName = "",
 }: {
   href: string;
   icon: ReactNode;
   label: string;
+  /** Extra classes for the label link, such as a heavier weight. */
+  labelClassName?: string;
   meta?: ReactNode;
   people: PageUser[];
   finished?: boolean;
@@ -487,7 +596,7 @@ function WorkRow({
       <span className="inline-flex shrink-0 text-text-muted">{icon}</span>
       <Link
         href={href}
-        className={`min-w-0 flex-1 truncate text-sm hover:underline ${
+        className={`min-w-0 flex-1 truncate text-sm hover:underline ${labelClassName} ${
           finished ? "text-text-muted line-through" : "text-text-primary"
         }`}
       >
@@ -506,6 +615,146 @@ function WorkRow({
             </Tooltip>
           ))}
         </Avatar.Group>
+      )}
+    </li>
+  );
+}
+
+/**
+ * The Pillar's DRI (ADR-0087): the one person accountable for the area, shown
+ * apart from its Positions, which only say who to ask.
+ */
+function PillarDriLine({
+  dri,
+  hasNoDri,
+  workspaceSlug,
+  canManage,
+}: {
+  dri: PageUser | null;
+  hasNoDri: boolean;
+  workspaceSlug: string;
+  /** Owners and admins set the DRI in workspace settings; others only see it. */
+  canManage: boolean;
+}) {
+  return (
+    <Group gap="xs" mt="sm" data-testid="pillar-dri">
+      <Text size="xs" fw={600} tt="uppercase" className="text-text-muted">
+        DRI
+      </Text>
+      {hasNoDri || !dri ? (
+        <>
+          <Pill size="xs" tone="warning">
+            No DRI
+          </Pill>
+          <Text size="sm" className="text-text-secondary">
+            Nobody is accountable for this Pillar yet.
+            {canManage && (
+              <>
+                {" "}
+                <Link href={`/w/${workspaceSlug}/settings?section=pillars`} className="underline">
+                  Set a DRI in workspace settings
+                </Link>
+                .
+              </>
+            )}
+          </Text>
+        </>
+      ) : (
+        <Group gap={6} wrap="nowrap">
+          <Avatar src={dri.image} size={22} radius="xl" alt={dri.name ?? ""}>
+            {dri.name?.charAt(0) ?? "?"}
+          </Avatar>
+          <Text size="sm" className="text-text-primary">
+            {dri.name ?? "Someone"}
+          </Text>
+        </Group>
+      )}
+    </Group>
+  );
+}
+
+/** How a key result's effective status (ADR-0004) reads on the page. */
+const KEY_RESULT_STATUS: Record<Confidence, { tone: PillTone; color: string; label: string }> = {
+  ok: { tone: "brand", color: "green", label: "On track" },
+  warn: { tone: "warning", color: "yellow", label: "At risk" },
+  bad: { tone: "danger", color: "red", label: "Off track" },
+  idle: { tone: "neutral", color: "gray", label: "Not started" },
+};
+
+/** An Objective under the Pillar, with its key results beside it. */
+function GoalCard({ goal, workspaceSlug }: { goal: PageGoal; workspaceSlug: string }) {
+  const href = `/w/${workspaceSlug}/goals/${goal.id}`;
+  const finished = isFinished(goal.status);
+  const hasKeyResults = goal.keyResults.length > 0;
+  return (
+    <Panel padding="md">
+      <WorkList>
+        <WorkRow
+          href={href}
+          icon={<IconTarget size={14} />}
+          label={goal.title}
+          labelClassName="font-medium"
+          finished={finished}
+          meta={goal.period ? <MetaText>{goal.period}</MetaText> : undefined}
+          people={goal.driUser ? [goal.driUser] : []}
+          emptyPeopleLabel="No DRI"
+        />
+      </WorkList>
+      {hasKeyResults ? (
+        <ul
+          aria-label={`Key results of ${goal.title}`}
+          className="m-0 mt-2 flex list-none flex-col gap-1 border-l border-border-subtle p-0 pl-3 ml-[6px]"
+        >
+          {goal.keyResults.map((keyResult) => (
+            <KeyResultRow key={keyResult.id} keyResult={keyResult} href={href} />
+          ))}
+        </ul>
+      ) : (
+        <Text size="xs" className="mt-1 pl-[22px] text-text-muted">
+          No key results yet.
+        </Text>
+      )}
+    </Panel>
+  );
+}
+
+function KeyResultRow({ keyResult, href }: { keyResult: PageKeyResult; href: string }) {
+  const status = effectiveStatus(keyResult.statusOverride, keyResult.status) ?? "not-started";
+  const look = KEY_RESULT_STATUS[statusToConfidence(status)];
+  const label = status === "achieved" ? "Achieved" : look.label;
+  const progress = Math.round(krProgress(keyResult) * 100);
+  return (
+    <li className="flex items-center gap-2 py-1">
+      <span className="inline-flex shrink-0 text-text-muted">
+        <IconTrophy size={14} />
+      </span>
+      <Link href={href} className="min-w-0 flex-1 truncate text-sm text-text-primary hover:underline">
+        {keyResult.title}
+      </Link>
+      <MetaText>
+        {formatKrValue(keyResult.currentValue, keyResult.unit, keyResult.unitLabel)} /{" "}
+        {formatKrValue(keyResult.targetValue, keyResult.unit, keyResult.unitLabel)}
+      </MetaText>
+      <Progress
+        value={progress}
+        size="sm"
+        w={64}
+        color={look.color}
+        className="hidden shrink-0 sm:block"
+        aria-label={`${keyResult.title}: ${progress}%`}
+      />
+      <Text size="xs" className="w-9 shrink-0 text-right text-text-secondary">
+        {progress}%
+      </Text>
+      <Pill size="xs" tone={look.tone} className="shrink-0">
+        {label}
+      </Pill>
+      {keyResult.driUser && (
+        <Tooltip label={keyResult.driUser.name ?? "Someone"}>
+          <Avatar src={keyResult.driUser.image} size={20} radius="xl" alt={keyResult.driUser.name ?? ""}>
+            {keyResult.driUser.name?.charAt(0) ?? "?"}
+          </Avatar>
+        </Tooltip>
       )}
     </li>
   );

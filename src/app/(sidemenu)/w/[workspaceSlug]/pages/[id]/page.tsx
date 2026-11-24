@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { Skeleton, Text, Textarea } from '@mantine/core';
+import { Skeleton, Text } from '@mantine/core';
 import { useLocalStorage } from '@mantine/hooks';
 import { IconCalendarEvent } from '@tabler/icons-react';
 import { format, formatDistanceToNow } from 'date-fns';
@@ -24,17 +24,12 @@ import { PageHistoryModal } from '~/app/_components/pages/PageHistoryModal';
 import { PageOutline } from '~/app/_components/pages/PageOutline';
 import { UpdateReviewBanner } from '~/app/_components/pages/UpdateReviewBanner';
 import { FavoriteButton } from '~/app/_components/shared/FavoriteButton';
+import { InlineEditableTitle } from '~/app/_components/shared/InlineEditableTitle';
 import type { RichDocEditorHandle } from '~/app/_components/shared/RichDocEditor';
 
-/** The page title is the largest text on the page — above the body's H1
- * (30px), which it used to sit below. Shared between the read-only heading and
- * the invisible input so a page looks the same to editors and viewers. */
-const TITLE_FONT_SIZE = '2.5rem';
-const TITLE_CLASS =
-  'text-[2.5rem] font-bold leading-[1.2] tracking-[-0.01em] text-text-primary';
-
 /** Inline-editable page title; saves on blur/Enter when changed (metadata-only
- * update, so no docVersion dance). Read-only users see static text. */
+ * update, so no docVersion dance). Read-only users see static text. The title
+ * is the largest text on the page, above the body's H1 (30px). */
 function PageTitle({
   pageId,
   initialTitle,
@@ -44,7 +39,6 @@ function PageTitle({
   initialTitle: string;
   editable: boolean;
 }) {
-  const [title, setTitle] = useState(initialTitle);
   const utils = api.useUtils();
   const updateTitle = api.page.update.useMutation({
     onSuccess: (updated, vars) => {
@@ -68,61 +62,12 @@ function PageTitle({
     },
   });
 
-  // Keep local state in sync if the upstream title changes (e.g. agent edit).
-  useEffect(() => setTitle(initialTitle), [initialTitle]);
-
-  const commit = () => {
-    const next = title.trim();
-    if (!next || next === initialTitle) {
-      setTitle(initialTitle);
-      return;
-    }
-    updateTitle.mutate({ id: pageId, title: next });
-  };
-
-  if (!editable) {
-    return (
-      <Text component="h1" className={TITLE_CLASS}>
-        {initialTitle}
-      </Text>
-    );
-  }
-
-  // A textarea, not an input, so a long title wraps onto new lines like the
-  // read-only heading does instead of being clipped by the reading column.
-  // Titles are still single-line: Enter commits and pasted newlines become
-  // spaces.
   return (
-    <Textarea
-      value={title}
-      onChange={(e) => setTitle(e.currentTarget.value.replace(/\r?\n/g, ' '))}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.preventDefault();
-          e.currentTarget.blur();
-        }
-      }}
-      autosize
-      minRows={1}
-      variant="unstyled"
-      placeholder="Untitled"
-      aria-label="Page title"
-      // `minHeight` lives on a class, not in `styles.input`: react-textarea-autosize
-      // throws in development when it is passed as an inline style.
-      classNames={{ input: 'min-h-0' }}
-      styles={{
-        input: {
-          fontSize: TITLE_FONT_SIZE,
-          fontWeight: 700,
-          lineHeight: 1.2,
-          letterSpacing: '-0.01em',
-          height: 'auto',
-          padding: 0,
-          resize: 'none',
-          overflow: 'hidden',
-        },
-      }}
+    <InlineEditableTitle
+      value={initialTitle}
+      editable={editable}
+      ariaLabel="Page title"
+      onCommit={(title) => updateTitle.mutateAsync({ id: pageId, title })}
     />
   );
 }

@@ -12,6 +12,7 @@ import {
   IconCalendarPlus,
   IconChevronLeft,
   IconChevronRight,
+  IconClockPlus,
   IconRefresh,
   IconUnlink,
 } from "@tabler/icons-react";
@@ -33,6 +34,7 @@ interface CalendarHeaderProps {
   onRefresh?: () => void;
   isRefreshing?: boolean;
   onScheduleMeeting?: () => void;
+  onLogTime?: () => void;
 }
 
 export function CalendarHeader({
@@ -50,6 +52,7 @@ export function CalendarHeader({
   onRefresh,
   isRefreshing,
   onScheduleMeeting,
+  onLogTime,
 }: CalendarHeaderProps) {
   // Format the header text based on view
   const headerText =
@@ -103,6 +106,16 @@ export function CalendarHeader({
           ]}
           size="sm"
         />
+        {onLogTime && (
+          <Button
+            size="sm"
+            variant="light"
+            leftSection={<IconClockPlus size={16} />}
+            onClick={onLogTime}
+          >
+            Log time
+          </Button>
+        )}
         {onScheduleMeeting && (
           <Button
             size="sm"

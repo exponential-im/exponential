@@ -34,7 +34,7 @@ import type {
 import { extractYearsFromPeriods } from "~/plugins/okr/client/utils/periodUtils";
 import { GoalsControls } from "./GoalsControls";
 import { GoalsPeriodHeader } from "./GoalsPeriodHeader";
-import { GOAL_FILTER_CONFIG, GOAL_FILTER_KEYS, filterGoalRows } from "./goalFilters";
+import { GOAL_FILTER_KEYS, buildGoalFilterConfig, filterGoalRows } from "./goalFilters";
 import { KeyResultsTable } from "./KeyResultsTable";
 import {
   filterKeyResultRows,
@@ -116,8 +116,14 @@ function buildKeyResultDrawerItem(kr: ObjectiveCardKeyResult): DrawerItem {
 
 type ObjectivesQueryRow = RouterOutputs["okr"]["getByObjective"][number];
 
-/** A card objective that still carries its lifecycle status for the filters. */
-type CardObjective = ObjectiveCardObjective & { status: string };
+/**
+ * A card objective that still carries its lifecycle status and its Pillars
+ * for the filters.
+ */
+type CardObjective = ObjectiveCardObjective & {
+  status: string;
+  pillarTags: { tagId: string }[];
+};
 
 /** The getByObjective payload in the shape the cards, timeline and drawer read. */
 function toCardObjectives(rows: ObjectivesQueryRow[]): CardObjective[] {
@@ -248,7 +254,16 @@ export function GoalsPage() {
   const { filters, setFilters, searchQuery, deferredSearchQuery, setSearchQuery } =
     useProjectViewState(GOAL_FILTER_KEYS, "goals");
   const [filterRowOpen, { toggle: toggleFilterRow }] = useDisclosure(false);
-  const filtersActive = hasActiveFilters(GOAL_FILTER_CONFIG, filters);
+  // Inactive Pillars too: goals keep them, so they still narrow the list.
+  const { data: pillars } = api.pillar.list.useQuery(
+    { workspaceId: workspaceId ?? "", includeArchived: true },
+    { enabled: !!workspaceId, staleTime: 5 * 60 * 1000 },
+  );
+  const filterConfig = useMemo(
+    () => buildGoalFilterConfig(pillars ?? [], filters),
+    [pillars, filters],
+  );
+  const filtersActive = hasActiveFilters(filterConfig, filters);
   const isNarrowed = filtersActive || deferredSearchQuery.trim().length > 0;
   const clearNarrowing = useCallback(() => {
     setFilters({});
@@ -545,7 +560,7 @@ export function GoalsPage() {
           onToggleFilterRow={toggleFilterRow}
           filterBar={
             <FilterBar
-              config={GOAL_FILTER_CONFIG}
+              config={filterConfig}
               filters={filters}
               onFiltersChange={setFilters}
               members={workspaceMembers}

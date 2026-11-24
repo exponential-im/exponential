@@ -158,9 +158,18 @@ export function CalendarPageContent() {
   const [selectedTimeEntry, setSelectedTimeEntry] =
     useState<CalendarTimeEntry | null>(null);
   const [timeEntryModalOpened, setTimeEntryModalOpened] = useState(false);
+  // Set when the modal is open to log a NEW entry on this day.
+  const [logTimeDate, setLogTimeDate] = useState<Date | null>(null);
 
   const handleTimeEntryClick = (entry: CalendarTimeEntry) => {
+    setLogTimeDate(null);
     setSelectedTimeEntry(entry);
+    setTimeEntryModalOpened(true);
+  };
+
+  const handleLogTime = () => {
+    setSelectedTimeEntry(null);
+    setLogTimeDate(selectedDate);
     setTimeEntryModalOpened(true);
   };
 
@@ -531,6 +540,7 @@ export function CalendarPageContent() {
         onRefresh={handleRefresh}
         isRefreshing={isRefreshing}
         onScheduleMeeting={() => setScheduleOpen(true)}
+        onLogTime={handleLogTime}
       />
       <ScheduleMeetingModal opened={scheduleOpen} onClose={() => setScheduleOpen(false)} />
       <TimezonePromptModal
@@ -584,10 +594,12 @@ export function CalendarPageContent() {
 
       <TimeEntryModal
         entry={selectedTimeEntry}
+        createForDate={logTimeDate}
         opened={timeEntryModalOpened}
         onClose={() => {
           setTimeEntryModalOpened(false);
           setSelectedTimeEntry(null);
+          setLogTimeDate(null);
         }}
         onSuccess={() => {
           void utils.timeEntry.listByDateRange.invalidate();

@@ -17,6 +17,7 @@ import { TRPCError } from "@trpc/server";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import { resolveGoalProgress, isManualProgress } from "~/server/services/goalProgress";
 import { objectiveScopeWhere } from "~/plugins/okr/server/objectiveScope";
+import { PILLAR_CATEGORY } from "~/types/tag";
 
 import {
   getMyPublicGoals,
@@ -139,6 +140,16 @@ export const goalRouter = createTRPCRouter({
           },
           workspace: { select: { id: true, name: true, slug: true } },
           driUser: { select: { id: true, name: true, image: true } },
+          // The Pillars this goal is filed under, for the Goals page's
+          // Pillar filter (ADR-0086). Ids only: the page already has the
+          // workspace's Pillars from pillar.list.
+          pillarTags: {
+            // Only tags that are still Pillars: a Pillar turned back into a
+            // label keeps its assignments, but no longer files the goal.
+            // Inactive (archived) Pillars still count.
+            where: { tag: { category: PILLAR_CATEGORY } },
+            select: { tagId: true },
+          },
           _count: { select: { keyResults: true } },
         },
         orderBy: { displayOrder: "asc" },

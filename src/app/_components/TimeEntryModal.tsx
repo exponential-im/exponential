@@ -28,24 +28,53 @@ import type { CalendarTimeEntry } from "./calendar/types";
 
 interface TimeEntryModalProps {
   entry: CalendarTimeEntry | null;
+  /**
+   * With no `entry`, the modal logs a NEW completed entry on this day instead
+   * of editing one. The parent should keep it stable while the modal is open.
+   */
+  createForDate?: Date | null;
   opened: boolean;
   onClose: () => void;
   onSuccess?: () => void;
 }
 
+const QUARTER_HOUR_MS = 15 * 60 * 1000;
+
+/**
+ * Starting bounds for a new entry: the last hour (to the quarter hour) when
+ * logging today, otherwise 9–10am on the chosen day.
+ */
+function defaultNewEntryBounds(day: Date): { start: Date; end: Date } {
+  const now = new Date();
+  const end = new Date(day);
+  if (day.toDateString() === now.toDateString()) {
+    end.setTime(Math.floor(now.getTime() / QUARTER_HOUR_MS) * QUARTER_HOUR_MS);
+  } else {
+    end.setHours(10, 0, 0, 0);
+  }
+  return { start: new Date(end.getTime() - 60 * 60 * 1000), end };
+}
+
+const TIME_ENTRY_QUERIES_TO_REFRESH = ["listByDateRange", "listRecent", "getActive"] as const;
+
 /**
  * Slim TimeEntry editor. Action-level edits delegate to the existing
  * `EditActionModal` via the pencil button (nested modal); this modal handles
  * only entry-level state: start/end pickers, action reassignment, and delete.
+ *
+ * Given `createForDate` and no `entry`, it logs a new completed entry
+ * (`timeEntry.create`) against an Action picked here.
  */
 export function TimeEntryModal({
   entry,
+  createForDate,
   opened,
   onClose,
   onSuccess,
 }: TimeEntryModalProps) {
   const utils = api.useUtils();
   const { workspaceId } = useWorkspace();
+  const isCreate = !entry && !!createForDate;
 
   const [startedAt, setStartedAt] = useState<Date | null>(null);
   const [endedAt, setEndedAt] = useState<Date | null>(null);
@@ -68,7 +97,21 @@ export function TimeEntryModal({
     setQuery("");
   }, [entry]);
 
-  const { data: suggestions = [] } = api.action.searchByTitle.useQuery(
+  // Each time the create form opens, start from a blank Action and the
+  // chosen day's default bounds.
+  useEffect(() => {
+    if (entry || !createForDate || !opened) return;
+    const { start, end } = defaultNewEntryBounds(createForDate);
+    setStartedAt(start);
+    setEndedAt(end);
+    setActionId(null);
+    setActionName("");
+    setQuery("");
+    setPickerOpen(true);
+  }, [entry, createForDate, opened]);
+
+  const { data: suggestions = [], isFetching: isFetchingSuggestions } =
+    api.action.searchByTitle.useQuery(
     {
       query,
       workspaceId: workspaceId ?? undefined,
@@ -77,13 +120,26 @@ export function TimeEntryModal({
     { enabled: pickerOpen && query.trim().length > 0 },
   );
 
+  const refreshTimeEntryQueries = () =>
+    Promise.all(
+      TIME_ENTRY_QUERIES_TO_REFRESH.map((name) => utils.timeEntry[name].invalidate()),
+    );
+
+  const createMutation = api.timeEntry.create.useMutation({
+    onSuccess: async () => {
+      await refreshTimeEntryQueries();
+      notifications.show({ title: "Logged", message: "Time entry created", color: "green" });
+      onSuccess?.();
+      onClose();
+    },
+    onError: (err) => {
+      notifications.show({ title: "Error", message: err.message, color: "red" });
+    },
+  });
+
   const updateMutation = api.timeEntry.update.useMutation({
     onSuccess: async () => {
-      await Promise.all([
-        utils.timeEntry.listByDateRange.invalidate(),
-        utils.timeEntry.listRecent.invalidate(),
-        utils.timeEntry.getActive.invalidate(),
-      ]);
+      await refreshTimeEntryQueries();
       notifications.show({ title: "Saved", message: "Time entry updated", color: "green" });
       onSuccess?.();
       onClose();
@@ -95,11 +151,7 @@ export function TimeEntryModal({
 
   const deleteMutation = api.timeEntry.delete.useMutation({
     onSuccess: async () => {
-      await Promise.all([
-        utils.timeEntry.listByDateRange.invalidate(),
-        utils.timeEntry.listRecent.invalidate(),
-        utils.timeEntry.getActive.invalidate(),
-      ]);
+      await refreshTimeEntryQueries();
       notifications.show({ title: "Deleted", message: "Time entry removed", color: "blue" });
       onSuccess?.();
       onClose();
@@ -127,7 +179,7 @@ export function TimeEntryModal({
     return startChanged || endChanged || actionChanged;
   }, [entry, startedAt, endedAt, actionId]);
 
-  if (!entry) return null;
+  if (!entry && !isCreate) return null;
 
   const handleSave = () => {
     if (!startedAt) return;
@@ -137,6 +189,13 @@ export function TimeEntryModal({
         message: "End time must be after start time",
         color: "red",
       });
+      return;
+    }
+    if (!entry) {
+      // A new entry is always complete: the running Timer is the only way to
+      // have an open-ended one.
+      if (!actionId || !endedAt) return;
+      createMutation.mutate({ actionId, startedAt, endedAt });
       return;
     }
     updateMutation.mutate({
@@ -155,7 +214,11 @@ export function TimeEntryModal({
         title={
           <Group gap="xs">
             <Text fw={600}>Time entry</Text>
-            {entry.status === "PROPOSED" ? (
+            {!entry ? (
+              <Badge size="xs" variant="light">
+                new
+              </Badge>
+            ) : entry.status === "PROPOSED" ? (
               <Badge size="xs" variant="outline" color="yellow">
                 proposed
               </Badge>
@@ -164,16 +227,18 @@ export function TimeEntryModal({
                 confirmed
               </Badge>
             )}
-            <Tooltip label="Edit underlying action" withArrow>
-              <ActionIcon
-                variant="subtle"
-                size="sm"
-                aria-label="Edit action"
-                onClick={() => setEditActionOpened(true)}
-              >
-                <IconPencil size={14} />
-              </ActionIcon>
-            </Tooltip>
+            {entry && (
+              <Tooltip label="Edit underlying action" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  size="sm"
+                  aria-label="Edit action"
+                  onClick={() => setEditActionOpened(true)}
+                >
+                  <IconPencil size={14} />
+                </ActionIcon>
+              </Tooltip>
+            )}
           </Group>
         }
         centered
@@ -185,20 +250,26 @@ export function TimeEntryModal({
               Action
             </Text>
             <Group gap="xs" align="center">
-              <Text fw={500}>{toPlainText(actionName) || "Untitled"}</Text>
-              <Tooltip
-                label={pickerOpen ? "Cancel reassignment" : "Reassign to another action"}
-                withArrow
-              >
-                <ActionIcon
-                  variant="subtle"
-                  size="sm"
-                  aria-label="Reassign"
-                  onClick={() => setPickerOpen((v) => !v)}
+              {actionId ? (
+                <Text fw={500}>{toPlainText(actionName) || "Untitled"}</Text>
+              ) : (
+                <Text c="dimmed">Search for the action this time was spent on</Text>
+              )}
+              {actionId && (
+                <Tooltip
+                  label={pickerOpen ? "Cancel reassignment" : "Reassign to another action"}
+                  withArrow
                 >
-                  <IconRefresh size={14} />
-                </ActionIcon>
-              </Tooltip>
+                  <ActionIcon
+                    variant="subtle"
+                    size="sm"
+                    aria-label="Reassign"
+                    onClick={() => setPickerOpen((v) => !v)}
+                  >
+                    <IconRefresh size={14} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
             </Group>
             {pickerOpen && (
               <Stack gap={4} mt="xs">
@@ -234,6 +305,11 @@ export function TimeEntryModal({
                     ))}
                   </div>
                 )}
+                {query.trim().length > 0 && !isFetchingSuggestions && suggestions.length === 0 && (
+                  <Text size="xs" c="dimmed">
+                    No matching actions
+                  </Text>
+                )}
               </Stack>
             )}
           </div>
@@ -248,14 +324,15 @@ export function TimeEntryModal({
             label="Ended"
             value={endedAt}
             onChange={setEndedAt}
-            description="Leave blank to keep this entry running"
+            description={entry ? "Leave blank to keep this entry running" : undefined}
+            required={!entry}
           />
 
           <Text size="xs" c="dimmed">
             Duration: <span className="font-mono">{durationLabel}</span>
           </Text>
 
-          {entry.note && (
+          {entry?.note && (
             <div>
               <Text size="xs" c="dimmed">
                 Note
@@ -266,7 +343,7 @@ export function TimeEntryModal({
             </div>
           )}
 
-          {entry.status === "PROPOSED" && (
+          {entry?.status === "PROPOSED" && (
             <Text size="xs" c="dimmed">
               Proposed by the Daily worklog. Saving or deleting confirms it; the
               worklog will not touch it again.
@@ -274,32 +351,46 @@ export function TimeEntryModal({
           )}
 
           <Group justify="space-between" mt="md">
-            <Tooltip label="Delete entry" withArrow>
-              <ActionIcon
-                variant="subtle"
-                color="red"
-                aria-label="Delete entry"
-                onClick={() => {
-                  if (window.confirm("Delete this time entry?")) {
-                    deleteMutation.mutate({ entryId: entry.id });
-                  }
-                }}
-                loading={deleteMutation.isPending}
-              >
-                <IconTrash size={16} />
-              </ActionIcon>
-            </Tooltip>
+            {entry ? (
+              <Tooltip label="Delete entry" withArrow>
+                <ActionIcon
+                  variant="subtle"
+                  color="red"
+                  aria-label="Delete entry"
+                  onClick={() => {
+                    if (window.confirm("Delete this time entry?")) {
+                      deleteMutation.mutate({ entryId: entry.id });
+                    }
+                  }}
+                  loading={deleteMutation.isPending}
+                >
+                  <IconTrash size={16} />
+                </ActionIcon>
+              </Tooltip>
+            ) : (
+              <span />
+            )}
             <Group gap="xs">
               <Button variant="default" onClick={onClose}>
                 Cancel
               </Button>
-              <Button
-                onClick={handleSave}
-                disabled={!isDirty || !startedAt}
-                loading={updateMutation.isPending}
-              >
-                Save
-              </Button>
+              {entry ? (
+                <Button
+                  onClick={handleSave}
+                  disabled={!isDirty || !startedAt}
+                  loading={updateMutation.isPending}
+                >
+                  Save
+                </Button>
+              ) : (
+                <Button
+                  onClick={handleSave}
+                  disabled={!actionId || !startedAt || !endedAt}
+                  loading={createMutation.isPending}
+                >
+                  Log time
+                </Button>
+              )}
             </Group>
           </Group>
         </Stack>
@@ -307,7 +398,7 @@ export function TimeEntryModal({
 
       <EditActionModal
         action={
-          entry.action.id
+          entry?.action.id
             ? {
                 id: entry.action.id,
                 name: actionName,

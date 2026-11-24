@@ -153,6 +153,58 @@ describe("tag.setPillar", () => {
   });
 });
 
+describe("tag.setPillarDri", () => {
+  it("lets an admin make a human workspace member the DRI", async () => {
+    stubRole(dbMock, "admin");
+    dbMock.tag.findUnique.mockResolvedValue(tagRow({ category: "pillar" }) as never);
+    dbMock.user.findFirst.mockResolvedValue({ id: "user-2", isAgent: false } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setPillarDri({ tagId: "tag-devops", userId: "user-2" });
+
+    expect(dbMock.tag.update).toHaveBeenCalledWith({
+      where: { id: "tag-devops" },
+      data: { driUserId: "user-2" },
+    });
+  });
+
+  it("lets an owner clear the DRI", async () => {
+    stubRole(dbMock, "owner");
+    dbMock.tag.findUnique.mockResolvedValue(tagRow({ category: "pillar" }) as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.tag.setPillarDri({ tagId: "tag-devops", userId: null });
+
+    expect(dbMock.tag.update).toHaveBeenCalledWith({
+      where: { id: "tag-devops" },
+      data: { driUserId: null },
+    });
+  });
+
+  it("refuses a member", async () => {
+    stubRole(dbMock, "member");
+    dbMock.tag.findUnique.mockResolvedValue(tagRow({ category: "pillar" }) as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(caller.tag.setPillarDri({ tagId: "tag-devops", userId: "user-2" })),
+    ).toBe("FORBIDDEN");
+    expect(dbMock.tag.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an agent user as DRI", async () => {
+    stubRole(dbMock, "admin");
+    dbMock.tag.findUnique.mockResolvedValue(tagRow({ category: "pillar" }) as never);
+    dbMock.user.findFirst.mockResolvedValue({ id: "agent-1", isAgent: true } as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    expect(
+      await errorCode(caller.tag.setPillarDri({ tagId: "tag-devops", userId: "agent-1" })),
+    ).toBe("BAD_REQUEST");
+    expect(dbMock.tag.update).not.toHaveBeenCalled();
+  });
+});
+
 describe("tag.create and tag.update cannot make or unmake a Pillar", () => {
   it("tag.create refuses category pillar", async () => {
     stubRole(dbMock, "owner");

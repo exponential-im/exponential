@@ -13,15 +13,15 @@ import {
   canEditProject,
   assertCanEditProjects,
 } from "~/server/services/access/resolvers/projectResolver";
-import { computeGoalHealth } from "~/server/services/goalService";
 import { resolveGoalProgress } from "~/server/services/goalProgress";
 import { objectiveScopeWhere } from "../objectiveScope";
+import { PILLAR_CATEGORY } from "~/types/tag";
 import { recordActivity } from "~/server/services/activity/recordActivity";
 import {
   mergeObjectiveActivity,
   type ObjectiveActivityItem,
 } from "../objectiveActivity";
-import { runAfterResponseReported } from "~/server/utils/runAfterResponse";
+import { recordKeyResultCheckIn } from "~/server/services/okr/recordKeyResultCheckIn";
 
 // "Done" for the delivery signal = the Delivery metrics page's completion
 // definition (ADR-0047, SprintAnalyticsService): DONE or DEPLOYED —
@@ -300,6 +300,15 @@ export const keyResultRouter = createTRPCRouter({
           },
           driUser: {
             select: { id: true, name: true, email: true, image: true },
+          },
+          // The Pillars this objective is filed under, for the Goals page's
+          // Pillar filter (ADR-0086).
+          pillarTags: {
+            // Only tags that are still Pillars: a Pillar turned back into a
+            // label keeps its assignments, but no longer files the goal.
+            // Inactive (archived) Pillars still count.
+            where: { tag: { category: PILLAR_CATEGORY } },
+            select: { tagId: true },
           },
           keyResults: {
             where: {
@@ -676,66 +685,14 @@ export const keyResultRouter = createTRPCRouter({
         });
       }
 
-      // Determine new status based on progress
-      const range = keyResult.targetValue - keyResult.startValue;
-      const progress =
-        range > 0
-          ? ((input.newValue - keyResult.startValue) / range) * 100
-          : 0;
-
-      let newStatus = keyResult.status;
-      if (progress >= 100) {
-        newStatus = "achieved";
-      } else if (progress >= 70) {
-        newStatus = "on-track";
-      } else if (progress >= 40) {
-        newStatus = "at-risk";
-      } else {
-        newStatus = "off-track";
-      }
-
-      // Create check-in and update key result in transaction
-      const [checkIn] = await ctx.db.$transaction([
-        ctx.db.keyResultCheckIn.create({
-          data: {
-            keyResultId: input.keyResultId,
-            previousValue: keyResult.currentValue,
-            newValue: input.newValue,
-            notes: input.notes,
-            createdById: ctx.session.user.id,
-          },
-        }),
-        ctx.db.keyResult.update({
-          where: { id: input.keyResultId },
-          data: {
-            currentValue: input.newValue,
-            status: newStatus,
-          },
-        }),
-      ]);
-
-      // Recompute parent goal health after check-in, after the response
-      runAfterResponseReported("keyResult.checkIn.goalHealth", () =>
-        computeGoalHealth({ ctx, goalId: keyResult.goalId }),
-      );
-
-      // Surface the check-in in the workspace activity feed. Only the human
-      // act is logged — never the health recompute it triggers. Personal
-      // (non-workspace) key results are silent by design. The event's
-      // entityId is the check-in row; metadata carries the KR title and id
-      // so the feed can label the row and deep-link to the KR drawer.
-      if (checkIn && keyResult.workspaceId) {
-        await recordActivity(ctx.db, {
-          workspaceId: keyResult.workspaceId,
-          userId: ctx.session.user.id,
-          entityType: "key_result",
-          entityId: checkIn.id,
-          action: "checked_in",
-          metadata: { title: keyResult.title, keyResultId: keyResult.id },
-        }).catch(() => {
-          /* instrumentation failure is non-fatal */
-        });
-      }
+      // One write path for a KR's value (ADR-0050): status, transaction,
+      // goal health after the response, and the activity event.
+      const { checkIn } = await recordKeyResultCheckIn(ctx.db, {
+        keyResult,
+        newValue: input.newValue,
+        notes: input.notes,
+        actorUserId: ctx.session.user.id,
+      });
 
       return checkIn;
     }),

@@ -20,6 +20,8 @@ import {
   buildSharedResourceWhere,
   buildTicketAccessWhere,
   buildWorkspaceProjectAccessWhere,
+  canEditWorkspaceContent,
+  type WorkspaceRole,
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
 import { suggestPillars } from "~/lib/pillars/suggestPillars";
@@ -123,18 +125,19 @@ export async function loadReadablePillar(
   db: PrismaClient,
   userId: string,
   ref: PillarRef,
-): Promise<Tag & { workspaceId: string; workspaceSlug: string }> {
+): Promise<Tag & { workspaceId: string; workspaceSlug: string; viewerRole: WorkspaceRole }> {
   const found = await findPillarTag(db, ref);
   if (!found || found.category !== PILLAR_CATEGORY || !found.workspaceId || !found.workspace) {
     throw pillarNotFound();
   }
+  let viewerRole: WorkspaceRole;
   try {
-    await assertWorkspaceMembership(db, userId, found.workspaceId);
+    ({ role: viewerRole } = await assertWorkspaceMembership(db, userId, found.workspaceId));
   } catch {
     throw pillarNotFound();
   }
   const { workspace, ...tag } = found;
-  return { ...tag, workspaceId: found.workspaceId, workspaceSlug: workspace.slug };
+  return { ...tag, workspaceId: found.workspaceId, workspaceSlug: workspace.slug, viewerRole };
 }
 
 /**
@@ -187,7 +190,7 @@ export async function listPillars({
   includeArchived?: boolean;
 }) {
   await assertWorkspaceMembership(db, userId, workspaceId);
-  return db.tag.findMany({
+  const pillars = await db.tag.findMany({
     where: {
       workspaceId,
       category: PILLAR_CATEGORY,
@@ -200,10 +203,13 @@ export async function listPillars({
       color: true,
       description: true,
       archivedAt: true,
+      driUserId: true,
       positions: { select: { positionId: true } },
     },
     orderBy: { name: "asc" },
   });
+  // A Pillar with no DRI is flagged in the Pillars list as on its page (ADR-0087).
+  return pillars.map((pillar) => ({ ...pillar, hasNoDri: pillar.driUserId === null }));
 }
 
 /**
@@ -278,6 +284,66 @@ export async function setPillarPositions({
     }),
   ]);
   return { positionIds: ids };
+}
+
+/**
+ * Set or clear a Pillar's DRI: the one person accountable for it, and the
+ * person told when one of its Metrics breaches or goes stale (ADR-0087).
+ * Admin-only, like the rest of a Pillar's settings. The DRI must be a human
+ * member of the Pillar's workspace: a notification to an agent's inbox
+ * reaches nobody. Separate from the Pillar's Positions, which stay display-only.
+ */
+export async function setPillarDri({
+  db,
+  userId,
+  tagId,
+  driUserId,
+}: {
+  db: PrismaClient;
+  userId: string;
+  tagId: string;
+  driUserId: string | null;
+}): Promise<{ driUserId: string | null }> {
+  const tag = await db.tag.findUnique({ where: { id: tagId } });
+  if (!tag || tag.category !== PILLAR_CATEGORY || !tag.workspaceId) throw pillarNotFound();
+  await assertWorkspaceRole(db, userId, tag.workspaceId, PILLAR_ADMIN_ROLES);
+  if (driUserId) {
+    const dri = await db.user.findFirst({
+      where: { id: driUserId, workspaceMemberships: { some: { workspaceId: tag.workspaceId } } },
+      select: { id: true, isAgent: true },
+    });
+    if (!dri) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "A Pillar's DRI must be a member of its workspace",
+      });
+    }
+    if (dri.isAgent) {
+      throw new TRPCError({
+        code: "BAD_REQUEST",
+        message: "A Pillar's DRI must be a person, not an agent",
+      });
+    }
+  }
+  await db.tag.update({ where: { id: tagId }, data: { driUserId } });
+  return { driUserId };
+}
+
+/**
+ * A member removed from a workspace stops being the DRI of its Pillars, so
+ * those Pillars are flagged "No DRI" again and nobody outside the workspace is
+ * told about its Metrics (ADR-0087). Deleting the user clears it through the
+ * foreign key; this covers removal from the workspace alone.
+ */
+export async function clearPillarDriForRemovedMember(
+  db: PrismaClient,
+  userId: string,
+  workspaceId: string,
+): Promise<void> {
+  await db.tag.updateMany({
+    where: { workspaceId, driUserId: userId },
+    data: { driUserId: null },
+  });
 }
 
 /**
@@ -430,6 +496,7 @@ export async function getPillarPage(input: PillarPageInput) {
   } satisfies Prisma.ActionWhereInput;
 
   const [
+    dri,
     positions,
     goals,
     projects,
@@ -441,6 +508,10 @@ export async function getPillarPage(input: PillarPageInput) {
     recurring,
     resources,
   ] = await Promise.all([
+    // The one person accountable for the Pillar (ADR-0087), if set.
+    pillar.driUserId
+      ? db.user.findUnique({ where: { id: pillar.driUserId }, select: userSelect })
+      : Promise.resolve(null),
     // Who is accountable: Positions and their holders, readable by any member.
     db.pillarPosition.findMany({
       where: { tagId },
@@ -472,6 +543,23 @@ export async function getPillarPage(input: PillarPageInput) {
         period: true,
         dueDate: true,
         driUser: { select: userSelect },
+        // Every key result of the objective, finished ones too: an achieved
+        // key result still tells the reader how the goal is going.
+        keyResults: {
+          select: {
+            id: true,
+            title: true,
+            currentValue: true,
+            targetValue: true,
+            startValue: true,
+            unit: true,
+            unitLabel: true,
+            status: true,
+            statusOverride: true,
+            driUser: { select: userSelect },
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
       orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { title: "asc" }],
     }),
@@ -604,6 +692,9 @@ export async function getPillarPage(input: PillarPageInput) {
       description: pillar.description,
       archivedAt: pillar.archivedAt,
       workspaceId,
+      // Whether the viewer may rename it and edit its description in place
+      // (`tag.update` asks for the same write role).
+      canEdit: canEditWorkspaceContent(pillar.viewerRole),
     },
     positions: positions.map(({ position: { holders, ...position } }) => ({
       ...position,
@@ -611,6 +702,9 @@ export async function getPillarPage(input: PillarPageInput) {
     })),
     // A Pillar nobody is accountable for is flagged on its page.
     hasNoPosition: positions.length === 0,
+    // The Pillar's single DRI, shown apart from its Positions (ADR-0087).
+    dri,
+    hasNoDri: dri === null,
     goals,
     projects,
     epics,
