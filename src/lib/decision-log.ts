@@ -48,6 +48,8 @@ export interface LogRow {
   source: LogSource;
   /** Product the row belongs to; null = workspace-wide. */
   productId: string | null;
+  /** Pillars and labels on the row. Always empty for an ADR, which carries none. */
+  tagIds: string[];
   group: LogGroup;
   href: string;
   /** Sort key within a group: repo+number for ADRs, number for decisions. */
@@ -77,6 +79,7 @@ export interface DecisionRowInput {
   productId: string | null;
   occurrence: { id: string; ceremony: { id: string; name: string } } | null;
   project: { id: string; name: string } | null;
+  tags?: ReadonlyArray<{ id: string }>;
 }
 
 export function decisionSourceFacet(source: DecisionRowInput["source"]): LogSource {
@@ -112,6 +115,7 @@ export function adrToLogRow(adr: AdrRowInput, workspaceSlug: string): LogRow {
     decidedAt: adr.decidedAt,
     source: "code",
     productId: adr.productId,
+    tagIds: [],
     group: {
       key: `repo:${adr.repositoryId}`,
       kind: "repository",
@@ -132,6 +136,7 @@ export function decisionToLogRow(decision: DecisionRowInput, workspaceSlug: stri
     decidedAt: decision.decidedAt,
     source: decisionSourceFacet(decision.source),
     productId: decision.productId,
+    tagIds: (decision.tags ?? []).map((tag) => tag.id),
     group: decisionGroup(decision),
     href: `/w/${workspaceSlug}/decisions/d/${decision.id}`,
     order: decision.number,
@@ -155,12 +160,23 @@ export interface LogFilters {
   query: string;
   /** Ids whose body matched the query server-side, unioned in. */
   bodyMatchIds?: ReadonlySet<string>;
+  /**
+   * The Pillar and label picked in the log's two facets. A row must carry
+   * every one, so an ADR (which carries none) never matches a non-empty list.
+   */
+  tagIds?: readonly string[];
+}
+
+/** True when the row carries every tag in `tagIds` (vacuously for none). */
+export function carriesTags(row: Pick<LogRow, "tagIds">, tagIds: readonly string[] = []): boolean {
+  return tagIds.every((id) => row.tagIds.includes(id));
 }
 
 export function filterLogRows(rows: LogRow[], filters: LogFilters): LogRow[] {
   return rows.filter((row) => {
     if (filters.source !== "all" && row.source !== filters.source) return false;
     if (filters.status !== "all" && row.status !== filters.status) return false;
+    if (!carriesTags(row, filters.tagIds)) return false;
     if (!filters.query) return true;
     return (
       `${row.label ?? ""} ${row.title}`.toLowerCase().includes(filters.query) ||

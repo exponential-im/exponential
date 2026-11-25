@@ -26,6 +26,7 @@ const tagEntityTypeSchema = z.enum([
   "goal",
   "resource",
   "recurringTask",
+  "decision",
 ]);
 
 /**

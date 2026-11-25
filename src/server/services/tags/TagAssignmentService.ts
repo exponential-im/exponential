@@ -6,8 +6,11 @@ import {
   assertWorkspaceWriteRole,
   buildSharedResourceWhere,
   canEditAction,
+  canEditDecision,
   canEditProject,
+  canViewDecision,
   getActionAccess,
+  getDecisionAccess,
   getProjectAccess,
   hasProjectAccess,
 } from "~/server/services/access";
@@ -21,7 +24,8 @@ export type TagEntityType =
   | "project"
   | "goal"
   | "resource"
-  | "recurringTask";
+  | "recurringTask"
+  | "decision";
 
 /**
  * Entities that take Pillars only, never ordinary labels (ADR-0086): a
@@ -66,7 +70,8 @@ interface SetEntityTagsResult {
  * read (`"view"`) or change (`"edit"`) its tags. For a ticket, feature or
  * epic that is workspace membership to read and a write role to change: a
  * read-only viewer sees tags but never sets them. An action is gated on its
- * own edit rule either way.
+ * own edit rule either way. A decision follows its own resolver: its tags are
+ * read by whoever may read it, and set by whoever may edit it.
  */
 async function resolveEntity(
   db: PrismaClient,
@@ -249,6 +254,34 @@ async function resolveEntity(
       return {
         workspaceId: task.workspaceId,
         currentTagIds: task.pillarTags.map((t) => t.tagId),
+      };
+    }
+    case "decision": {
+      const decision = await db.decision.findUnique({
+        where: { id: entityId },
+        select: {
+          workspaceId: true,
+          projectId: true,
+          reviewState: true,
+          transcriptionSession: {
+            select: { id: true, userId: true, projectId: true, workspaceId: true },
+          },
+          tags: { select: { tagId: true }, orderBy: { createdAt: "asc" } },
+        },
+      });
+      if (!decision) throwNotFound("Decision");
+      const access = await getDecisionAccess(db, userId, decision);
+      // A decision the caller cannot read stays hidden.
+      if (!canViewDecision(access)) throwNotFound("Decision");
+      if (level === "edit" && !canEditDecision(access)) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You don't have permission to tag this decision",
+        });
+      }
+      return {
+        workspaceId: decision.workspaceId,
+        currentTagIds: decision.tags.map((t) => t.tagId),
       };
     }
   }
@@ -476,6 +509,19 @@ async function applyTagSet(
           });
         }
         return;
+      case "decision":
+        if (toRemove.length > 0) {
+          await tx.decisionTag.deleteMany({
+            where: { decisionId: entityId, tagId: { in: toRemove } },
+          });
+        }
+        if (toAdd.length > 0) {
+          await tx.decisionTag.createMany({
+            data: toAdd.map((tagId) => ({ decisionId: entityId, tagId })),
+            skipDuplicates: true,
+          });
+        }
+        return;
     }
   });
 }
@@ -545,6 +591,14 @@ async function loadTagsForEntity(
     case "recurringTask": {
       const rows = await db.recurringTaskTag.findMany({
         where: { recurringTaskId: entityId },
+        include: { tag: true },
+        orderBy: { createdAt: "asc" },
+      });
+      return rows.map((r) => r.tag);
+    }
+    case "decision": {
+      const rows = await db.decisionTag.findMany({
+        where: { decisionId: entityId },
         include: { tag: true },
         orderBy: { createdAt: "asc" },
       });

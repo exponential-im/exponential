@@ -59,6 +59,7 @@ describe("confirmDraft", () => {
     getDecisionAccess.mockReset();
     canEditDecision.mockReset();
     db.$transaction.mockImplementation(async (fn: unknown) => (fn as (tx: PrismaClient) => Promise<unknown>)(db));
+    db.decisionTag.findMany.mockResolvedValue([] as never);
   });
 
   it("refuses to confirm a rejected draft", async () => {
@@ -107,5 +108,47 @@ describe("confirmDraft", () => {
     expect(db.decision.deleteMany).toHaveBeenCalledWith({
       where: { id: "draft-1", workspaceId: WORKSPACE_ID, reviewState: "DRAFT" },
     });
+    expect(db.decisionTag.createMany).not.toHaveBeenCalled();
+  });
+
+  it("moves the draft's Pillars and labels to the decision it resolves", async () => {
+    db.decision.findFirst
+      .mockResolvedValueOnce({ ...DRAFT, supersededById: "open-1" } as never)
+      .mockResolvedValueOnce(TARGET as never);
+    getDecisionAccess.mockResolvedValue({ hasMeeting: true, canEditMeeting: true });
+    canEditDecision.mockReturnValue(true);
+    db.decision.update.mockResolvedValue({ ...TARGET, status: "ACCEPTED", supersededBy: null } as never);
+    db.decision.deleteMany.mockResolvedValue({ count: 1 } as never);
+    db.decisionTag.findMany.mockResolvedValue([{ tagId: "tag-dq" }, { tagId: "tag-bug" }] as never);
+
+    await confirmDraft(db, { decisionId: "draft-1", workspaceId: WORKSPACE_ID, userId: "u-1", principal: HUMAN });
+
+    // Deleting the draft cascades to its tag rows, so they are read first and
+    // added to the target's own; a tag it already carries is not duplicated.
+    expect(db.decisionTag.findMany.mock.invocationCallOrder[0]!).toBeLessThan(
+      db.decision.deleteMany.mock.invocationCallOrder[0]!,
+    );
+    expect(db.decisionTag.createMany).toHaveBeenCalledWith({
+      data: [
+        { decisionId: "open-1", tagId: "tag-dq" },
+        { decisionId: "open-1", tagId: "tag-bug" },
+      ],
+      skipDuplicates: true,
+    });
+  });
+
+  it("moves no tags when another confirm absorbed the draft first", async () => {
+    db.decision.findFirst
+      .mockResolvedValueOnce({ ...DRAFT, supersededById: "open-1" } as never)
+      .mockResolvedValueOnce(TARGET as never);
+    getDecisionAccess.mockResolvedValue({ hasMeeting: true, canEditMeeting: true });
+    canEditDecision.mockReturnValue(true);
+    db.decision.deleteMany.mockResolvedValue({ count: 0 } as never);
+    db.decision.findUniqueOrThrow.mockResolvedValue(TARGET as never);
+    db.decisionTag.findMany.mockResolvedValue([{ tagId: "tag-dq" }] as never);
+
+    await confirmDraft(db, { decisionId: "draft-1", workspaceId: WORKSPACE_ID, userId: "u-1", principal: HUMAN });
+
+    expect(db.decisionTag.createMany).not.toHaveBeenCalled();
   });
 });

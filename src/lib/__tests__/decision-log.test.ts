@@ -8,6 +8,7 @@ import { describe, it, expect } from "vitest";
 import {
   adrToLogRow,
   agentDecisionAuthor,
+  carriesTags,
   decisionGroup,
   decisionSourceFacet,
   decisionToLogRow,
@@ -119,6 +120,30 @@ describe("filterLogRows", () => {
     expect(
       filterLogRows(rows, { source: "all", status: "all", query: "zzz", bodyMatchIds: new Set(["adr-1"]) }).map((r) => r.id),
     ).toEqual(["adr-1"]);
+  });
+});
+
+describe("Pillar and label filters", () => {
+  const rows = [
+    adrToLogRow(adr(), "acme"),
+    decisionToLogRow(decision({ tags: [{ id: "pillar-dq" }, { id: "label-bug" }] }), "acme"),
+    decisionToLogRow(decision({ id: "dec-2", number: 2, tags: [{ id: "pillar-dq" }] }), "acme"),
+    decisionToLogRow(decision({ id: "dec-3", number: 3 }), "acme"),
+  ];
+  const filter = (tagIds: string[]) =>
+    filterLogRows(rows, { source: "all", status: "all", query: "", tagIds }).map((r) => r.id);
+
+  it("keeps the decisions that carry the tag, and drops every ADR", () => {
+    expect(filter(["pillar-dq"])).toEqual(["dec-1", "dec-2"]);
+  });
+
+  it("a Pillar and a label together need both", () => {
+    expect(filter(["pillar-dq", "label-bug"])).toEqual(["dec-1"]);
+  });
+
+  it("no tag picked filters nothing, ADRs included", () => {
+    expect(filter([])).toEqual(["adr-1", "dec-1", "dec-2", "dec-3"]);
+    expect(carriesTags(adrToLogRow(adr(), "acme"), [])).toBe(true);
   });
 });
 

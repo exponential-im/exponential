@@ -763,6 +763,13 @@
             "type": "integer",
             "minimum": 1
           },
+          "tagIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50
+          },
           "limit": {
             "type": "integer",
             "minimum": 1,

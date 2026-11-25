@@ -3241,6 +3241,7 @@ model Tag {
   features  FeatureTag[]
   epics     EpicTag[]
   insights  InsightTag[]
+  decisions DecisionTag[]
   projects  ProjectTag[]
   goals     GoalTag[]
   resources ResourceTag[]
@@ -6732,6 +6733,8 @@ model Decision {
   adrDocument          AdrDocument?          @relation(fields: [adrDocumentId], references: [id], onDelete: SetNull)
   deciders             DecisionDecider[]
   links                DecisionLink[]
+  /// Pillars and labels on the decision (ADR-0086). ADRs carry none.
+  tags                 DecisionTag[]
 
   @@unique([workspaceId, number])
   @@index([workspaceId, status])
@@ -6741,6 +6744,20 @@ model Decision {
   @@index([projectId])
   @@index([productId])
   @@index([reviewState])
+}
+
+/// A Pillar or label on a Decision (ADR-0086). Same shape as TicketTag.
+model DecisionTag {
+  id         String   @id @default(cuid())
+  decisionId String
+  tagId      String
+  createdAt  DateTime @default(now())
+
+  decision Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  tag      Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([decisionId, tagId])
+  @@index([tagId])
 }
 
 /// Who made the decision. A decider may be an external meeting participant

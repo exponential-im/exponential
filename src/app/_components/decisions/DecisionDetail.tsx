@@ -20,6 +20,7 @@ import { DecisionActionsPanel } from "~/app/_components/decisions/DecisionAction
 import { DecisionLinksPanel } from "~/app/_components/decisions/DecisionLinksPanel";
 import { DecisionScopePanel } from "~/app/_components/decisions/DecisionScopePanel";
 import { DecisionStatusMenu } from "~/app/_components/decisions/DecisionStatusMenu";
+import { DecisionTags } from "~/app/_components/decisions/DecisionTags";
 import { DraftAdrButton } from "~/app/_components/decisions/DraftAdrModal";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
 import { relativeTime } from "~/app/_components/home/activity/activityRow";
@@ -203,6 +204,12 @@ export function DecisionDetail({
               </Text>
             ) : null}
           </Group>
+          <DecisionTags
+            workspaceId={workspaceId}
+            workspaceSlug={workspaceSlug}
+            decisionId={decision.id}
+            canEdit={decision.canEdit}
+          />
         </div>
         <Group gap="xs" wrap="nowrap" className="shrink-0">
           {decision.status === "ACCEPTED" ? (

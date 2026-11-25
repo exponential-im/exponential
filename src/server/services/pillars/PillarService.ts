@@ -6,6 +6,7 @@
  * Membership on the page is a read rule, never a write: an item belongs to a
  * Pillar when it carries the Pillar's tag itself, or when its Project or Epic
  * does. Adding or removing a container's Pillar never touches its contents.
+ * A Decision belongs only when it carries the tag itself.
  *
  * Every section is filtered with the existing access builders, so a viewer
  * sees on a Pillar page only what they could already see elsewhere.
@@ -17,6 +18,7 @@ import {
   assertWorkspaceMembership,
   assertWorkspaceRole,
   buildActionAccessWhere,
+  buildDecisionAccessWhere,
   buildSharedResourceWhere,
   buildTicketAccessWhere,
   buildWorkspaceProjectAccessWhere,
@@ -25,6 +27,7 @@ import {
 } from "~/server/services/access";
 import { PILLAR_CATEGORY } from "~/types/tag";
 import { suggestPillars } from "~/lib/pillars/suggestPillars";
+import { formatDecisionLabel } from "~/lib/decision-label";
 
 /** Workspace roles that may promote, demote or archive a Pillar. */
 export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
@@ -39,6 +42,8 @@ const CLOSED_TICKET_STATUSES = ["DONE", "DEPLOYED", "ARCHIVED"] as const;
 const CLOSED_EPIC_STATUSES = ["DONE", "CANCELLED"] as const;
 /** Objective statuses that count as finished on a Pillar page. */
 const CLOSED_GOAL_STATUSES = ["completed", "archived"];
+/** Decision statuses that no longer stand: replaced or withdrawn. */
+const CLOSED_DECISION_STATUSES = ["SUPERSEDED", "DEPRECATED"] as const;
 /** How many open Actions to list under each Project on the page. */
 const CONTAINER_WORK_LIMIT = 10;
 
@@ -507,6 +512,7 @@ export async function getPillarPage(input: PillarPageInput) {
     inheritedTickets,
     recurring,
     resources,
+    decisions,
   ] = await Promise.all([
     // The one person accountable for the Pillar (ADR-0087), if set.
     pillar.driUserId
@@ -679,6 +685,26 @@ export async function getPillarPage(input: PillarPageInput) {
       },
       orderBy: { createdAt: "desc" },
     }),
+    // Decisions that carry the Pillar themselves, through the decision
+    // resolver: confirmed ones the viewer may read. ADRs carry no tags.
+    db.decision.findMany({
+      where: {
+        AND: [
+          buildDecisionAccessWhere(userId, workspaceId),
+          { tags: carriesTag },
+          includeCompleted ? {} : { status: { notIn: [...CLOSED_DECISION_STATUSES] } },
+        ],
+      },
+      select: {
+        id: true,
+        number: true,
+        statement: true,
+        status: true,
+        decidedAt: true,
+        owner: { select: userSelect },
+      },
+      orderBy: [{ decidedAt: { sort: "desc", nulls: "last" } }, { number: "desc" }],
+    }),
   ]);
 
   return {
@@ -715,6 +741,10 @@ export async function getPillarPage(input: PillarPageInput) {
     inheritedWork: { actions: inheritedActions, tickets: inheritedTickets },
     recurring,
     resources,
+    decisions: decisions.map((decision) => ({
+      ...decision,
+      label: formatDecisionLabel(decision.number),
+    })),
   };
 }
 

@@ -91,6 +91,7 @@ describe("accepting sets the decider", () => {
   beforeEach(() => {
     db = mockDeep<PrismaClient>();
     mockReset(db);
+    db.decisionTag.findMany.mockResolvedValue([] as never);
     recordActivity.mockClear();
     getDecisionAccess.mockReset();
     canEditDecision.mockReset();
