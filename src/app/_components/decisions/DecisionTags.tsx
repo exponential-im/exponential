@@ -105,9 +105,12 @@ export function DecisionTags({ workspaceId, workspaceSlug, decisionId, canEdit }
               color="gray"
               size="compact-xs"
               leftSection={<IconPencil size={12} />}
+              // Saving replaces the whole set, so the editor waits for the
+              // current one: a draft started empty would clear it.
+              disabled={!current.isSuccess}
               onClick={open}
             >
-              {currentTags.length === 0 ? "Add Pillars or labels" : "Edit"}
+              {current.isSuccess && currentTags.length === 0 ? "Add Pillars or labels" : "Edit"}
             </Button>
           </Popover.Target>
           <Popover.Dropdown>
