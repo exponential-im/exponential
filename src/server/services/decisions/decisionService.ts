@@ -1050,7 +1050,8 @@ export async function setStatus(db: PrismaClient, input: SetStatusInput) {
  * `supersededById`. Confirming applies the status change to that decision
  * — accepted, with the draft's statement and quotes folded into its body
  * and (same meeting) its evidence — and removes the draft row, so the log
- * gains an answer, not a duplicate (ADR-0060 decision 4). A target that is
+ * gains an answer, not a duplicate (ADR-0060 decision 4). The draft's Pillars
+ * and labels move to that decision too, added to its own. A target that is
  * no longer open keeps its status; the draft is still absorbed. An explicit
  * `status` from the reviewer wins over both, and when the result is
  * ACCEPTED the reviewer claims the decider seat if nobody human holds it.
@@ -1134,12 +1135,24 @@ async function applyDraftResolution(
       ? await claimDeciderWrite(db, userId, target.deciders)
       : undefined;
   const decision = await db.$transaction(async (tx) => {
+    // Read before the delete: removing the draft cascades to its tag rows.
+    const draftTags = await tx.decisionTag.findMany({
+      where: { decisionId: draft.id },
+      select: { tagId: true },
+    });
     // Claim the draft first, conditionally: of two concurrent confirms only
     // one removes it, and only that one rewrites the target.
     const { count } = await tx.decision.deleteMany({
       where: { id: draft.id, workspaceId: draft.workspaceId, reviewState: "DRAFT" },
     });
     if (count === 0) return null;
+    // Pillars and labels a reviewer put on the draft stay with the answer.
+    if (draftTags.length > 0) {
+      await tx.decisionTag.createMany({
+        data: draftTags.map(({ tagId }) => ({ decisionId: target.id, tagId })),
+        skipDuplicates: true,
+      });
+    }
     return tx.decision.update({
       where: { id: target.id, workspaceId: draft.workspaceId },
       data: {

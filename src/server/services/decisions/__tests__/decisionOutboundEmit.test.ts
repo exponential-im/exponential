@@ -52,6 +52,7 @@ let db: DeepMockProxy<PrismaClient>;
 beforeEach(() => {
   db = mockDeep<PrismaClient>();
   mockReset(db);
+  db.decisionTag.findMany.mockResolvedValue([] as never);
   emitOutboundPost.mockClear();
   emitOutboundPost.mockResolvedValue([]);
   db.user.findUnique.mockResolvedValue({ id: USER, name: "Dev", email: "dev@example.test", isAgent: false } as never);

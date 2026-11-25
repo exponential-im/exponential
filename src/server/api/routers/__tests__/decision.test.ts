@@ -153,6 +153,8 @@ describe("decision router", () => {
     db = getDbMock();
     mockReset(db);
     db.workspaceActivityEvent.create.mockResolvedValue({} as never);
+    // A draft carries no Pillars or labels unless a test says so.
+    db.decisionTag.findMany.mockResolvedValue([] as never);
   });
 
   describe("extractDrafts (V2)", () => {
