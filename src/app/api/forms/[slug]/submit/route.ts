@@ -7,6 +7,7 @@ import {
   validateSubmission,
 } from "~/server/services/forms/formSchema";
 import { runFormDestinations } from "~/server/services/forms/runDestinations";
+import { insightStatusRefFromOutcomes } from "~/server/services/forms/insightStatus";
 import { emailHashFor } from "~/server/services/crm/createCrmContact";
 import { isTooFastSubmission } from "~/server/services/forms/timeTrap";
 import {
@@ -170,8 +171,17 @@ export async function POST(
     },
   });
 
+  // Only for a form whose create_insight destination opted in (`exposeStatus`):
+  // the capability the submitter later trades for that insight's triage state.
+  const insightRef = insightStatusRefFromOutcomes(
+    form.slug,
+    form.destinations,
+    outcomes,
+  );
+
   return NextResponse.json({
     ok: true,
     confirmationMessage: form.confirmationMessage ?? null,
+    ...(insightRef ? { insightRef } : {}),
   });
 }

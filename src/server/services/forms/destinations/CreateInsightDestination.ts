@@ -5,6 +5,14 @@ import {
   type FormDestinationContext,
 } from "./IFormDestination";
 
+/**
+ * The `source` stamp on insights a form creates. Shared with the insight status
+ * reader, which filters on it, so the write and read side cannot drift apart.
+ */
+export function formInsightSource(slug: string): string {
+  return `form:${slug}`;
+}
+
 interface InsightFieldMap {
   title?: string;
   body?: string;
@@ -97,7 +105,7 @@ export class CreateInsightDestination implements IFormDestination {
     // filter but lose identity, and could collide with hand-typed sources).
     const slug =
       context.formSlug.length > 0 ? context.formSlug : context.formId;
-    const source = `form:${slug}`;
+    const source = formInsightSource(slug);
 
     const insight = await this.db.insight.create({
       data: {
