@@ -450,6 +450,15 @@ export const decisionListSelect = {
   supersededBy: { select: { id: true, number: true } },
   // Names who logged an AGENT row: Zoe, or the External agent / Assistant.
   createdBy: { select: { name: true, isAgent: true } },
+  // Pillars and labels, for the Decision Log's two facets (ADR-0086).
+  tags: {
+    select: {
+      tag: {
+        select: { id: true, name: true, slug: true, color: true, category: true, archivedAt: true },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  },
   _count: { select: { links: true, deciders: true } },
 } satisfies Prisma.DecisionSelect;
 
@@ -467,6 +476,8 @@ export interface ListDecisionsFilter {
   search?: string;
   /** One decision by its workspace sequence number — resolves a `D-0003` label. */
   number?: number;
+  /** Decisions carrying at least one of these Pillars or labels. */
+  tagIds?: string[];
   /**
    * Bound the page. Unset keeps the historical uncapped behaviour for the
    * Decision Log, which renders the whole list; API callers looking one
@@ -502,6 +513,7 @@ export async function listForWorkspace(
         filter.projectId ? { projectId: filter.projectId } : {},
         filter.occurrenceId ? { occurrenceId: filter.occurrenceId } : {},
         filter.number !== undefined ? { number: filter.number } : {},
+        filter.tagIds?.length ? { tags: { some: { tagId: { in: filter.tagIds } } } } : {},
         search
           ? {
               OR: [
@@ -518,6 +530,7 @@ export async function listForWorkspace(
   });
   return rows.map((row) => ({
     ...row,
+    tags: row.tags.map((t) => t.tag),
     label: formatDecisionLabel(row.number),
     evidenceCount: Array.isArray(row.evidence) ? row.evidence.length : 0,
     supersededBy: row.supersededBy
@@ -554,6 +567,7 @@ export async function listForMeeting(
   });
   return rows.map((row) => ({
     ...row,
+    tags: row.tags.map((t) => t.tag),
     label: formatDecisionLabel(row.number),
     evidenceCount: Array.isArray(row.evidence) ? row.evidence.length : 0,
     supersededBy: row.supersededBy
@@ -1519,6 +1533,7 @@ export async function listForFeature(
   });
   return rows.map((row) => ({
     ...row,
+    tags: row.tags.map((t) => t.tag),
     label: formatDecisionLabel(row.number),
     evidenceCount: Array.isArray(row.evidence) ? row.evidence.length : 0,
     supersededBy: row.supersededBy
@@ -1543,6 +1558,7 @@ export async function listForAdr(
   });
   return rows.map((row) => ({
     ...row,
+    tags: row.tags.map((t) => t.tag),
     label: formatDecisionLabel(row.number),
     evidenceCount: Array.isArray(row.evidence) ? row.evidence.length : 0,
     supersededBy: row.supersededBy

@@ -330,6 +330,27 @@ describe("decision router", () => {
       const unfiltered = db.decision.findMany.mock.calls[0]![0]!.where as { AND: Array<Record<string, unknown>> };
       expect(unfiltered.AND.some((clause) => "occurrenceId" in clause)).toBe(false);
     });
+
+    it("narrows to decisions carrying any of the given Pillars or labels, and returns each row's tags", async () => {
+      withWorkspaceRole(db, "member");
+      const tag = { id: "tag-dq", name: "Data Quality", slug: "data-quality", color: "avatar-blue", category: "pillar", archivedAt: null };
+      db.decision.findMany.mockResolvedValue([
+        { id: "dec-1", number: 1, statement: "Ship it", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [{ tag }] },
+      ] as never);
+
+      const rows = await caller(db).decision.list({ workspaceId: WORKSPACE_ID, tagIds: ["tag-dq", "tag-bug"] });
+
+      const where = db.decision.findMany.mock.calls[0]![0]!.where as { AND: Array<Record<string, unknown>> };
+      expect((where.AND[0] as { workspaceId: string }).workspaceId).toBe(WORKSPACE_ID);
+      expect(where.AND).toContainEqual({ tags: { some: { tagId: { in: ["tag-dq", "tag-bug"] } } } });
+      expect(rows[0]!.tags).toEqual([tag]);
+
+      // Absent or empty, no tag clause is added.
+      db.decision.findMany.mockClear();
+      await caller(db).decision.list({ workspaceId: WORKSPACE_ID, tagIds: [] });
+      const unfiltered = db.decision.findMany.mock.calls[0]![0]!.where as { AND: Array<Record<string, unknown>> };
+      expect(unfiltered.AND.some((clause) => "tags" in clause)).toBe(false);
+    });
   });
 
   describe("create", () => {
@@ -1478,8 +1499,8 @@ describe("decision router", () => {
     it("labels rows with their D-number", async () => {
       withWorkspaceRole(db, "member");
       db.decision.findMany.mockResolvedValue([
-        { id: "dec-1", number: 1, statement: "Ship it", status: "ACCEPTED", evidence: [], supersededBy: null },
-        { id: "dec-4", number: 4, statement: "Which store?", status: "OPEN", evidence: null, supersededBy: null },
+        { id: "dec-1", number: 1, statement: "Ship it", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [] },
+        { id: "dec-4", number: 4, statement: "Which store?", status: "OPEN", evidence: null, supersededBy: null, tags: [] },
       ] as never);
 
       const rows = await caller(db).decision.listForFeature({

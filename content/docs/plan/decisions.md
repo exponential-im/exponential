@@ -4,7 +4,7 @@ description: "The Decision Log: every choice your workspace made, where it came 
 section: plan
 order: 4
 icon: IconFlag
-updated: 2026-11-15
+updated: 2026-11-25
 ---
 
 A decision is a recorded choice: one line saying what was decided, the context and alternatives behind it, who decided and when, and where it came from, whether a meeting, a person, or an agent. The Decision Log keeps them beside the architecture decision records (ADRs) of the repositories your workspace tracks, so "why did we do it this way?" has one answer for product and engineering alike. An open question is simply a decision that has not been made yet.
@@ -19,6 +19,7 @@ A decision is a recorded choice: one line saying what was decided, the context a
 
 - Filter by status: **All**, **Accepted**, **Superseded**, **Proposed**, **Open**.
 - Filter by source: **Code** (ADRs projected from git, read-only), **Meeting** (extracted from a transcript), **Manual** (logged by hand or by an agent).
+- Filter by **Pillar** or **label**: **All Pillars** and **All labels** list what the decisions in view carry. Pick both to see decisions that carry both. ADRs are files in git and carry neither, so they are hidden while either filter is on.
 - **Grouped** puts decisions under their repository, ceremony or project; **Flat** is one list. **All products** narrows to one product.
 - Search matches statements and bodies.
 
@@ -31,12 +32,13 @@ Decisions are numbered from a workspace sequence (`D-0042`); ADRs keep their rep
 3. Fill in the body under the headings the editor offers: **Context**, **Alternatives considered**, **Consequences**. **Preview** renders it.
 4. Click **Log decision**.
 
-The decision's page shows the statement, who decided (**Deciders**, **Owner**) and where (the ceremony or meeting), the **Evidence** quotes, the body, and four controls:
+The decision's page shows the statement, who decided (**Deciders**, **Owner**) and where (the ceremony or meeting), the **Evidence** quotes, the body, and five controls:
 
 ![A decision's page, with its evidence and links](/doc-assets/decision.png)
 
 - **Change status** — move it through the lifecycle below.
 - **Edit scope** — attach it to a **Product**, **Project**, **Objective** or **Key result**.
+- **Add Pillars or labels** — file it under one or more Pillars, and label it. Each Pillar's page lists its decisions.
 - **Link ticket or feature** — record what implements it.
 - **Draft ADR** — turn it into an architecture decision record for a repository.
 

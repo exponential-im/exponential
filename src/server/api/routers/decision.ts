@@ -391,6 +391,8 @@ export const decisionRouter = createTRPCRouter({
         search: z.string().max(200).optional(),
         /** One decision by its workspace sequence number — `D-0003` → 3. */
         number: z.number().int().min(1).optional(),
+        /** Only decisions carrying at least one of these Pillars or labels. */
+        tagIds: z.array(z.string()).max(50).optional(),
         /** Bound the page. Unset returns the resolver-visible set uncapped. */
         limit: z.number().int().min(1).max(500).optional(),
       }),
@@ -409,6 +411,7 @@ export const decisionRouter = createTRPCRouter({
           occurrenceId: input.occurrenceId,
           search: input.search,
           number: input.number,
+          tagIds: input.tagIds,
           limit: input.limit,
         },
       );

@@ -27,8 +27,11 @@ import { WORKSPACE_PERMISSION_MAP, hasMinimumWorkspaceRole } from "~/server/serv
 import { LogDecisionModal } from "./LogDecisionModal";
 import { DecisionPeekDrawer, DecisionPeekProvider, usePeekLink } from "./DecisionPeek";
 import { adrStatusBadge, decisionStatusBadge, type PeekPreview } from "./DetailPreview";
+import { PillarIcon } from "~/app/_components/pillars/PillarIcon";
+import { isPillarTag } from "~/types/tag";
 import {
   agentDecisionAuthor,
+  carriesTags,
   decisionToLogRow,
   filterLogRows,
   groupLogRows,
@@ -49,6 +52,10 @@ import "./decisions-index.css";
  * Exponential-owned Decisions from `decision.list`, merged client-side under
  * a Source facet (Code / Meeting / Manual). ADRs keep their repository
  * headers; decisions group under the ceremony or project they came from.
+ *
+ * Decisions also carry Pillars and labels (ADR-0086), each a filter of its
+ * own. An ADR is a file in git and carries neither, so ADRs leave the list
+ * while either filter is on.
  *
  * Presentation follows the Decisions handoff: rows group under collapsible
  * repository headers (a Flat mode restores one list and is forced on while
@@ -271,6 +278,14 @@ function DecisionLogRow({
   if (isWorkspaceWide(decision)) {
     meta.push(<span className="dec-meta__ws">Workspace-wide</span>);
   }
+  for (const tag of decision.tags) {
+    meta.push(
+      <span className="dec-meta__link">
+        {isPillarTag(tag) ? <PillarIcon size={11} stroke={1.75} aria-label="Pillar" /> : null}
+        {tag.name}
+      </span>,
+    );
+  }
   if (decision.supersededBy) {
     meta.push(
       <span className="dec-meta__link">Superseded by {decision.supersededBy.label}</span>,
@@ -449,18 +464,24 @@ interface ScopeOption {
 }
 
 /**
- * The product scope, as a chip rather than a boxed select. Scoped: the
- * product name with a menu to re-point and an × to widen to the whole
- * workspace. Unscoped: a quiet "All products" menu trigger.
+ * One narrowing control (product, Pillar or label), as a chip rather than a
+ * boxed select. Set: the chosen name with a menu to re-point and an × to
+ * clear. Unset: a quiet "All products" style menu trigger.
  */
-function ProductScopeChip({
+function ScopeChip({
   value,
   options,
   onChange,
+  noun,
+  allLabel,
 }: {
   value: string | null;
   options: ScopeOption[];
   onChange: (value: string | null) => void;
+  /** What is being picked, lower case: "product", "Pillar", "label". */
+  noun: string;
+  /** The trigger's text while nothing is picked. */
+  allLabel: string;
 }) {
   const current = options.find((o) => o.value === value);
   const dropdown = (
@@ -477,8 +498,8 @@ function ProductScopeChip({
     return (
       <Menu shadow="md" width={240} position="bottom-end">
         <Menu.Target>
-          <button type="button" className="dec-scope dec-scope--off" aria-label="Scope to a product">
-            All products
+          <button type="button" className="dec-scope dec-scope--off" aria-label={`Filter by ${noun}`}>
+            {allLabel}
             <IconChevronDown size={12} stroke={1.75} />
           </button>
         </Menu.Target>
@@ -491,8 +512,8 @@ function ProductScopeChip({
     <span className="dec-scope">
       <Menu shadow="md" width={240} position="bottom-end">
         <Menu.Target>
-          <button type="button" className="dec-scope__pick" aria-label="Change product scope">
-            <b>{current?.label ?? "Product"}</b>
+          <button type="button" className="dec-scope__pick" aria-label={`Change ${noun} filter`}>
+            <b>{current?.label ?? noun}</b>
             <IconChevronDown size={12} stroke={1.75} />
           </button>
         </Menu.Target>
@@ -501,7 +522,7 @@ function ProductScopeChip({
       <button
         type="button"
         className="dec-scope__clear"
-        aria-label="Clear product scope"
+        aria-label={`Clear ${noun} filter`}
         onClick={() => onChange(null)}
       >
         <IconX size={12} stroke={1.75} />
@@ -538,6 +559,8 @@ export function DecisionsIndex({
   const [productFilter, setProductFilter] = useState<string | null>(
     defaultProductId ?? null,
   );
+  const [pillarFilter, setPillarFilter] = useState<string | null>(null);
+  const [labelFilter, setLabelFilter] = useState<string | null>(null);
   // "New decision" is the manual create path (ADR-0060). Viewers and guests
   // read the log but the create mutation gates at workspace edit, so the
   // button hides for them rather than failing on click.
@@ -620,40 +643,70 @@ export function DecisionsIndex({
     [decisions],
   );
 
+  // The Pillars and labels on the decisions in scope, by name: a filter only
+  // offers what would match something.
+  const { pillarOptions, labelOptions } = useMemo(() => {
+    const pillars = new Map<string, string>();
+    const labels = new Map<string, string>();
+    for (const decision of decisions ?? []) {
+      for (const tag of decision.tags) {
+        (isPillarTag(tag) ? pillars : labels).set(tag.id, tag.name);
+      }
+    }
+    const toOptions = (tags: Map<string, string>): ScopeOption[] =>
+      [...tags.entries()]
+        .map(([value, label]) => ({ value, label }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    return { pillarOptions: toOptions(pillars), labelOptions: toOptions(labels) };
+  }, [decisions]);
+
+  // A decision must carry the picked Pillar and the picked label. ADRs carry
+  // neither, so they leave the list (and every count) while a filter is on.
+  const tagFilterIds = useMemo(
+    () => [pillarFilter, labelFilter].filter((id): id is string => id !== null),
+    [pillarFilter, labelFilter],
+  );
+  const tagFilterOn = tagFilterIds.length > 0;
+  const scopedAdrs = useMemo(() => (tagFilterOn ? [] : (adrs ?? [])), [adrs, tagFilterOn]);
+  const scopedDecisionRows = useMemo(
+    () => decisionLogRows.filter((row) => carriesTags(row, tagFilterIds)),
+    [decisionLogRows, tagFilterIds],
+  );
+
   // Source counts follow the Status facet (and Status counts follow the
   // Source facet below), so each chip's number matches the rows on screen.
   const sourceCounts = useMemo(() => {
     const c = new Map<LogSource, number>();
     c.set(
       "code",
-      (adrs ?? []).filter((adr) => statusFilter === "all" || adr.status === statusFilter).length,
+      scopedAdrs.filter((adr) => statusFilter === "all" || adr.status === statusFilter).length,
     );
-    for (const row of decisionLogRows) {
+    for (const row of scopedDecisionRows) {
       if (statusFilter !== "all" && row.status !== statusFilter) continue;
       c.set(row.source, (c.get(row.source) ?? 0) + 1);
     }
     return c;
-  }, [adrs, decisionLogRows, statusFilter]);
+  }, [scopedAdrs, scopedDecisionRows, statusFilter]);
 
   // Status counts follow the Source facet so the numbers match the list.
   const counts = useMemo(() => {
     const c = new Map<LogStatus, number>();
     if (sourceFilter === "all" || sourceFilter === "code") {
-      for (const adr of adrs ?? []) c.set(adr.status, (c.get(adr.status) ?? 0) + 1);
+      for (const adr of scopedAdrs) c.set(adr.status, (c.get(adr.status) ?? 0) + 1);
     }
-    for (const row of decisionLogRows) {
+    for (const row of scopedDecisionRows) {
       if (sourceFilter !== "all" && row.source !== sourceFilter) continue;
       c.set(row.status, (c.get(row.status) ?? 0) + 1);
     }
     return c;
-  }, [adrs, decisionLogRows, sourceFilter]);
+  }, [scopedAdrs, scopedDecisionRows, sourceFilter]);
   const totalCount =
-    (sourceFilter === "all" || sourceFilter === "code" ? (adrs?.length ?? 0) : 0) +
-    decisionLogRows.filter((r) => sourceFilter === "all" || r.source === sourceFilter).length;
+    (sourceFilter === "all" || sourceFilter === "code" ? scopedAdrs.length : 0) +
+    scopedDecisionRows.filter((r) => sourceFilter === "all" || r.source === sourceFilter).length;
 
   const visible = useMemo(() => {
     if (sourceFilter !== "all" && sourceFilter !== "code") return [];
-    const rows = (adrs ?? []).filter((adr) => {
+    const rows = scopedAdrs.filter((adr) => {
       if (statusFilter !== "all" && adr.status !== statusFilter) return false;
       if (!q) return true;
       return (
@@ -662,7 +715,7 @@ export function DecisionsIndex({
       );
     });
     return [...rows].sort(compareRows);
-  }, [adrs, statusFilter, sourceFilter, q, bodyMatchIds]);
+  }, [scopedAdrs, statusFilter, sourceFilter, q, bodyMatchIds]);
 
   const visibleDecisions = useMemo(
     () =>
@@ -673,8 +726,9 @@ export function DecisionsIndex({
             status: statusFilter,
             query: q,
             bodyMatchIds,
+            tagIds: tagFilterIds,
           }),
-    [decisionLogRows, sourceFilter, statusFilter, q, bodyMatchIds],
+    [decisionLogRows, sourceFilter, statusFilter, q, bodyMatchIds, tagFilterIds],
   );
   const decisionGroups = useMemo(() => groupLogRows(visibleDecisions), [visibleDecisions]);
 
@@ -847,10 +901,12 @@ export function DecisionsIndex({
                 ))}
               </div>
               <div className="dec-bar__spacer" />
-              <ProductScopeChip
+              <ScopeChip
                 value={productFilter}
                 options={scopeOptions}
                 onChange={setProductFilter}
+                noun="product"
+                allLabel="All products"
               />
               <div className="dec-seg" role="group" aria-label="Grouping">
                 <button
@@ -900,7 +956,33 @@ export function DecisionsIndex({
                   </button>
                 ))}
               </div>
+              <div className="dec-bar__spacer" />
+              {/* Offered once a decision in scope carries one; an applied
+                  filter stays visible and clearable either way. */}
+              {pillarOptions.length > 0 || pillarFilter ? (
+                <ScopeChip
+                  value={pillarFilter}
+                  options={pillarOptions}
+                  onChange={setPillarFilter}
+                  noun="Pillar"
+                  allLabel="All Pillars"
+                />
+              ) : null}
+              {labelOptions.length > 0 || labelFilter ? (
+                <ScopeChip
+                  value={labelFilter}
+                  options={labelOptions}
+                  onChange={setLabelFilter}
+                  noun="label"
+                  allLabel="All labels"
+                />
+              ) : null}
             </div>
+            {tagFilterOn && (adrs?.length ?? 0) > 0 ? (
+              <div className="dec-bar__note">
+                ADRs are hidden: an ADR is a file in git and carries no Pillars or labels.
+              </div>
+            ) : null}
           </div>
 
           {isLoading ? (
@@ -927,7 +1009,7 @@ export function DecisionsIndex({
           ) : nothingVisible ? (
             <div className="dec-empty">
               <b>No decisions match</b>
-              Try a different status or source, or clear the search.
+              Try a different status, source, Pillar or label, or clear the search.
             </div>
           ) : effectiveGrouped ? (
             <>

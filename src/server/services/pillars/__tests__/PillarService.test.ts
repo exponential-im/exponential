@@ -14,6 +14,7 @@ vi.mock("~/server/services/access", () => ({
   assertWorkspaceRole: vi.fn(),
   buildActionAccessWhere: vi.fn(() => ({ actionAccess: true })),
   buildTicketAccessWhere: vi.fn(() => ({ ticketAccess: true })),
+  buildDecisionAccessWhere: vi.fn(() => ({ decisionAccess: true })),
   buildWorkspaceProjectAccessWhere: vi.fn(() => Promise.resolve({ projectAccess: true })),
   buildSharedResourceWhere: vi.fn(() => Promise.resolve({ sharedResource: true })),
   // The real rule: members and up may edit workspace content.
@@ -355,6 +356,7 @@ describe("getPillarPage", () => {
     db.epic.findMany.mockResolvedValue([] as never);
     db.pillarPosition.findMany.mockResolvedValue([] as never);
     db.recurringTask.findMany.mockResolvedValue([] as never);
+    db.decision.findMany.mockResolvedValue([] as never);
   });
 
   it("hides a tag that is not a Pillar", async () => {
@@ -507,6 +509,31 @@ describe("getPillarPage", () => {
         { workspaceId: WS, archivedAt: null },
         { pillarTags: { some: { tagId: "tag-devops" } } },
       ],
+    });
+  });
+
+  it("lists the standing decisions that carry the Pillar, through the decision resolver", async () => {
+    db.decision.findMany.mockResolvedValue([
+      { id: "dec-1", number: 12, statement: "Gate ingest on schema checks", status: "ACCEPTED", decidedAt: null, owner: null },
+    ] as never);
+
+    const page = await getPillarPage({ db, userId: USER, tagId: "tag-devops" });
+
+    expect(db.decision.findMany.mock.calls[0]![0]!.where).toEqual({
+      AND: [
+        { decisionAccess: true },
+        { tags: { some: { tagId: "tag-devops" } } },
+        { status: { notIn: ["SUPERSEDED", "DEPRECATED"] } },
+      ],
+    });
+    expect(page.decisions).toEqual([expect.objectContaining({ id: "dec-1", label: "D-0012" })]);
+  });
+
+  it("lists superseded and deprecated decisions too with Show completed", async () => {
+    await getPillarPage({ db, userId: USER, tagId: "tag-devops", includeCompleted: true });
+
+    expect(db.decision.findMany.mock.calls[0]![0]!.where).toEqual({
+      AND: [{ decisionAccess: true }, { tags: { some: { tagId: "tag-devops" } } }, {}],
     });
   });
 
