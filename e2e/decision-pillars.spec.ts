@@ -60,11 +60,15 @@ test.describe("Pillars and labels on Decisions", () => {
         createdById: fixture.userId,
       },
     });
-    const decision = (statement: string) =>
+    // Past every number the workspace counter hands out, and its own per
+    // run: `number` is unique in a workspace, and a run that died before
+    // its cleanup leaves its rows behind.
+    const firstNumber = 1_000_000 + (Date.now() % 1_000_000_000);
+    const decision = (statement: string, offset: number) =>
       db.decision.create({
         data: {
           workspaceId: workspace.id,
-          number: 90_000 + Math.floor(Math.random() * 9_000),
+          number: firstNumber + offset,
           statement,
           status: "ACCEPTED",
           source: "MANUAL",
@@ -72,8 +76,8 @@ test.describe("Pillars and labels on Decisions", () => {
           createdById: fixture.userId,
         },
       });
-    const tagged = await decision(names.tagged);
-    const untagged = await decision(names.untagged);
+    const tagged = await decision(names.tagged, 0);
+    const untagged = await decision(names.untagged, 1);
     seeded = {
       tagIds: [pillar.id, label.id],
       pillarSlug,
