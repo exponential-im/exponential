@@ -76,6 +76,7 @@ describe("POST /api/forms/[slug]/insights/status", () => {
     ["refs is not an array", { refs: "a.b" }],
     ["a ref is not a string", { refs: ["a.b", 3] }],
     ["there are too many refs", { refs: Array.from({ length: 51 }, () => "a.b") }],
+    ["a ref is too long", { refs: ["a." + "b".repeat(200)] }],
     ["the body is not JSON", "not json"],
   ])("400s when %s", async (_name, body) => {
     const res = await post(body);

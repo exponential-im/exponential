@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { db } from "~/server/db";
 import {
   MAX_STATUS_REFS,
+  MAX_STATUS_REF_LENGTH,
   exposesInsightStatus,
   readInsightStatuses,
 } from "~/server/services/forms/insightStatus";
@@ -25,7 +26,6 @@ export const dynamic = "force-dynamic";
 
 const WINDOW_SECONDS = 60;
 const IP_MAX = 60;
-
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ slug: string }> },
@@ -58,10 +58,16 @@ export async function POST(
   if (
     !Array.isArray(refs) ||
     refs.length > MAX_STATUS_REFS ||
-    !refs.every((ref): ref is string => typeof ref === "string")
+    !refs.every(
+      (ref): ref is string =>
+        typeof ref === "string" && ref.length <= MAX_STATUS_REF_LENGTH,
+    )
   ) {
     return NextResponse.json(
-      { ok: false, error: `refs must be an array of at most ${MAX_STATUS_REFS} strings` },
+      {
+        ok: false,
+        error: `refs must be an array of at most ${MAX_STATUS_REFS} strings of at most ${MAX_STATUS_REF_LENGTH} characters`,
+      },
       { status: 400 },
     );
   }

@@ -27,6 +27,8 @@ const SIGNING_CONTEXT = "form-insight-status:v1";
 
 /** Most refs one status request may carry. */
 export const MAX_STATUS_REFS = 50;
+/** A ref is a cuid, a dot and a 43-character signature; anything longer is junk. */
+export const MAX_STATUS_REF_LENGTH = 128;
 
 function signingSecret(): string {
   const secret = process.env.AUTH_SECRET;
