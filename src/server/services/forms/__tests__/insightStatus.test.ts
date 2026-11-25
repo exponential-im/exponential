@@ -17,6 +17,7 @@ import {
   insightStatusRefFromOutcomes,
   readInsightStatuses,
 } from "../insightStatus";
+import { formInsightSource } from "../destinations/CreateInsightDestination";
 
 const db = mockDeep<PrismaClient>();
 const form = { slug: "board", workspaceId: "ws-1" };
@@ -141,6 +142,7 @@ describe("readInsightStatuses", () => {
           publishedAt: new Date(),
           parkedAt: null,
           features: [{ feature: { status: "SHIPPED" } }],
+          product: { workspaceId: "ws-1" },
         },
       },
     ] as never);
@@ -155,5 +157,44 @@ describe("readInsightStatuses", () => {
         featureStatuses: ["SHIPPED"],
       },
     ]);
+  });
+
+  it("never reports a canonical insight from another workspace", async () => {
+    const ref = insightStatusRefFor("board", "ins1");
+    db.insight.findMany.mockResolvedValue([
+      {
+        id: "ins1",
+        status: "INBOX",
+        publishedAt: null,
+        parkedAt: null,
+        features: [],
+        duplicateOf: {
+          status: "LINKED",
+          publishedAt: new Date(),
+          parkedAt: null,
+          features: [{ feature: { status: "SHIPPED" } }],
+          product: { workspaceId: "ws-other" },
+        },
+      },
+    ] as never);
+
+    expect(await readInsightStatuses(db, form, [ref])).toEqual([
+      {
+        ref,
+        status: "INBOX",
+        published: false,
+        parked: false,
+        duplicate: false,
+        featureStatuses: [],
+      },
+    ]);
+  });
+
+  it("reads with the same source stamp the create_insight destination writes", async () => {
+    db.insight.findMany.mockResolvedValue([]);
+    await readInsightStatuses(db, form, [insightStatusRefFor("board", "ins1")]);
+
+    const call = db.insight.findMany.mock.calls[0]![0]!;
+    expect(call.where?.source).toBe(formInsightSource("board"));
   });
 });

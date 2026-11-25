@@ -4,6 +4,7 @@ import { type PrismaClient } from "@prisma/client";
 
 import { safeSignatureEquals } from "~/server/utils/webhookSignature";
 
+import { formInsightSource } from "./destinations/CreateInsightDestination";
 import { parseFormDestinations } from "./formSchema";
 import { type DestinationOutcome } from "./runDestinations";
 
@@ -128,25 +129,33 @@ export async function readInsightStatuses(
   const insights = await db.insight.findMany({
     where: {
       id: { in: [...refById.keys()] },
-      source: `form:${form.slug}`,
+      source: formInsightSource(form.slug),
       product: { workspaceId: form.workspaceId },
     },
     select: {
       id: true,
       ...statusSelect,
-      duplicateOf: { select: statusSelect },
+      duplicateOf: {
+        select: { ...statusSelect, product: { select: { workspaceId: true } } },
+      },
     },
   });
 
   return insights.map((insight) => {
-    // A duplicate defers to its canonical insight (chains are flattened at write time).
-    const state = insight.duplicateOf ?? insight;
+    // A duplicate defers to its canonical insight (chains are flattened at write
+    // time). `markDuplicate` keeps both in one product, but never report a
+    // canonical from another workspace, whatever wrote the link.
+    const canonical =
+      insight.duplicateOf?.product.workspaceId === form.workspaceId
+        ? insight.duplicateOf
+        : null;
+    const state = canonical ?? insight;
     return {
       ref: refById.get(insight.id)!,
       status: state.status,
       published: state.publishedAt !== null,
       parked: state.parkedAt !== null,
-      duplicate: insight.duplicateOf !== null,
+      duplicate: canonical !== null,
       featureStatuses: state.features.map((link) => link.feature.status),
     };
   });
