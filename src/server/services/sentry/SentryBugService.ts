@@ -203,6 +203,10 @@ async function labelTicket(
 export interface IngestResult {
   created: boolean;
   ticketId: string;
+  /** The ticket's number within its product. */
+  ticketNumber: number;
+  /** Deep link to the ticket, so a caller can show it next to its own alert. */
+  ticketUrl: string;
 }
 
 /**
@@ -309,6 +313,15 @@ export async function ingestSentryBug(
   const baseUrl = getPublicBaseUrlFromEnv();
   const ticketUrlFor = (ticket: { id: string; number: number }) =>
     `${baseUrl}/w/${product.workspace.slug}/products/${product.slug}/tickets/${ticketUrlId(ticket)}`;
+  const resultFor = (
+    created: boolean,
+    ticket: { id: string; number: number },
+  ): IngestResult => ({
+    created,
+    ticketId: ticket.id,
+    ticketNumber: ticket.number,
+    ticketUrl: ticketUrlFor(ticket),
+  });
 
   if (existing) {
     const renotifyAfterMs = options?.renotifyAfterMs;
@@ -331,7 +344,7 @@ export async function ingestSentryBug(
         data: { links: { ...links, lastNotifiedAt: now.toISOString() } },
       });
       if (claim.count === 0) {
-        return { created: false, ticketId: existing.id };
+        return resultFor(false, existing);
       }
       const errol = await findOrCreateErrol(db);
       const repeat = {
@@ -345,7 +358,7 @@ export async function ingestSentryBug(
       await notifyZulipOfSentryBug(db, repeat);
       await notifyMatrixOfSentryBug(repeat);
     }
-    return { created: false, ticketId: existing.id };
+    return resultFor(false, existing);
   }
 
   const errol = await findOrCreateErrol(db);
@@ -410,5 +423,5 @@ export async function ingestSentryBug(
     actorUserId: errol.id,
   });
 
-  return { created: true, ticketId: ticket.id };
+  return resultFor(true, ticket);
 }
