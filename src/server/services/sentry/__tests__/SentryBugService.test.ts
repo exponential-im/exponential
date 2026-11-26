@@ -110,7 +110,12 @@ describe("ingestSentryBug", () => {
         links: { sentryIssueId: "42", sentryUrl: "https://sentry.io/issues/42" },
       }),
     );
-    expect(result).toEqual({ created: true, ticketId: "ticket-1" });
+    expect(result).toEqual({
+      created: true,
+      ticketId: "ticket-1",
+      ticketNumber: 7,
+      ticketUrl: expect.stringMatching(/\/tickets\/7$/),
+    });
   });
 
   it("find-or-creates Errol via upsert keyed on the bot email (no duplicate users)", async () => {
@@ -323,7 +328,7 @@ describe("ingestSentryBug", () => {
       // Recurring errors that dedup onto an existing ticket do not re-tag or re-notify.
       expect(dbMock.tag.upsert).not.toHaveBeenCalled();
       expect(notifyZulipOfSentryBug).not.toHaveBeenCalled();
-      expect(result).toEqual({ created: false, ticketId: "existing-ticket" });
+      expect(result).toMatchObject({ created: false, ticketId: "existing-ticket" });
     });
 
     it("scopes the dedup lookup to the product and the Sentry issue id", async () => {
@@ -345,7 +350,7 @@ describe("ingestSentryBug", () => {
       const result = await ingestSentryBug(dbMock, bug);
 
       expect(createTicketWithNumber).toHaveBeenCalledTimes(1);
-      expect(result).toEqual({ created: true, ticketId: "ticket-1" });
+      expect(result).toMatchObject({ created: true, ticketId: "ticket-1" });
     });
   });
 
@@ -367,7 +372,7 @@ describe("ingestSentryBug", () => {
 
       const result = await ingestSentryBug(dbMock, bug, { renotifyAfterMs: HOUR });
 
-      expect(result).toEqual({ created: false, ticketId: "existing-ticket" });
+      expect(result).toMatchObject({ created: false, ticketId: "existing-ticket" });
       expect(createTicketWithNumber).not.toHaveBeenCalled();
       expect(dbMock.ticket.updateMany).toHaveBeenCalledWith({
         where: { id: "existing-ticket", updatedAt: READ_AT },
@@ -402,7 +407,7 @@ describe("ingestSentryBug", () => {
 
       const result = await ingestSentryBug(dbMock, bug, { renotifyAfterMs: HOUR });
 
-      expect(result).toEqual({ created: false, ticketId: "existing-ticket" });
+      expect(result).toMatchObject({ created: false, ticketId: "existing-ticket" });
       expect(notifyMatrixOfSentryBug).not.toHaveBeenCalled();
       expect(notifyZulipOfSentryBug).not.toHaveBeenCalled();
     });
