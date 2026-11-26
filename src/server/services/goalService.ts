@@ -815,6 +815,13 @@ export async function getGoalById({ ctx, id }: { ctx: Context, id: number }) {
         orderBy: { createdAt: "desc" },
         take: 1,
       },
+      // The goal page's "Latest update" card reads the newest structured
+      // update (health + text); the comment above is its fallback.
+      updates: {
+        include: { author: { select: { id: true, name: true, image: true } } },
+        orderBy: { createdAt: "desc" },
+        take: 1,
+      },
       user: { select: { id: true, name: true, image: true } },
       driUser: { select: { id: true, name: true, image: true } },
       workspace: { select: { id: true, name: true, slug: true } },

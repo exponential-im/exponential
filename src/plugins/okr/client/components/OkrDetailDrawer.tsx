@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Drawer, Tooltip, ActionIcon, Skeleton, Textarea, Menu } from "@mantine/core";
 import {
@@ -27,6 +27,9 @@ import { api, type RouterOutputs } from "~/trpc/react";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { useFavorite } from "~/app/_components/shared/useFavorite";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { ActivityComposer as UpdateComposer } from "~/app/_components/shared/ActivityComposer";
+import { goalStatusOptions } from "~/hooks/useGoalActivity";
+import { UpdateProgressButton, type UpdateProgressKr } from "./UpdateProgressButton";
 import {
   LINKED_WORK_LABEL,
   linkedProjectKind,
@@ -459,119 +462,6 @@ function SetStatusMenu({
         >
           Auto (use derived status)
         </Menu.Item>
-      </Menu.Dropdown>
-    </Menu>
-  );
-}
-
-interface UpdateProgressKr {
-  id: string;
-  code: string;
-  title: string;
-}
-
-const UPDATE_PROGRESS_CLASS =
-  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-text-inverse disabled:opacity-60";
-
-/**
- * "Update progress" hero CTA (ADR-free; reuses the existing check-in modal).
- * On a KR it opens that KR's modal directly. On an objective it routes to a
- * KR's modal: a picker when there are several KRs, straight through for one,
- * and a disabled+tooltip state for none (an objective has no value of its own).
- */
-function UpdateProgressButton({
-  kind,
-  keyResultId,
-  objectiveKrs,
-  onUpdateProgress,
-}: {
-  kind: "objective" | "keyResult";
-  keyResultId?: string;
-  objectiveKrs?: UpdateProgressKr[];
-  onUpdateProgress?: (keyResultId: string) => void;
-}) {
-  const label = (
-    <>
-      <IconEdit size={13} /> Update progress
-      <span
-        className="ml-1 rounded px-1 py-px text-[10px]"
-        style={{ background: "var(--color-cta-overlay-light)" }}
-      >
-        U
-      </span>
-    </>
-  );
-
-  // Key result: open its check-in modal directly.
-  if (kind === "keyResult") {
-    return (
-      <button
-        type="button"
-        onClick={() => keyResultId && onUpdateProgress?.(keyResultId)}
-        className={UPDATE_PROGRESS_CLASS}
-        style={{ background: "var(--color-brand-primary)" }}
-      >
-        {label}
-      </button>
-    );
-  }
-
-  const krs = objectiveKrs ?? [];
-
-  // No KRs: an objective has no value of its own — nudge to add one.
-  if (krs.length === 0) {
-    return (
-      <Tooltip label="Add a key result first">
-        <span className="inline-flex">
-          <button
-            type="button"
-            disabled
-            className={UPDATE_PROGRESS_CLASS}
-            style={{ background: "var(--color-brand-primary)" }}
-          >
-            {label}
-          </button>
-        </span>
-      </Tooltip>
-    );
-  }
-
-  // Exactly one KR: skip the picker.
-  if (krs.length === 1) {
-    return (
-      <button
-        type="button"
-        onClick={() => onUpdateProgress?.(krs[0]!.id)}
-        className={UPDATE_PROGRESS_CLASS}
-        style={{ background: "var(--color-brand-primary)" }}
-      >
-        {label}
-      </button>
-    );
-  }
-
-  // Several KRs: pick which one to check in.
-  return (
-    <Menu position="bottom-start" width={260}>
-      <Menu.Target>
-        <button
-          type="button"
-          className={UPDATE_PROGRESS_CLASS}
-          style={{ background: "var(--color-brand-primary)" }}
-        >
-          {label}
-        </button>
-      </Menu.Target>
-      <Menu.Dropdown>
-        <Menu.Label>Which key result?</Menu.Label>
-        {krs.map((kr) => (
-          <Menu.Item key={kr.id} onClick={() => onUpdateProgress?.(kr.id)}>
-            <span className="font-mono text-[11px] text-text-muted">
-              {kr.code}
-            </span>{" "}
-            {kr.title}
-          </Menu.Item>
-        ))}
       </Menu.Dropdown>
     </Menu>
   );
@@ -1313,7 +1203,7 @@ function ObjectiveActivityFeed({
   );
 }
 
-function ActivityComposer({
+function CommentComposer({
   onSubmit,
   isSubmitting,
   textareaRef,
@@ -1407,9 +1297,19 @@ export function OkrDetailDrawer({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [pendingComposerFocus, setPendingComposerFocus] = useState(false);
 
+  // Objectives post a real update (status + text, `goalUpdate.addUpdate`)
+  // through the shared composer, which opens in Update mode when this signal
+  // bumps. Key results have no update type, so they focus the comment box.
+  const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+  const clearUpdateFocusSignal = useCallback(() => setUpdateFocusSignal(0), []);
+
   const handlePostUpdate = () => {
     setTab("activity");
-    setPendingComposerFocus(true);
+    if (type === "objective") {
+      setUpdateFocusSignal((n) => n + 1);
+    } else {
+      setPendingComposerFocus(true);
+    }
   };
 
   useEffect(() => {
@@ -1454,6 +1354,18 @@ export function OkrDetailDrawer({
       void utils.okr.getObjectiveActivity.invalidate({
         goalId: itemId as number,
       });
+    },
+  });
+  const addGoalUpdate = api.goalUpdate.addUpdate.useMutation({
+    onSuccess: () => {
+      const goalId = itemId as number;
+      void utils.okr.getObjectiveActivity.invalidate({ goalId });
+      void utils.goal.getById.invalidate({ id: goalId });
+      void utils.goalActivity.getFeed.invalidate({ goalId });
+      void utils.goalActivity.getCount.invalidate({ goalId });
+      // The update moves the objective's cached health, which the dashboard
+      // cards read.
+      void utils.okr.invalidate();
     },
   });
   const addKrComment = api.okr.addKeyResultComment.useMutation({
@@ -1557,7 +1469,15 @@ export function OkrDetailDrawer({
       const expFrac = g.period ? expectedProgress(g.period) : 0;
       const parent = g.period ? /^(Q[1-4]|H[12])-(\d{4})$/.exec(g.period) : null;
       const parentLabel = parent ? `ANNUAL-${parent[2]}` : null;
-      const latest = goalCommentsQuery.data?.[goalCommentsQuery.data.length - 1];
+      // Same rule as the goal page's card: the newest structured update (what
+      // "Post update" writes), else the newest comment.
+      const latestGoalUpdate = g.updates?.[0];
+      const latestComment =
+        goalCommentsQuery.data?.[goalCommentsQuery.data.length - 1];
+      const latest = latestGoalUpdate ?? latestComment;
+      const latestConfidence = latestGoalUpdate
+        ? (GOAL_HEALTH_CONFIDENCE[latestGoalUpdate.health] ?? statusConf)
+        : statusConf;
       return {
         kind: "objective" as const,
         id: g.id,
@@ -1587,7 +1507,7 @@ export function OkrDetailDrawer({
           ? {
               author: latest.author,
               body: latest.content,
-              confidence: statusConf,
+              confidence: latestConfidence,
               whenLabel: formatDistanceToNow(new Date(latest.createdAt), {
                 addSuffix: true,
               }),
@@ -1730,6 +1650,19 @@ export function OkrDetailDrawer({
       });
     }
   };
+
+  const handleAddGoalUpdate = async (content: string, health: string) => {
+    await addGoalUpdate.mutateAsync({
+      goalId: itemId as number,
+      content,
+      health: health as "on-track" | "at-risk" | "off-track",
+    });
+  };
+
+  const goalHealth = objectiveQuery.data?.health ?? "";
+  const defaultUpdateStatus = goalStatusOptions.some((o) => o.key === goalHealth)
+    ? goalHealth
+    : "on-track";
 
   const kind: "objective" | "keyResult" = type;
 
@@ -1931,7 +1864,7 @@ export function OkrDetailDrawer({
                   expectedFrac={view.expectedFrac}
                 />
                 <SectionHeader title="Add a comment" />
-                <ActivityComposer
+                <CommentComposer
                   onSubmit={handleAddComment}
                   isSubmitting={
                     addGoalComment.isPending || addKrComment.isPending
@@ -2071,13 +2004,27 @@ export function OkrDetailDrawer({
 
             {tab === "activity" && (
               <>
-                <ActivityComposer
-                  onSubmit={handleAddComment}
-                  isSubmitting={
-                    addGoalComment.isPending || addKrComment.isPending
-                  }
-                  textareaRef={composerRef}
-                />
+                {view.kind === "objective" ? (
+                  <div className="mb-4">
+                    <UpdateComposer
+                      onAddComment={handleAddComment}
+                      isSubmittingComment={addGoalComment.isPending}
+                      onAddUpdate={handleAddGoalUpdate}
+                      isSubmittingUpdate={addGoalUpdate.isPending}
+                      statusOptions={goalStatusOptions}
+                      defaultStatus={defaultUpdateStatus}
+                      updatePlaceholder="Write an objective update..."
+                      focusUpdateSignal={updateFocusSignal}
+                      onFocusUpdateHandled={clearUpdateFocusSignal}
+                    />
+                  </div>
+                ) : (
+                  <CommentComposer
+                    onSubmit={handleAddComment}
+                    isSubmitting={addKrComment.isPending}
+                    textareaRef={composerRef}
+                  />
+                )}
                 <SectionHeader title="Activity" count={tabs.find((t) => t.id === "activity")?.count} />
                 {view.kind === "objective" ? (
                   <ObjectiveActivityFeed

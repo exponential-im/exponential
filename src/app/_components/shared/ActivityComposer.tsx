@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   SegmentedControl,
   Badge,
@@ -29,6 +29,16 @@ interface ActivityComposerProps {
 
   commentPlaceholder?: string;
   updatePlaceholder?: string;
+
+  /**
+   * Set to a non-zero number to switch the composer to Update mode and focus
+   * it — how a "Post update" / "Update" button elsewhere on the page opens
+   * it. The composer calls `onFocusUpdateHandled` once it has, and the parent
+   * resets the signal to 0, so a later remount (the drawer renders the
+   * composer only while its Activity tab is open) doesn't refocus.
+   */
+  focusUpdateSignal?: number;
+  onFocusUpdateHandled?: () => void;
 }
 
 export function ActivityComposer({
@@ -42,6 +52,8 @@ export function ActivityComposer({
   entityId,
   commentPlaceholder = "Leave a comment...",
   updatePlaceholder = "Write an update...",
+  focusUpdateSignal = 0,
+  onFocusUpdateHandled,
 }: ActivityComposerProps) {
   const hasUpdateMode = !!onAddUpdate && !!statusOptions?.length;
   const [mode, setMode] = useState<"comment" | "update">(
@@ -51,6 +63,28 @@ export function ActivityComposer({
     defaultStatus ?? statusOptions?.[0]?.key ?? "",
   );
   const [updateContent, setUpdateContent] = useState("");
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [pendingFocus, setPendingFocus] = useState(false);
+
+  useEffect(() => {
+    if (!focusUpdateSignal || !hasUpdateMode) return;
+    setMode("update");
+    setPendingFocus(true);
+  }, [focusUpdateSignal, hasUpdateMode]);
+
+  // Focus after the update textarea has rendered (the mode switch above may
+  // have just mounted it).
+  useEffect(() => {
+    if (!pendingFocus || mode !== "update") return;
+    const textarea = rootRef.current?.querySelector("textarea");
+    if (textarea) {
+      textarea.focus();
+      textarea.scrollIntoView({ block: "nearest" });
+    }
+    setPendingFocus(false);
+    onFocusUpdateHandled?.();
+  }, [pendingFocus, mode, onFocusUpdateHandled]);
 
   const currentStatus = statusOptions?.find((s) => s.key === selectedStatus);
   const CurrentStatusIcon = currentStatus?.icon;
@@ -78,7 +112,7 @@ export function ActivityComposer({
   }
 
   return (
-    <div className="rounded-lg border border-border-primary">
+    <div ref={rootRef} className="rounded-lg border border-border-primary">
       {/* Top bar: Comment/Update toggle + status dropdown */}
       <div className="border-b border-border-primary px-4 py-3">
         <Group gap="sm">

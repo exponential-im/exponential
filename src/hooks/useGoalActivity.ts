@@ -12,7 +12,7 @@ import type {
   StatusOption,
 } from "~/app/_components/shared/activityTypes";
 
-const goalStatusOptions: StatusOption[] = (
+export const goalStatusOptions: StatusOption[] = (
   ["on-track", "at-risk", "off-track"] as HealthStatus[]
 ).map((key) => ({
   key,

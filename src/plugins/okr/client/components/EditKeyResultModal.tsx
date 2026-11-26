@@ -12,6 +12,7 @@ import {
   Text,
   Divider,
   MultiSelect,
+  getDefaultZIndex,
 } from "@mantine/core";
 import { IconTrash } from "@tabler/icons-react";
 import { notifications } from "@mantine/notifications";
@@ -609,6 +610,10 @@ export function EditKeyResultModal({
     <Modal
       opened={opened}
       onClose={onClose}
+      // Opened from the OKR drawer's "Update progress": a Drawer and a Modal
+      // share Mantine's default z-index, so without this the modal can land
+      // behind the drawer depending on portal order.
+      zIndex={getDefaultZIndex("modal") + 1}
       size="lg"
       radius="md"
       title={

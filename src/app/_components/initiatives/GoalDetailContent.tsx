@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useCallback, useState, useRef } from "react";
 import React from "react";
 import {
   Container,
@@ -19,6 +19,7 @@ import {
   Menu,
   Modal,
   Button,
+  UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import {
@@ -62,6 +63,7 @@ import { ProjectsTasksView } from "../ProjectsTasksView/ProjectsTasksView";
 import { ProjectTimelineView } from "../ProjectTimelineView";
 import { useTerminology } from "~/hooks/useTerminology";
 import { EditKeyResultModal } from "~/plugins/okr/client/components/EditKeyResultModal";
+import { UpdateProgressButton } from "~/plugins/okr/client/components/UpdateProgressButton";
 import {
   KeyResultAccordion,
   type ObjectiveCardKeyResult,
@@ -124,6 +126,14 @@ interface GoalDetailContentProps {
 
 export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentProps) {
   const [activeTab, setActiveTab] = useState<string>("overview");
+  // Bumped by the "Update" link: opens the Activity tab's composer in Update
+  // mode and focuses it (the same flow as the OKR drawer's "Post update").
+  const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+  const clearUpdateFocusSignal = useCallback(() => setUpdateFocusSignal(0), []);
+  const openUpdateComposer = () => {
+    setActiveTab("activity");
+    setUpdateFocusSignal((n) => n + 1);
+  };
   const [projectView, setProjectView] = useState<ProjectView>("table");
   const [deleteModalOpen, { open: openDelete, close: closeDelete }] = useDisclosure(false);
   const editTriggerRef = useRef<HTMLSpanElement>(null);
@@ -284,7 +294,9 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
 
   const healthKey = (goal.health as HealthStatus) ?? "no-update";
   const health = healthConfig[healthKey] ?? healthConfig["no-update"];
-  const latestComment = goal.comments?.[0];
+  // Prefer the newest structured update (what "Update" posts); fall back to
+  // the newest comment for goals that only have comments.
+  const latestUpdate = goal.updates?.[0] ?? goal.comments?.[0];
 
   // Group projects by status
   const projectsByStatus = goal.projects.reduce<Record<string, typeof goal.projects>>(
@@ -508,11 +520,19 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                   <Text size="sm" fw={500} className="text-text-muted">
                     Latest update
                   </Text>
-                  <Group gap={6} className="cursor-pointer">
-                    <IconPencil size={14} className="text-text-muted" />
-                    <Text size="sm" className="text-text-secondary">
-                      Update
-                    </Text>
+                  <Group gap="md">
+                    <UnstyledButton onClick={openUpdateComposer}>
+                      <Group gap={6}>
+                        <IconPencil size={14} className="text-text-muted" />
+                        <Text size="sm" className="text-text-secondary">
+                          Update
+                        </Text>
+                      </Group>
+                    </UnstyledButton>
+                    <GoalUpdateProgressButton
+                      goalId={goal.id}
+                      workspaceId={goal.workspaceId}
+                    />
                   </Group>
                 </Group>
 
@@ -526,30 +546,30 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                       {health.label}
                     </Text>
                   </Group>
-                  {latestComment && (
+                  {latestUpdate && (
                     <>
                       <Avatar
-                        src={latestComment.author.image}
+                        src={latestUpdate.author.image}
                         size={24}
                         radius="xl"
                         color="brand"
                       >
-                        {latestComment.author.name?.[0] ?? "?"}
+                        {latestUpdate.author.name?.[0] ?? "?"}
                       </Avatar>
                       <Text size="sm" className="text-text-secondary">
-                        {latestComment.author.name}
+                        {latestUpdate.author.name}
                       </Text>
                       <Text size="xs" c="dimmed">
-                        {getTimeAgo(latestComment.createdAt)}
+                        {getTimeAgo(latestUpdate.createdAt)}
                       </Text>
                     </>
                   )}
                 </Group>
 
-                {latestComment && (
+                {latestUpdate && (
                   <div className="mb-3">
                     <MarkdownRenderer
-                      content={latestComment.content}
+                      content={latestUpdate.content}
                       variant="compact"
                     />
                   </div>
@@ -636,7 +656,12 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
 
           {/* Activity Tab */}
           <Tabs.Panel value="activity" pt="lg">
-            <GoalActivityTab goalId={goalId} workspaceSlug={workspaceSlug} />
+            <GoalActivityTab
+              goalId={goalId}
+              workspaceSlug={workspaceSlug}
+              focusUpdateSignal={updateFocusSignal}
+              onFocusUpdateHandled={clearUpdateFocusSignal}
+            />
           </Tabs.Panel>
 
           {/* Projects Tab */}
@@ -863,6 +888,58 @@ function ProjectsTable({ projectsByStatus, statusOrder, workspaceSlug }: Project
         })}
       </Table.Tbody>
     </Table>
+  );
+}
+
+/**
+ * The OKR drawer's "Update progress" CTA on the goal page: checks in one of
+ * this Objective's key results through the same modal. Reads the Key Results
+ * section's query (same input, so React Query shares one fetch).
+ */
+function GoalUpdateProgressButton({
+  goalId,
+  workspaceId,
+}: {
+  goalId: number;
+  workspaceId: string | null;
+}) {
+  const terminology = useTerminology();
+  const utils = api.useUtils();
+  const [checkInKr, setCheckInKr] = useState<ObjectiveCardKeyResult | null>(null);
+
+  const { data: objectives } = api.okr.getByObjective.useQuery(
+    { workspaceId: workspaceId ?? undefined, goalId },
+    { enabled: terminology.showKeyResults },
+  );
+
+  if (!terminology.showKeyResults || !objectives) return null;
+
+  const keyResults = objectives[0]?.keyResults ?? [];
+
+  return (
+    <>
+      <UpdateProgressButton
+        kind="objective"
+        // Same codes the drawer shows: KR<goalId>.<position>.
+        objectiveKrs={keyResults.map((kr, i) => ({
+          id: kr.id,
+          code: `KR${goalId}.${i + 1}`,
+          title: kr.title,
+        }))}
+        onUpdateProgress={(krId) =>
+          setCheckInKr(keyResults.find((kr) => kr.id === krId) ?? null)
+        }
+      />
+      <EditKeyResultModal
+        mode="edit"
+        keyResult={checkInKr}
+        opened={checkInKr !== null}
+        onClose={() => setCheckInKr(null)}
+        onSuccess={() => {
+          void utils.goal.getById.invalidate({ id: goalId });
+        }}
+      />
+    </>
   );
 }
 
