@@ -97,6 +97,21 @@ describe("POST /api/webhooks/sentry/[webhookId]", () => {
     });
   });
 
+  it("returns the ticket number and link to the caller", async () => {
+    const filed = {
+      created: true,
+      ticketId: "ticket-1",
+      ticketNumber: 7,
+      ticketUrl: "https://app.example/w/ws/products/p/tickets/7",
+    };
+    ingestSentryBug.mockResolvedValue(filed);
+    const res = await POST(
+      fakeRequest({ body: issueBody, resource: "issue", signature: sign(issueBody) }),
+      ctx,
+    );
+    expect(await res.json()).toEqual(filed);
+  });
+
   it("returns 404 for an unknown webhookId and does not ingest", async () => {
     findUnique.mockResolvedValue(null);
     const res = await POST(
