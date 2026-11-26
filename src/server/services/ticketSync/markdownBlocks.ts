@@ -3,8 +3,8 @@
  * Notion block payloads for page creation (ivory.pike).
  *
  * Deliberately a hand-rolled SUBSET, not a full Markdown engine: headings,
- * fenced code blocks, bullet/numbered lists, blockquotes, dividers and
- * paragraphs, with inline bold / italic / inline-code / links as rich_text
+ * fenced code blocks, bullet/numbered lists, blockquotes, dividers, GFM
+ * tables and paragraphs, with inline bold / italic / inline-code / links as rich_text
  * annotations. Two hard rules:
  * - NEVER throws: any parse surprise degrades to plain paragraphs (the
  *   pre-fix behavior), because a body must never fail a page creation;
@@ -158,6 +158,43 @@ function normalizeLanguage(raw: string): string {
   return NOTION_LANGUAGES.has(resolved) ? resolved : "plain text";
 }
 
+/** Notion rejects more than 100 children in one array, rows included. */
+const MAX_TABLE_ROWS = 100;
+
+const TABLE_DELIMITER = /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/;
+
+/** `| a | b \| c |` → ["a", "b | c"]. Escaped pipes stay inside the cell. */
+function splitTableRow(row: string): string[] {
+  let text = row.trim();
+  if (text.startsWith("|")) text = text.slice(1);
+  if (text.endsWith("|") && !text.endsWith("\\|")) text = text.slice(0, -1);
+  return text
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.trim().replace(/\\\|/g, "|"));
+}
+
+/** A Notion table block; the first row is the column header. */
+function tableBlock(rows: string[][], width: number): unknown {
+  const kept = rows.slice(0, MAX_TABLE_ROWS);
+  return {
+    object: "block",
+    type: "table",
+    table: {
+      table_width: width,
+      has_column_header: true,
+      has_row_header: false,
+      children: kept.map((row) => ({
+        object: "block",
+        type: "table_row",
+        table_row: {
+          // Every row must have exactly table_width cells.
+          cells: Array.from({ length: width }, (_, c) => parseInline(row[c] ?? "")),
+        },
+      })),
+    },
+  };
+}
+
 /** The pre-fix fallback: paragraph per blank-line-separated chunk, verbatim. */
 function plainParagraphs(markdown: string): unknown[] {
   const blocks: unknown[] = [];
@@ -218,6 +255,31 @@ function renderBlocks(markdown: string): unknown[] {
     if (trimmed === "") {
       flushParagraph();
       continue;
+    }
+
+    // GFM table: a pipe row followed by a `| --- | :-: |` delimiter row.
+    const nextLine = lines[i + 1];
+    if (
+      trimmed.includes("|") &&
+      nextLine !== undefined &&
+      TABLE_DELIMITER.test(nextLine.trim())
+    ) {
+      const header = splitTableRow(trimmed);
+      const delimiterCells = splitTableRow(nextLine.trim());
+      if (header.length > 0 && header.length === delimiterCells.length) {
+        flushParagraph();
+        const rows: string[][] = [header];
+        i += 2;
+        while (i < lines.length) {
+          const rowText = lines[i]!.trim();
+          if (rowText === "" || !rowText.includes("|")) break;
+          rows.push(splitTableRow(rowText));
+          i++;
+        }
+        i--; // the for-loop's i++ lands on the line after the table
+        blocks.push(tableBlock(rows, header.length));
+        continue;
+      }
     }
 
     const heading = /^(#{1,6})\s+(.*)$/.exec(trimmed);
