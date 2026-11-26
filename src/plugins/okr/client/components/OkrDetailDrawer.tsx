@@ -1469,7 +1469,15 @@ export function OkrDetailDrawer({
       const expFrac = g.period ? expectedProgress(g.period) : 0;
       const parent = g.period ? /^(Q[1-4]|H[12])-(\d{4})$/.exec(g.period) : null;
       const parentLabel = parent ? `ANNUAL-${parent[2]}` : null;
-      const latest = goalCommentsQuery.data?.[goalCommentsQuery.data.length - 1];
+      // Same rule as the goal page's card: the newest structured update (what
+      // "Post update" writes), else the newest comment.
+      const latestGoalUpdate = g.updates?.[0];
+      const latestComment =
+        goalCommentsQuery.data?.[goalCommentsQuery.data.length - 1];
+      const latest = latestGoalUpdate ?? latestComment;
+      const latestConfidence = latestGoalUpdate
+        ? (GOAL_HEALTH_CONFIDENCE[latestGoalUpdate.health] ?? statusConf)
+        : statusConf;
       return {
         kind: "objective" as const,
         id: g.id,
@@ -1499,7 +1507,7 @@ export function OkrDetailDrawer({
           ? {
               author: latest.author,
               body: latest.content,
-              confidence: statusConf,
+              confidence: latestConfidence,
               whenLabel: formatDistanceToNow(new Date(latest.createdAt), {
                 addSuffix: true,
               }),
