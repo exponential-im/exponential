@@ -27,6 +27,8 @@ import { api, type RouterOutputs } from "~/trpc/react";
 import { useWorkspace } from "~/providers/WorkspaceProvider";
 import { useFavorite } from "~/app/_components/shared/useFavorite";
 import { MarkdownRenderer } from "~/app/_components/shared/MarkdownRenderer";
+import { ActivityComposer as UpdateComposer } from "~/app/_components/shared/ActivityComposer";
+import { goalStatusOptions } from "~/hooks/useGoalActivity";
 import {
   LINKED_WORK_LABEL,
   linkedProjectKind,
@@ -1313,7 +1315,7 @@ function ObjectiveActivityFeed({
   );
 }
 
-function ActivityComposer({
+function CommentComposer({
   onSubmit,
   isSubmitting,
   textareaRef,
@@ -1407,9 +1409,18 @@ export function OkrDetailDrawer({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const [pendingComposerFocus, setPendingComposerFocus] = useState(false);
 
+  // Objectives post a real update (status + text, `goalUpdate.addUpdate`)
+  // through the shared composer, which opens in Update mode when this signal
+  // bumps. Key results have no update type, so they focus the comment box.
+  const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+
   const handlePostUpdate = () => {
     setTab("activity");
-    setPendingComposerFocus(true);
+    if (type === "objective") {
+      setUpdateFocusSignal((n) => n + 1);
+    } else {
+      setPendingComposerFocus(true);
+    }
   };
 
   useEffect(() => {
@@ -1454,6 +1465,18 @@ export function OkrDetailDrawer({
       void utils.okr.getObjectiveActivity.invalidate({
         goalId: itemId as number,
       });
+    },
+  });
+  const addGoalUpdate = api.goalUpdate.addUpdate.useMutation({
+    onSuccess: () => {
+      const goalId = itemId as number;
+      void utils.okr.getObjectiveActivity.invalidate({ goalId });
+      void utils.goal.getById.invalidate({ id: goalId });
+      void utils.goalActivity.getFeed.invalidate({ goalId });
+      void utils.goalActivity.getCount.invalidate({ goalId });
+      // The update moves the objective's cached health, which the dashboard
+      // cards read.
+      void utils.okr.invalidate();
     },
   });
   const addKrComment = api.okr.addKeyResultComment.useMutation({
@@ -1731,6 +1754,19 @@ export function OkrDetailDrawer({
     }
   };
 
+  const handleAddGoalUpdate = async (content: string, health: string) => {
+    await addGoalUpdate.mutateAsync({
+      goalId: itemId as number,
+      content,
+      health: health as "on-track" | "at-risk" | "off-track",
+    });
+  };
+
+  const goalHealth = objectiveQuery.data?.health ?? "";
+  const defaultUpdateStatus = goalStatusOptions.some((o) => o.key === goalHealth)
+    ? goalHealth
+    : "on-track";
+
   const kind: "objective" | "keyResult" = type;
 
   // For an objective the Activity tab reflects the merged rollup total; for a
@@ -1931,7 +1967,7 @@ export function OkrDetailDrawer({
                   expectedFrac={view.expectedFrac}
                 />
                 <SectionHeader title="Add a comment" />
-                <ActivityComposer
+                <CommentComposer
                   onSubmit={handleAddComment}
                   isSubmitting={
                     addGoalComment.isPending || addKrComment.isPending
@@ -2071,13 +2107,26 @@ export function OkrDetailDrawer({
 
             {tab === "activity" && (
               <>
-                <ActivityComposer
-                  onSubmit={handleAddComment}
-                  isSubmitting={
-                    addGoalComment.isPending || addKrComment.isPending
-                  }
-                  textareaRef={composerRef}
-                />
+                {view.kind === "objective" ? (
+                  <div className="mb-4">
+                    <UpdateComposer
+                      onAddComment={handleAddComment}
+                      isSubmittingComment={addGoalComment.isPending}
+                      onAddUpdate={handleAddGoalUpdate}
+                      isSubmittingUpdate={addGoalUpdate.isPending}
+                      statusOptions={goalStatusOptions}
+                      defaultStatus={defaultUpdateStatus}
+                      updatePlaceholder="Write an objective update..."
+                      focusUpdateSignal={updateFocusSignal}
+                    />
+                  </div>
+                ) : (
+                  <CommentComposer
+                    onSubmit={handleAddComment}
+                    isSubmitting={addKrComment.isPending}
+                    textareaRef={composerRef}
+                  />
+                )}
                 <SectionHeader title="Activity" count={tabs.find((t) => t.id === "activity")?.count} />
                 {view.kind === "objective" ? (
                   <ObjectiveActivityFeed

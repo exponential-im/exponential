@@ -19,6 +19,7 @@ import {
   Menu,
   Modal,
   Button,
+  UnstyledButton,
 } from "@mantine/core";
 import { useDisclosure } from "@mantine/hooks";
 import {
@@ -124,6 +125,13 @@ interface GoalDetailContentProps {
 
 export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentProps) {
   const [activeTab, setActiveTab] = useState<string>("overview");
+  // Bumped by the "Update" link: opens the Activity tab's composer in Update
+  // mode and focuses it (the same flow as the OKR drawer's "Post update").
+  const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+  const openUpdateComposer = () => {
+    setActiveTab("activity");
+    setUpdateFocusSignal((n) => n + 1);
+  };
   const [projectView, setProjectView] = useState<ProjectView>("table");
   const [deleteModalOpen, { open: openDelete, close: closeDelete }] = useDisclosure(false);
   const editTriggerRef = useRef<HTMLSpanElement>(null);
@@ -284,7 +292,9 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
 
   const healthKey = (goal.health as HealthStatus) ?? "no-update";
   const health = healthConfig[healthKey] ?? healthConfig["no-update"];
-  const latestComment = goal.comments?.[0];
+  // Prefer the newest structured update (what "Update" posts); fall back to
+  // the newest comment for goals that only have comments.
+  const latestUpdate = goal.updates?.[0] ?? goal.comments?.[0];
 
   // Group projects by status
   const projectsByStatus = goal.projects.reduce<Record<string, typeof goal.projects>>(
@@ -508,12 +518,14 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                   <Text size="sm" fw={500} className="text-text-muted">
                     Latest update
                   </Text>
-                  <Group gap={6} className="cursor-pointer">
-                    <IconPencil size={14} className="text-text-muted" />
-                    <Text size="sm" className="text-text-secondary">
-                      Update
-                    </Text>
-                  </Group>
+                  <UnstyledButton onClick={openUpdateComposer}>
+                    <Group gap={6}>
+                      <IconPencil size={14} className="text-text-muted" />
+                      <Text size="sm" className="text-text-secondary">
+                        Update
+                      </Text>
+                    </Group>
+                  </UnstyledButton>
                 </Group>
 
                 <Group gap="sm" mb="sm">
@@ -526,30 +538,30 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                       {health.label}
                     </Text>
                   </Group>
-                  {latestComment && (
+                  {latestUpdate && (
                     <>
                       <Avatar
-                        src={latestComment.author.image}
+                        src={latestUpdate.author.image}
                         size={24}
                         radius="xl"
                         color="brand"
                       >
-                        {latestComment.author.name?.[0] ?? "?"}
+                        {latestUpdate.author.name?.[0] ?? "?"}
                       </Avatar>
                       <Text size="sm" className="text-text-secondary">
-                        {latestComment.author.name}
+                        {latestUpdate.author.name}
                       </Text>
                       <Text size="xs" c="dimmed">
-                        {getTimeAgo(latestComment.createdAt)}
+                        {getTimeAgo(latestUpdate.createdAt)}
                       </Text>
                     </>
                   )}
                 </Group>
 
-                {latestComment && (
+                {latestUpdate && (
                   <div className="mb-3">
                     <MarkdownRenderer
-                      content={latestComment.content}
+                      content={latestUpdate.content}
                       variant="compact"
                     />
                   </div>
@@ -636,7 +648,11 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
 
           {/* Activity Tab */}
           <Tabs.Panel value="activity" pt="lg">
-            <GoalActivityTab goalId={goalId} workspaceSlug={workspaceSlug} />
+            <GoalActivityTab
+              goalId={goalId}
+              workspaceSlug={workspaceSlug}
+              focusUpdateSignal={updateFocusSignal}
+            />
           </Tabs.Panel>
 
           {/* Projects Tab */}

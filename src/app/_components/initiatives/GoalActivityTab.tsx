@@ -9,9 +9,11 @@ import { ActivityFeed } from "~/app/_components/shared/ActivityFeed";
 interface GoalActivityTabProps {
   goalId: number;
   workspaceSlug: string;
+  /** Bump to open the composer in Update mode and focus it. */
+  focusUpdateSignal?: number;
 }
 
-export function GoalActivityTab({ goalId }: GoalActivityTabProps) {
+export function GoalActivityTab({ goalId, focusUpdateSignal }: GoalActivityTabProps) {
   const { data: session } = useSession();
   const activity = useGoalActivity(goalId);
 
@@ -36,6 +38,7 @@ export function GoalActivityTab({ goalId }: GoalActivityTabProps) {
         statusOptions={activity.statusOptions}
         defaultStatus={activity.defaultStatus}
         updatePlaceholder="Write an initiative update..."
+        focusUpdateSignal={focusUpdateSignal}
       />
 
       {activity.isLoading ? (
