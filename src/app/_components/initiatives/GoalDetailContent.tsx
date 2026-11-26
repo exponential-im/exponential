@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useCallback, useState, useRef } from "react";
 import React from "react";
 import {
   Container,
@@ -129,6 +129,7 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
   // Bumped by the "Update" link: opens the Activity tab's composer in Update
   // mode and focuses it (the same flow as the OKR drawer's "Post update").
   const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+  const clearUpdateFocusSignal = useCallback(() => setUpdateFocusSignal(0), []);
   const openUpdateComposer = () => {
     setActiveTab("activity");
     setUpdateFocusSignal((n) => n + 1);
@@ -659,6 +660,7 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
               goalId={goalId}
               workspaceSlug={workspaceSlug}
               focusUpdateSignal={updateFocusSignal}
+              onFocusUpdateHandled={clearUpdateFocusSignal}
             />
           </Tabs.Panel>
 

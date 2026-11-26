@@ -11,9 +11,14 @@ interface GoalActivityTabProps {
   workspaceSlug: string;
   /** Bump to open the composer in Update mode and focus it. */
   focusUpdateSignal?: number;
+  onFocusUpdateHandled?: () => void;
 }
 
-export function GoalActivityTab({ goalId, focusUpdateSignal }: GoalActivityTabProps) {
+export function GoalActivityTab({
+  goalId,
+  focusUpdateSignal,
+  onFocusUpdateHandled,
+}: GoalActivityTabProps) {
   const { data: session } = useSession();
   const activity = useGoalActivity(goalId);
 
@@ -39,6 +44,7 @@ export function GoalActivityTab({ goalId, focusUpdateSignal }: GoalActivityTabPr
         defaultStatus={activity.defaultStatus}
         updatePlaceholder="Write an initiative update..."
         focusUpdateSignal={focusUpdateSignal}
+        onFocusUpdateHandled={onFocusUpdateHandled}
       />
 
       {activity.isLoading ? (

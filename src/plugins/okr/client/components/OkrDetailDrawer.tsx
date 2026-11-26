@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Drawer, Tooltip, ActionIcon, Skeleton, Textarea, Menu } from "@mantine/core";
 import {
@@ -1301,6 +1301,7 @@ export function OkrDetailDrawer({
   // through the shared composer, which opens in Update mode when this signal
   // bumps. Key results have no update type, so they focus the comment box.
   const [updateFocusSignal, setUpdateFocusSignal] = useState(0);
+  const clearUpdateFocusSignal = useCallback(() => setUpdateFocusSignal(0), []);
 
   const handlePostUpdate = () => {
     setTab("activity");
@@ -2006,6 +2007,7 @@ export function OkrDetailDrawer({
                       defaultStatus={defaultUpdateStatus}
                       updatePlaceholder="Write an objective update..."
                       focusUpdateSignal={updateFocusSignal}
+                      onFocusUpdateHandled={clearUpdateFocusSignal}
                     />
                   </div>
                 ) : (
