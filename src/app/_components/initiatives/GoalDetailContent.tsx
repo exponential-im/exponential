@@ -63,6 +63,7 @@ import { ProjectsTasksView } from "../ProjectsTasksView/ProjectsTasksView";
 import { ProjectTimelineView } from "../ProjectTimelineView";
 import { useTerminology } from "~/hooks/useTerminology";
 import { EditKeyResultModal } from "~/plugins/okr/client/components/EditKeyResultModal";
+import { UpdateProgressButton } from "~/plugins/okr/client/components/UpdateProgressButton";
 import {
   KeyResultAccordion,
   type ObjectiveCardKeyResult,
@@ -518,14 +519,20 @@ export function GoalDetailContent({ goalId, workspaceSlug }: GoalDetailContentPr
                   <Text size="sm" fw={500} className="text-text-muted">
                     Latest update
                   </Text>
-                  <UnstyledButton onClick={openUpdateComposer}>
-                    <Group gap={6}>
-                      <IconPencil size={14} className="text-text-muted" />
-                      <Text size="sm" className="text-text-secondary">
-                        Update
-                      </Text>
-                    </Group>
-                  </UnstyledButton>
+                  <Group gap="md">
+                    <UnstyledButton onClick={openUpdateComposer}>
+                      <Group gap={6}>
+                        <IconPencil size={14} className="text-text-muted" />
+                        <Text size="sm" className="text-text-secondary">
+                          Update
+                        </Text>
+                      </Group>
+                    </UnstyledButton>
+                    <GoalUpdateProgressButton
+                      goalId={goal.id}
+                      workspaceId={goal.workspaceId}
+                    />
+                  </Group>
                 </Group>
 
                 <Group gap="sm" mb="sm">
@@ -879,6 +886,58 @@ function ProjectsTable({ projectsByStatus, statusOrder, workspaceSlug }: Project
         })}
       </Table.Tbody>
     </Table>
+  );
+}
+
+/**
+ * The OKR drawer's "Update progress" CTA on the goal page: checks in one of
+ * this Objective's key results through the same modal. Reads the Key Results
+ * section's query (same input, so React Query shares one fetch).
+ */
+function GoalUpdateProgressButton({
+  goalId,
+  workspaceId,
+}: {
+  goalId: number;
+  workspaceId: string | null;
+}) {
+  const terminology = useTerminology();
+  const utils = api.useUtils();
+  const [checkInKr, setCheckInKr] = useState<ObjectiveCardKeyResult | null>(null);
+
+  const { data: objectives } = api.okr.getByObjective.useQuery(
+    { workspaceId: workspaceId ?? undefined, goalId },
+    { enabled: terminology.showKeyResults },
+  );
+
+  if (!terminology.showKeyResults || !objectives) return null;
+
+  const keyResults = objectives[0]?.keyResults ?? [];
+
+  return (
+    <>
+      <UpdateProgressButton
+        kind="objective"
+        // Same codes the drawer shows: KR<goalId>.<position>.
+        objectiveKrs={keyResults.map((kr, i) => ({
+          id: kr.id,
+          code: `KR${goalId}.${i + 1}`,
+          title: kr.title,
+        }))}
+        onUpdateProgress={(krId) =>
+          setCheckInKr(keyResults.find((kr) => kr.id === krId) ?? null)
+        }
+      />
+      <EditKeyResultModal
+        mode="edit"
+        keyResult={checkInKr}
+        opened={checkInKr !== null}
+        onClose={() => setCheckInKr(null)}
+        onSuccess={() => {
+          void utils.goal.getById.invalidate({ id: goalId });
+        }}
+      />
+    </>
   );
 }
 
