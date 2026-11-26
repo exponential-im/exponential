@@ -161,7 +161,10 @@ function normalizeLanguage(raw: string): string {
 /** Notion rejects more than 100 children in one array, rows included. */
 const MAX_TABLE_ROWS = 100;
 
-const TABLE_DELIMITER = /^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/;
+/** Lines that start another block and so end a table. */
+const TABLE_BREAKER = /^(#{1,6}\s|[-*+]\s|\d{1,4}[.)]\s|>|`{3,}|~{3,})/;
+
+const TABLE_DELIMITER =/^\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?$/;
 
 /** `| a | b \| c |` → ["a", "b | c"]. Escaped pipes stay inside the cell. */
 function splitTableRow(row: string): string[] {
@@ -273,6 +276,9 @@ function renderBlocks(markdown: string): unknown[] {
         while (i < lines.length) {
           const rowText = lines[i]!.trim();
           if (rowText === "" || !rowText.includes("|")) break;
+          // A heading, list, quote or fence ends the table even without a
+          // blank line; let its own handler render it.
+          if (TABLE_BREAKER.test(rowText)) break;
           rows.push(splitTableRow(rowText));
           i++;
         }
