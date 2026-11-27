@@ -2,7 +2,15 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Badge, Group, Stack, Text } from "@mantine/core";
-import { IconCheck, IconCopy, IconQuote, IconSearch, IconUsers } from "@tabler/icons-react";
+import {
+  IconCheck,
+  IconCopy,
+  IconPencil,
+  IconPlus,
+  IconQuote,
+  IconSearch,
+  IconUsers,
+} from "@tabler/icons-react";
 import { MpAvatar } from "./MpAvatar";
 import { getInitial } from "~/utils/avatarColors";
 import { parseTranscript, turnsToReadableText } from "~/lib/transcript";
@@ -31,6 +39,9 @@ interface TranscriptViewProps {
   evidenceTurnIndices?: ReadonlySet<number>;
   /** Present when the viewer may log decisions: shows "Use as evidence" per turn. */
   onToggleEvidence?: (turn: TranscriptTurn, turnIndex: number) => void;
+  /** Present when the viewer may edit the transcript: shows Edit (or Add
+   *  transcript when there is none) in the full variant. */
+  onEdit?: () => void;
 }
 
 function formatTime(seconds: number): string {
@@ -105,6 +116,7 @@ export function TranscriptView({
   totalTurnCount,
   evidenceTurnIndices,
   onToggleEvidence,
+  onEdit,
 }: TranscriptViewProps) {
   const [query, setQuery] = useState("");
   const [onlyMe, setOnlyMe] = useState(false);
@@ -181,8 +193,25 @@ export function TranscriptView({
   const hasMe = turns.some((t) => t.flavor === "me");
 
   if (turns.length === 0) {
-    return <div className="mp-empty">No transcript available yet.</div>;
+    return (
+      <div className="mp-empty">
+        No transcript available yet.
+        {onEdit && (
+          <div className="mp-tldr__foot">
+            <button className="mp-chipbtn" type="button" onClick={onEdit}>
+              <IconPlus size={11} /> Add transcript
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
+
+  const editBtn = onEdit && (
+    <button className="mp-tr__filter" type="button" onClick={onEdit} title="Edit the transcript">
+      <IconPencil size={12} /> Edit
+    </button>
+  );
 
   const copyAllBtn = (
     <button
@@ -210,6 +239,7 @@ export function TranscriptView({
             />
           </div>
           {copyAllBtn}
+          {editBtn}
         </div>
         <p className="mp-turn__text" style={{ whiteSpace: "pre-wrap" }}>
           {withHighlight(turns[0]!.text, query)}
@@ -254,6 +284,7 @@ export function TranscriptView({
           </button>
         )}
         {copyAllBtn}
+        {editBtn}
       </div>
 
       {filtered.length === 0 ? (
