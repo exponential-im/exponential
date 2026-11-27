@@ -78,7 +78,7 @@ Open a meeting's **Decisions** tab and click **Extract decisions & questions**. 
 - **Ceremonies** — a ceremony's occurrences collect the decisions made in them; grouped view shows decisions under their ceremony.
 - **Products** — tickets and features implement decisions: [Products](/docs/build/products).
 - **Goals** — decisions can be scoped to an objective or key result: [OKRs](/docs/plan/okrs).
-- **CLI** — `exponential decisions` lists, logs, titles, links (to tickets, features and scopes) and moves decisions, including `decisions draft extract` for meetings.
+- **CLI** — `exponential decisions` lists, logs, links and moves decisions, including `decisions draft extract` for meetings.
 
 ## FAQ
 
