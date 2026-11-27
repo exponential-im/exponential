@@ -1,7 +1,7 @@
 import { ACTION_DISCARD_REASON_CODES } from "~/lib/draft-reject-reasons";
 import { z } from "zod";
 import { AiNotConfiguredError, requireAi } from "~/server/services/ai/requireAi";
-import type { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import {
   createTRPCRouter,
   humanOnlyProcedure,
@@ -779,6 +779,11 @@ export const transcriptionRouter = createTRPCRouter({
         where: { id: input.id },
         data: {
           transcription: input.transcription,
+          // A structured (Fireflies) transcript renders from `sentencesJson`,
+          // which wins over `transcription` in the parser. The editor hands
+          // back its text form (`turnsToEditableText`), so drop the sentences
+          // or the edit would never show.
+          sentencesJson: Prisma.DbNull,
           // Re-index in Knowledge on the next embedding sweep.
           embeddingStatus: "pending",
           updatedAt: new Date(),

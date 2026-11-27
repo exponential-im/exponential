@@ -17,7 +17,7 @@ export type {
 } from "./types";
 
 export { parseTranscript, TRANSCRIPT_PARSERS } from "./registry";
-export { turnsToReadableText } from "./readable";
+export { turnsToEditableText, turnsToReadableText } from "./readable";
 export { firefliesParser } from "./fireflies";
 export { labelledTurnsParser } from "./labelled-turns";
 export { rawParser } from "./raw";

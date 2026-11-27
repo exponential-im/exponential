@@ -20,6 +20,7 @@ import { SummaryTab } from "./SummaryTab";
 import { NotesTab } from "./NotesTab";
 import { OutputsTab } from "./OutputsTab";
 import { TranscriptView } from "./TranscriptView";
+import { TranscriptEditor } from "./TranscriptEditor";
 import { ScreenshotsTab } from "./ScreenshotsTab";
 import { ContextRail } from "./ContextRail";
 import {
@@ -30,7 +31,12 @@ import { buildMeetingViewModel } from "~/lib/meeting-view-model";
 import type { MeetingSession } from "~/lib/meeting-view-model";
 import { turnToEvidence, type DecisionEvidenceTurn } from "~/lib/decision-evidence";
 import { meetingTabFromParam, withMeetingTab, type MeetingTab } from "~/lib/meeting-tabs";
-import type { TranscriptTurn } from "~/lib/transcript";
+import {
+  firefliesParser,
+  parseTranscript,
+  turnsToEditableText,
+  type TranscriptTurn,
+} from "~/lib/transcript";
 import { LogDecisionModal } from "~/app/_components/decisions/LogDecisionModal";
 import { DraftDecisionReviewList } from "~/app/_components/decisions/DraftDecisionReviewList";
 import type { MeetingOccurrenceOption } from "./MeetingOccurrencePicker";
@@ -276,6 +282,46 @@ export function MeetingDetail({
     }
     return keys;
   }, [session.participants]);
+
+  // Transcript editing, the Notes tab's pattern: Edit swaps the view for a
+  // plain-text editor; Save writes it back through `updateTranscription`.
+  const [isEditingTranscript, setIsEditingTranscript] = useState(false);
+  const updateTranscription = api.transcription.updateTranscription.useMutation();
+
+  function editableTranscript(): string {
+    const data = transcriptQuery.data;
+    if (!data) return "";
+    const input = {
+      transcription: data.transcription,
+      sentencesJson: data.sentencesJson,
+      participants: [],
+    };
+    // Structured sentences have no text of their own: hand the editor their
+    // stamped text form. Anything else is edited exactly as stored, so
+    // `[SCREENSHOT]` markers and header lines survive the round trip.
+    return firefliesParser.canParse(input)
+      ? turnsToEditableText(parseTranscript(input))
+      : (data.transcription ?? "");
+  }
+
+  async function handleSaveTranscript(value: string) {
+    try {
+      await updateTranscription.mutateAsync({ id: session.id, transcription: value });
+      notifications.show({ title: "Saved", message: "Transcript updated", color: "green" });
+      setIsEditingTranscript(false);
+      await Promise.all([
+        utils.transcription.getTranscript.invalidate({ id: session.id }),
+        utils.transcription.getDetail.invalidate({ id: session.id }),
+      ]);
+    } catch (error) {
+      notifications.show({
+        title: "Couldn't save the transcript",
+        message: error instanceof Error ? error.message : "Failed to update the transcript",
+        color: "red",
+      });
+      throw error;
+    }
+  }
 
   const addParticipant = api.transcription.addParticipant.useMutation({
     onSuccess: () => {
@@ -649,6 +695,12 @@ export function MeetingDetail({
                   </div>
                 ) : transcriptQuery.isError ? (
                   <div className="mp-empty">Couldn&apos;t load the transcript.</div>
+                ) : isEditingTranscript ? (
+                  <TranscriptEditor
+                    initialValue={editableTranscript()}
+                    onSave={handleSaveTranscript}
+                    onCancel={() => setIsEditingTranscript(false)}
+                  />
                 ) : (
                 <TranscriptView
                   variant="full"
@@ -658,6 +710,7 @@ export function MeetingDetail({
                   participants={vm.participants}
                   evidenceTurnIndices={evidenceTurnIndices}
                   onToggleEvidence={canLogDecision ? toggleEvidence : undefined}
+                  onEdit={session.canEdit ? () => setIsEditingTranscript(true) : undefined}
                 />
                 )}
                 {evidence.length > 0 && (
