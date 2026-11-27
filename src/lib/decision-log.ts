@@ -72,6 +72,8 @@ export interface DecisionRowInput {
   id: string;
   label: string;
   number: number;
+  /** The short outcome; the row text when set, else the statement. */
+  title?: string | null;
   statement: string;
   status: LogStatus;
   source: "MEETING" | "MANUAL" | "AGENT";
@@ -131,7 +133,7 @@ export function decisionToLogRow(decision: DecisionRowInput, workspaceSlug: stri
     kind: "decision",
     id: decision.id,
     label: decision.label,
-    title: decision.statement,
+    title: decision.title?.trim() ? decision.title : decision.statement,
     status: decision.status,
     decidedAt: decision.decidedAt,
     source: decisionSourceFacet(decision.source),

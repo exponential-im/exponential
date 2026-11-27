@@ -133,7 +133,7 @@ export function buildDecisionGraph(input: {
       id: decision.id,
       kind: "decision",
       label: decision.label,
-      title: decision.statement,
+      title: decision.title?.trim() ? decision.title : decision.statement,
       status: decision.status,
       decidedAt: decision.decidedAt,
       source: decision.source === "MEETING" ? "meeting" : "manual",

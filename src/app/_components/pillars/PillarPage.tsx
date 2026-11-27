@@ -37,6 +37,7 @@ import { InlineEditableTitle } from "~/app/_components/shared/InlineEditableTitl
 import { MarkdownFieldEditor } from "~/app/_components/shared/MarkdownFieldEditor";
 import { getTagMantineColor } from "~/utils/tagColors";
 import { describeRecurrence } from "./recurrence";
+import { PillarDecisionGroups } from "./PillarDecisionGroups";
 import { pillarPath } from "~/lib/pillars/pillarPath";
 import { TAG_DESCRIPTION_MAX } from "~/types/tag";
 import { formatKrValue } from "~/app/_components/goals/keyResultRows";
@@ -64,9 +65,6 @@ const FINISHED_STATUSES = new Set([
   "DEPLOYED",
   "ARCHIVED",
 ]);
-
-/** Decision statuses that no longer stand; shown only with "Show completed". */
-const REPLACED_DECISION_STATUSES = new Set(["SUPERSEDED", "DEPRECATED"]);
 
 function isFinished(status: string): boolean {
   return FINISHED_STATUSES.has(status);
@@ -387,39 +385,7 @@ export function PillarPage({ pillarSlug, workspaceSlug }: PillarPageProps) {
               message={`No ${includeCompleted ? "" : "standing "}decision is filed under this Pillar.`}
             />
           ) : (
-            <Panel padding="sm">
-              <WorkList>
-                {decisions.map((decision) => {
-                  const replaced = REPLACED_DECISION_STATUSES.has(decision.status);
-                  return (
-                    <li key={decision.id} className="flex items-center gap-2 py-1">
-                      <span className="inline-flex shrink-0 text-text-muted">
-                        <IconGavel size={14} />
-                      </span>
-                      <MetaText>{decision.label}</MetaText>
-                      <Link
-                        href={`/w/${workspaceSlug}/decisions/d/${decision.id}`}
-                        className={`min-w-0 flex-1 truncate text-sm hover:underline ${
-                          replaced ? "text-text-muted line-through" : "text-text-primary"
-                        }`}
-                      >
-                        {decision.statement}
-                      </Link>
-                      <MetaText>{decision.status.toLowerCase()}</MetaText>
-                      {decision.decidedAt && (
-                        <MetaText>
-                          {new Date(decision.decidedAt).toLocaleDateString("en-GB", {
-                            day: "2-digit",
-                            month: "short",
-                            year: "numeric",
-                          })}
-                        </MetaText>
-                      )}
-                    </li>
-                  );
-                })}
-              </WorkList>
-            </Panel>
+            <PillarDecisionGroups decisions={decisions} workspaceSlug={workspaceSlug} />
           )}
         </PageSection>
 

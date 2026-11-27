@@ -33,6 +33,8 @@ import {
 import { api } from "~/trpc/react";
 import { useDocumentTitle } from "~/hooks/useDocumentTitle";
 import { agentDecisionAuthor } from "~/lib/decision-log";
+import { decisionRowText } from "~/lib/decision-groups";
+import { EditDecisionTitleButton } from "~/app/_components/decisions/DecisionTitleInput";
 
 /**
  * A Decision's content (ADR-0060): statement, status, provenance (the
@@ -82,7 +84,7 @@ export function DecisionDetail({
     { workspaceId, decisionId },
     { enabled: !!workspaceId && !!decisionId },
   );
-  useDocumentTitle(namesTab ? decision?.statement : null);
+  useDocumentTitle(namesTab && decision ? decisionRowText(decision) : null);
   // Where this decision has been posted (ADR-0075). Read only once the decision itself
   // has loaded, since the read is gated on viewing it.
   const { data: outboundPosts } = api.decision.outboundPosts.useQuery(
@@ -168,7 +170,23 @@ export function DecisionDetail({
                   : "manual"}
             </Badge>
           </Group>
-          <Title order={2}>{decision.statement}</Title>
+          <Group gap="xs" wrap="nowrap" align="flex-start">
+            <Title order={2} className="min-w-0">
+              {decisionRowText(decision)}
+            </Title>
+            {decision.canEdit ? (
+              <EditDecisionTitleButton
+                workspaceId={workspaceId}
+                decisionId={decision.id}
+                title={decision.title}
+              />
+            ) : null}
+          </Group>
+          {decision.title?.trim() ? (
+            <Text size="md" mt={4} className="text-text-secondary">
+              {decision.statement}
+            </Text>
+          ) : null}
           <Group gap="xs" mt={6}>
             {decision.product ? (
               <Badge variant="outline" color="gray">
@@ -300,7 +318,7 @@ export function DecisionDetail({
             <Anchor component={Link} href={decisionHref(decision.supersededBy.id)} size="sm">
               {decision.supersededBy.label}
             </Anchor>{" "}
-            — {decision.supersededBy.statement}
+            — {decisionRowText(decision.supersededBy)}
           </Text>
         ) : null}
         {decision.supersedes.map((d) => (
@@ -309,7 +327,7 @@ export function DecisionDetail({
             <Anchor component={Link} href={decisionHref(d.id)} size="sm">
               {d.label}
             </Anchor>{" "}
-            — {d.statement}
+            — {decisionRowText(d)}
           </Text>
         ))}
       </Stack>

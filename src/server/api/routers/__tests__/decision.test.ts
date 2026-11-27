@@ -278,13 +278,14 @@ describe("decision router", () => {
   });
 
   describe("list filters", () => {
-    it("search covers statement and body, case-insensitively", async () => {
+    it("search covers title, statement and body, case-insensitively", async () => {
       withWorkspaceRole(db, "member");
       db.decision.findMany.mockResolvedValue([] as never);
       await caller(db).decision.list({ workspaceId: WORKSPACE_ID, search: "Consequences" });
       const where = db.decision.findMany.mock.calls[0]![0]!.where as { AND: unknown[] };
       expect(where.AND).toContainEqual({
         OR: [
+          { title: { contains: "Consequences", mode: "insensitive" } },
           { statement: { contains: "Consequences", mode: "insensitive" } },
           { body: { contains: "Consequences", mode: "insensitive" } },
         ],
@@ -507,6 +508,46 @@ describe("decision router", () => {
       expect(data.deciders).toEqual({
         create: [{ userId: USER_ID, name: "Dev Fixture", email: "dev@example.test" }],
       });
+    });
+
+    it("stores a trimmed title, and a blank title as null so lists fall back to the statement", async () => {
+      withWorkspaceRole(db, "member");
+      withTransaction(db);
+      db.workspace.update.mockResolvedValue({ decisionCounter: 7 } as never);
+      db.decision.create.mockImplementation(((args: { data: { number: number } }) =>
+        Promise.resolve({
+          id: "dec-7",
+          number: args.data.number,
+          title: "Text place beats Dataminr location",
+          statement: "Use tRPC",
+          status: "PROPOSED",
+          source: "MANUAL",
+          transcriptionSessionId: null,
+        })) as never);
+
+      await caller(db).decision.create({
+        workspaceId: WORKSPACE_ID,
+        title: "  Text place beats Dataminr location  ",
+        statement: "Use tRPC",
+      });
+      expect(db.decision.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ title: "Text place beats Dataminr location" }),
+        }),
+      );
+      // The feed event reads by the title too.
+      expect(db.workspaceActivityEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            metadata: expect.objectContaining({ title: "D-0007 Text place beats Dataminr location" }),
+          }),
+        }),
+      );
+
+      await caller(db).decision.create({ workspaceId: WORKSPACE_ID, title: "   ", statement: "Use tRPC" });
+      expect(db.decision.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ title: null }) }),
+      );
     });
 
     describe("agent-authored decisions are drafts a person confirms", () => {
@@ -1224,6 +1265,59 @@ describe("decision router", () => {
       return row;
     }
 
+    it("linkScope refuses a scope outside the workspace", async () => {
+      withWorkspaceRole(db, "member");
+      withConfirmedDecision();
+      db.featureScope.findFirst.mockResolvedValue(null);
+      await expect(
+        caller(db).decision.linkScope({
+          workspaceId: WORKSPACE_ID,
+          decisionId: "dec-1",
+          scopeId: "scope-elsewhere",
+        }),
+      ).rejects.toThrow(/scope not found/i);
+      expect(db.decisionLink.create).not.toHaveBeenCalled();
+      // Workspace-scoped through feature → product.
+      expect(db.featureScope.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "scope-elsewhere", feature: { product: { workspaceId: WORKSPACE_ID } } },
+        }),
+      );
+    });
+
+    it("linkScope writes the scopeId arm of the link", async () => {
+      withWorkspaceRole(db, "member");
+      withConfirmedDecision();
+      db.featureScope.findFirst.mockResolvedValue({ id: "scope-v5" } as never);
+      db.decisionLink.findFirst.mockResolvedValue(null);
+      db.decisionLink.create.mockResolvedValue({ id: "link-s" } as never);
+      const link = await caller(db).decision.linkScope({
+        workspaceId: WORKSPACE_ID,
+        decisionId: "dec-1",
+        scopeId: "scope-v5",
+      });
+      expect(link.id).toBe("link-s");
+      expect(db.decisionLink.create).toHaveBeenCalledWith({
+        data: {
+          decisionId: "dec-1",
+          ticketId: null,
+          featureId: null,
+          scopeId: "scope-v5",
+          actionId: null,
+          createdById: USER_ID,
+        },
+      });
+    });
+
+    it("a viewer may not link a scope", async () => {
+      withWorkspaceRole(db, "viewer");
+      withConfirmedDecision();
+      await expect(
+        caller(db).decision.linkScope({ workspaceId: WORKSPACE_ID, decisionId: "dec-1", scopeId: "scope-v5" }),
+      ).rejects.toThrow();
+      expect(db.decisionLink.create).not.toHaveBeenCalled();
+    });
+
     it("linkTicket refuses a ticket outside the workspace", async () => {
       withWorkspaceRole(db, "member");
       withConfirmedDecision();
@@ -1277,6 +1371,7 @@ describe("decision router", () => {
           decisionId: "dec-1",
           ticketId: null,
           featureId: null,
+          scopeId: null,
           actionId: "act-1",
           createdById: USER_ID,
         },
@@ -1367,6 +1462,7 @@ describe("decision router", () => {
           decisionId: "dec-1",
           ticketId: "t-1",
           featureId: null,
+          scopeId: null,
           actionId: null,
           createdById: USER_ID,
         },
@@ -1494,15 +1590,18 @@ describe("decision router", () => {
       expect(accessWhere.workspaceId).toBe(WORKSPACE_ID);
       expect(accessWhere.reviewState).toBe("CONFIRMED");
       expect(accessWhere.OR).toHaveLength(3);
-      expect(where.AND[1]).toEqual({ links: { some: { featureId: "feat-1" } } });
+      // Linked to the feature itself, or to one of its scopes (ticket 1004).
+      expect(where.AND[1]).toEqual({
+        links: { some: { OR: [{ featureId: "feat-1" }, { scope: { featureId: "feat-1" } }] } },
+      });
       expect(args.orderBy).toEqual([{ number: "asc" }]);
     });
 
     it("labels rows with their D-number", async () => {
       withWorkspaceRole(db, "member");
       db.decision.findMany.mockResolvedValue([
-        { id: "dec-1", number: 1, statement: "Ship it", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [] },
-        { id: "dec-4", number: 4, statement: "Which store?", status: "OPEN", evidence: null, supersededBy: null, tags: [] },
+        { id: "dec-1", number: 1, statement: "Ship it", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [], links: [] },
+        { id: "dec-4", number: 4, statement: "Which store?", status: "OPEN", evidence: null, supersededBy: null, tags: [], links: [] },
       ] as never);
 
       const rows = await caller(db).decision.listForFeature({
@@ -1514,6 +1613,20 @@ describe("decision router", () => {
         ["D-0001", "ACCEPTED"],
         ["D-0004", "OPEN"],
       ]);
+    });
+
+    it("tags a row with the feature's scope it is linked to, and not another feature's", async () => {
+      withWorkspaceRole(db, "member");
+      const v5 = { id: "scope-v5", version: "V5", description: "Text location", feature: { id: "feat-1", name: "Geocoding" } };
+      const other = { id: "scope-x", version: "V2", description: "Other", feature: { id: "feat-2", name: "Other" } };
+      db.decision.findMany.mockResolvedValue([
+        { id: "dec-1", number: 1, statement: "s", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [], links: [{ scope: other }, { scope: v5 }] },
+        { id: "dec-2", number: 2, statement: "s", status: "ACCEPTED", evidence: [], supersededBy: null, tags: [], links: [{ feature: { id: "feat-1", name: "Geocoding" }, scope: null }] },
+      ] as never);
+
+      const rows = await caller(db).decision.listForFeature({ workspaceId: WORKSPACE_ID, featureId: "feat-1" });
+
+      expect(rows.map((r) => r.scope?.version ?? null)).toEqual(["V5", null]);
     });
 
     it("denies a non-member", async () => {
@@ -1869,12 +1982,17 @@ describe("decision router — accept, confirm-with-status, label lookup", () => 
       });
 
       it.each(AGENT_TOKENS)(
-        "update through a %s token cannot rewrite a confirmed decision's statement, body or date",
+        "update through a %s token cannot rewrite a confirmed decision's title, statement, body or date",
         async (tokenType) => {
           withWorkspaceRole(db, "member");
           withOwningAgent();
           withRow({ reviewState: "CONFIRMED", status: "ACCEPTED" });
-          for (const patch of [{ statement: "Something else" }, { body: "New reasoning" }, { decidedAt: new Date() }]) {
+          for (const patch of [
+            { title: "Something else wins" },
+            { statement: "Something else" },
+            { body: "New reasoning" },
+            { decidedAt: new Date() },
+          ]) {
             await expect(
               callerWithToken(tokenType).decision.update({ workspaceId: WORKSPACE_ID, decisionId: "dec-6", ...patch }),
             ).rejects.toMatchObject({ code: "FORBIDDEN" });

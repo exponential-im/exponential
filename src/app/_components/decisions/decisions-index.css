@@ -411,6 +411,15 @@
   background: var(--color-surface-muted);
   color: var(--color-text-secondary);
 }
+/* The statement under a titled decision (ticket 1004): the title is the row text. */
+.dec-statement {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+  text-wrap: pretty;
+}
 .dec-meta {
   margin-top: 3px;
   display: flex;

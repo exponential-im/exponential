@@ -28,6 +28,7 @@ import {
 import { PILLAR_CATEGORY } from "~/types/tag";
 import { suggestPillars } from "~/lib/pillars/suggestPillars";
 import { formatDecisionLabel } from "~/lib/decision-label";
+import { decisionGroupLinksSelect } from "~/server/services/decisions/decisionGroupLinks";
 
 /** Workspace roles that may promote, demote or archive a Pillar. */
 export const PILLAR_ADMIN_ROLES = ["owner", "admin"] as const;
@@ -698,10 +699,13 @@ export async function getPillarPage(input: PillarPageInput) {
       select: {
         id: true,
         number: true,
+        title: true,
         statement: true,
         status: true,
         decidedAt: true,
         owner: { select: userSelect },
+        // What the page groups the decisions by: scope, feature or ticket.
+        links: decisionGroupLinksSelect,
       },
       orderBy: [{ decidedAt: { sort: "desc", nulls: "last" } }, { number: "desc" }],
     }),

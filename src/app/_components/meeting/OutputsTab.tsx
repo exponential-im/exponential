@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { decisionRowText } from "~/lib/decision-groups";
 import {
   IconAlertCircle,
   IconCheck,
@@ -43,8 +44,9 @@ function DecisionList({ items }: { items: MeetingDecision[] }) {
               ) : (
                 <span className="mp-dec__label">{d.label}</span>
               )}
-              {d.statement}
+              {decisionRowText(d)}
             </div>
+            {d.title?.trim() ? <span className="mp-dec__meta">{d.statement}</span> : null}
             {d.body && (
               <div className="mp-dec__body">
                 <MarkdownRenderer content={d.body} variant="compact" />

@@ -8,6 +8,7 @@ import { api } from "~/trpc/react";
 import { CollapsibleSection } from "~/app/_components/product/CollapsibleSection";
 import { DecisionGroup } from "~/app/_components/product/FeatureDecisionsSection";
 import type { RouterOutputs } from "~/trpc/react";
+import { decisionRowText } from "~/lib/decision-groups";
 
 type TicketDecision = RouterOutputs["product"]["ticket"]["getById"]["decisions"][number];
 
@@ -147,7 +148,7 @@ function LinkDecisionModal({
     const taken = new Set(linkedIds);
     return (candidates ?? [])
       .filter((d) => !taken.has(d.id))
-      .map((d) => ({ value: d.id, label: `${d.label} — ${d.statement}` }));
+      .map((d) => ({ value: d.id, label: `${d.label} — ${decisionRowText(d)}` }));
   }, [candidates, linkedIds]);
 
   const close = () => {

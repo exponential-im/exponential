@@ -163,6 +163,20 @@ describe("generateDraftDecisions", () => {
       })) as never);
   });
 
+  it("writes the extracted title on the draft, and null when the model wrote none", async () => {
+    extractFromTranscript.mockResolvedValue(
+      transcriptRun([
+        candidate({ title: "Prioritisation leaves standups" }),
+        candidate({ statement: "Invoices migrate onto Stripe billing", title: undefined }),
+      ]),
+    );
+
+    await generateDraftDecisions(db, "m1", "u-dev");
+
+    const titles = db.decision.create.mock.calls.map((call) => (call[0].data as { title: unknown }).title);
+    expect(titles).toEqual(["Prioritisation leaves standups", null]);
+  });
+
   it("refuses without edit access to the meeting", async () => {
     accessMock.canEdit = false;
     const result = await generateDraftDecisions(db, "m1", "stranger");

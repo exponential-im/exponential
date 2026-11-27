@@ -37,6 +37,12 @@ import { maskTokenLike } from "~/server/utils/redactToolArgs";
 
 /** One extracted decision, before anyone has confirmed it. */
 export interface DecisionCandidate {
+  /**
+   * The outcome in six words or fewer ("Text place beats Dataminr location"),
+   * the row text in every decision list. Absent when the model wrote none;
+   * lists then fall back to the statement.
+   */
+  title?: string;
   statement: string;
   /**
    * True when the group raised something and did NOT settle it. The caller
@@ -188,6 +194,7 @@ export function chunkText(text: string, maxChars: number = MAX_CHARS_PER_CHUNK):
 const bulletList = z.array(z.string().min(1)).optional();
 
 const transcriptItemSchema = z.object({
+  title: z.string().optional().nullable(),
   statement: z.string().min(1),
   isOpenQuestion: z.boolean().optional(),
   context: bulletList,
@@ -206,6 +213,7 @@ const transcriptActionItemSchema = z.object({
 });
 
 const notesItemSchema = z.object({
+  title: z.string().optional().nullable(),
   statement: z.string().min(1),
   isOpenQuestion: z.boolean().optional(),
   context: bulletList,
@@ -595,7 +603,7 @@ export function buildDecisionSystemPrompt(): string {
     "You extract DECISIONS, OPEN QUESTIONS and ACTION ITEMS from a meeting transcript. A decision is something the group settled: a choice made, a direction agreed, a question answered, a rule adopted. An open question is something the group explicitly raised and left unresolved, and that they clearly intend to settle later. An action item is a concrete task that someone will do.",
     "The transcript is given as numbered turns, one per line, in the form [index] Speaker: text.",
     "Return ONLY valid JSON matching this schema:",
-    '{"decisions":[{"statement":"...", "context":["..."], "alternatives":["..."], "consequences":["..."], "deciderNames":["..."], "evidenceTurnIndices":[12, 13], "resolvesDecisionId":"..."}], "openQuestions":[{"statement":"...?", "context":["..."], "alternatives":["..."], "deciderNames":["..."], "evidenceTurnIndices":[20]}], "actionItems":[{"text":"...", "assigneeName":"...", "dueDateText":"...", "evidenceTurnIndices":[31]}]}',
+    '{"decisions":[{"title":"...", "statement":"...", "context":["..."], "alternatives":["..."], "consequences":["..."], "deciderNames":["..."], "evidenceTurnIndices":[12, 13], "resolvesDecisionId":"..."}], "openQuestions":[{"title":"...", "statement":"...?", "context":["..."], "alternatives":["..."], "deciderNames":["..."], "evidenceTurnIndices":[20]}], "actionItems":[{"text":"...", "assigneeName":"...", "dueDateText":"...", "evidenceTurnIndices":[31]}]}',
     "Rules:",
     "- Every item goes in exactly ONE of decisions, openQuestions or actionItems. Tell decisions and action items apart before anything else:",
     "  - If it is clear what the action is — a concrete piece of work someone will do (\"Sam will send the deck to the board\", \"I'll fix the login bug\", \"someone needs to book the venue\") — it is an action item. Return it in actionItems, never in decisions.",
@@ -609,6 +617,7 @@ export function buildDecisionSystemPrompt(): string {
     "- An open question is about the work: a product, design, technical or process question. Meeting logistics and small talk (who is presenting, whether someone can hear, who joins next) are never open questions.",
     "- For a decision, write the statement as one declarative sentence in the present tense (e.g. \"Prioritisation debates are parked for the prioritisation ceremony\"), without \"we decided\" or \"agreed to\".",
     "- For an open question, write the statement as the question itself, ending in a question mark (e.g. \"Which stakeholders should receive the roadmap before each cycle?\").",
+    "- title: the outcome in six words or fewer, written so a reader can scan a list of them (e.g. \"Text place beats Dataminr location\", \"Roadmap goes to stakeholders first\"). State the outcome, not the topic: \"Pricing\" is a topic, \"Pricing stays per seat\" is an outcome. For an open question, the title names what is undecided (e.g. \"Who receives the roadmap\"). No trailing full stop.",
     "- evidenceTurnIndices MUST list the [index] numbers of the turns that show the decision being made or agreed, or the question being raised. Use only indices that appear in the transcript you were given. A decision with no supporting turn must not be returned.",
     "- deciderNames are the speakers who made or agreed the decision, or raised the question, as their names appear in the transcript.",
     "- context, alternatives and consequences are ARRAYS OF SHORT BULLETS, never paragraphs. Each entry is one point, a sentence at most, written to be read at a glance. Omit an array entirely when the conversation did not cover it; never pad it.",
@@ -665,10 +674,11 @@ export function buildNotesDecisionSystemPrompt(): string {
   return [
     "You extract DECISIONS and OPEN QUESTIONS from written meeting notes. A decision is something the group settled. An open question is something the group raised and left unresolved.",
     "Return ONLY valid JSON matching this schema:",
-    '{"decisions":[{"statement":"...", "context":["..."], "consequences":["..."], "deciderNames":["..."]}], "openQuestions":[{"statement":"...?", "context":["..."], "alternatives":["..."], "deciderNames":["..."]}]}',
+    '{"decisions":[{"title":"...", "statement":"...", "context":["..."], "consequences":["..."], "deciderNames":["..."]}], "openQuestions":[{"title":"...", "statement":"...?", "context":["..."], "alternatives":["..."], "deciderNames":["..."]}]}',
     "Rules:",
     '- If the notes contain an explicit decisions list (e.g. under a heading like "Decisions" or "Key Decisions", or lines starting with "Decision:" / "Agreed:"), EVERY item in it is a decision and MUST be extracted. Do not skip, merge, or summarize items.',
     "- Preserve the author's wording near-verbatim. Only strip list markers, the \"Decision:\" prefix and trailing punctuation.",
+    "- title: your own words (the statement keeps the author's): the outcome in six words or fewer, written so a reader can scan a list of them (e.g. \"Text place beats Dataminr location\", \"Roadmap goes to stakeholders first\"). State the outcome, not the topic: \"Pricing\" is a topic, \"Pricing stays per seat\" is an outcome. For an open question, the title names what is undecided (e.g. \"Who receives the roadmap\"). No trailing full stop.",
     "- Indented sub-bullets under an item are its context, not separate decisions. Return them as separate entries in the context array, one per bullet, never joined into a paragraph.",
     "- context and consequences are ARRAYS OF SHORT BULLETS, never paragraphs. Omit an array when the notes do not cover it.",
     "- Every open question the notes record as unresolved MUST be returned in openQuestions, with the statement phrased as the question, ending in a question mark. Signs of one: \"still open\", \"open question\", \"no final answer reached\", \"no decision made\", \"flagged as a question\", \"to be decided\", \"TBD\", \"key question raised\", or options listed without one being chosen.",
@@ -759,6 +769,16 @@ export interface CuratedReview {
 }
 
 /** Trim, drop empties and any list marker the model left in. */
+/** Longest title kept from the model; anything longer is a sentence, not a title. */
+const MAX_TITLE_CHARS = 120;
+
+/** A model-written title, whitespace collapsed and a trailing full stop dropped; undefined when blank or too long. */
+export function cleanTitle(value: string | null | undefined): string | undefined {
+  const title = value?.replace(/\s+/g, " ").trim().replace(/\.$/, "");
+  if (!title || title.length > MAX_TITLE_CHARS) return undefined;
+  return title;
+}
+
 function cleanBullets(values: string[] | undefined): string[] | undefined {
   if (!values) return undefined;
   const out = values
@@ -1001,6 +1021,7 @@ export class DecisionExtractionService {
 
         dedupe.add(key);
         chunkDecisions.push({
+          title: cleanTitle(candidate.title),
           statement,
           isOpenQuestion,
           context: cleanBullets(candidate.context),
@@ -1099,7 +1120,8 @@ export class DecisionExtractionService {
       }
       questionKeys.add(key);
       // The decision's consequences described it as settled; they do not carry over.
-      kept.push({ ...candidate, statement: question, isOpenQuestion: true, consequences: undefined, resolvesDecisionId: undefined });
+      // The title stated a settled outcome; the question has none yet.
+      kept.push({ ...candidate, title: undefined, statement: question, isOpenQuestion: true, consequences: undefined, resolvesDecisionId: undefined });
     });
     console.log(`[DecisionExtraction] Curated review kept ${kept.length} of ${candidates.length} candidate(s)`);
     return { kept, dropped, reviewed: true };
@@ -1173,6 +1195,7 @@ export class DecisionExtractionService {
         if (!key || dedupe.has(key)) continue;
         dedupe.add(key);
         results.push({
+          title: cleanTitle(candidate.title),
           statement,
           isOpenQuestion,
           context: cleanBullets(candidate.context),

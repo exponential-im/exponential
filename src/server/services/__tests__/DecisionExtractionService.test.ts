@@ -23,6 +23,7 @@ import {
   buildNotesDecisionSystemPrompt,
   chunkText,
   chunkTurns,
+  cleanTitle,
   extractNotesDecisionItems,
   MAX_PASSAGE_CHARS,
   MAX_TRANSCRIPT_CHUNKS,
@@ -802,5 +803,25 @@ describe("DecisionExtractionService.reviewCuratedCandidates", () => {
     invokeMock.mockClear();
     expect((await DecisionExtractionService.reviewCuratedCandidates(candidates)).reviewed).toBe(false);
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("decision titles (ticket 1004)", () => {
+  it("asks both extraction passes for a short outcome title", () => {
+    for (const prompt of [buildDecisionSystemPrompt(), buildNotesDecisionSystemPrompt()]) {
+      expect(prompt).toContain('"title":"..."');
+      expect(prompt).toMatch(/six words or fewer/);
+      expect(prompt).toMatch(/outcome, not the topic/);
+    }
+  });
+
+  it("cleans a model-written title: collapses whitespace, drops a trailing full stop", () => {
+    expect(cleanTitle("  Text place   beats Dataminr location. ")).toBe("Text place beats Dataminr location");
+  });
+
+  it("drops a blank title, and one long enough to be a sentence", () => {
+    expect(cleanTitle("   ")).toBeUndefined();
+    expect(cleanTitle(null)).toBeUndefined();
+    expect(cleanTitle("x".repeat(121))).toBeUndefined();
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { decisionRowText } from "~/lib/decision-groups";
 import { Badge, Button, Group, Paper, Stack, Text, UnstyledButton } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconCheck, IconChevronRight, IconGavel, IconPencil, IconX } from "@tabler/icons-react";
@@ -181,9 +182,16 @@ export function DraftDecisionReviewList({
                   Open question
                 </Badge>
               )}
-              <Text fw={500} size="sm" style={{ flex: 1, minWidth: 0 }}>
-                {draft.statement}
-              </Text>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Text fw={500} size="sm">
+                  {decisionRowText(draft)}
+                </Text>
+                {draft.title?.trim() ? (
+                  <Text size="xs" c="dimmed">
+                    {draft.statement}
+                  </Text>
+                ) : null}
+              </div>
             </Group>
             {draft.resolves && (
               <Text size="xs" c="dimmed">

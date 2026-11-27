@@ -509,6 +509,7 @@ export async function generateDraftDecisions(
               number: numbers[index]!,
               createdById: userId,
               transcriptionSessionId: meeting.id,
+              title: candidate.title ?? null,
               statement: candidate.statement,
               body: candidateBody(candidate),
               // An open question is a Decision in OPEN status, not a separate
