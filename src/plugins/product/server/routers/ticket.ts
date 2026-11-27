@@ -9,9 +9,11 @@ import {
   type WorkspaceAccessLevel,
 } from "./product";
 import { getWorkspaceMembership } from "~/server/services/access/resolvers/workspaceResolver";
+import { listForTicket } from "~/server/services/decisions/decisionService";
 import {
   assertWorkspaceScopedRefs,
   assertAssignableUser,
+  buildDecisionAccessWhere,
 } from "~/server/services/access";
 import { Prisma, type PrismaClient } from "@prisma/client";
 import { recordActivity } from "~/server/services/activity/recordActivity";
@@ -479,7 +481,15 @@ export const ticketRouter = createTRPCRouter({
         ticket.product.workspaceId,
         "view",
       );
-      return shapeTicketDetail(ticket);
+      // Linked decisions ride along so `tickets get` (SDK, CLI, MCP) carries
+      // them next to `actions` and `dependsOn`. Through the Decision Log's
+      // resolver: drafts and decisions the caller may not read stay out.
+      const decisions = await listForTicket(
+        ctx.db,
+        buildDecisionAccessWhere(ctx.session.user.id, ticket.product.workspaceId),
+        ticket.id,
+      );
+      return { ...shapeTicketDetail(ticket), decisions };
     }),
 
   /**
@@ -524,8 +534,16 @@ export const ticketRouter = createTRPCRouter({
       ]);
       if (!membership || !ticket) return null;
 
-      const events = await listTicketEvents(ctx.db, product.workspaceId, ticket.id);
-      return { ticket: shapeTicketDetail(ticket), events };
+      // getByRef seeds getById, so it carries the same linked decisions.
+      const [events, decisions] = await Promise.all([
+        listTicketEvents(ctx.db, product.workspaceId, ticket.id),
+        listForTicket(
+          ctx.db,
+          buildDecisionAccessWhere(ctx.session.user.id, product.workspaceId),
+          ticket.id,
+        ),
+      ]);
+      return { ticket: { ...shapeTicketDetail(ticket), decisions }, events };
     }),
 
   /**

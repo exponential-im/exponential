@@ -32,6 +32,7 @@ import {
   IconClock,
   IconCopy,
   IconDots,
+  IconGavel,
   IconFlag,
   IconFlame,
   IconFolder,
@@ -59,6 +60,7 @@ import { PriorityIcon } from "~/app/_components/product/PriorityIcon";
 import { NotionSyncBadge } from "~/app/_components/product/NotionSyncBadge";
 import { TicketNavArrows } from "~/app/_components/product/TicketNavArrows";
 import { TicketDependenciesSection } from "~/app/_components/product/TicketDependenciesSection";
+import { TicketDecisionsSection } from "~/app/_components/product/TicketDecisionsSection";
 import { dependencyProgress } from "~/app/_components/product/dependencyOrdering";
 import { LinkedActionsSection } from "~/app/_components/product/LinkedActionsSection";
 import { LabelsCombobox } from "~/app/_components/product/LabelsCombobox";
@@ -345,6 +347,7 @@ export function TicketDetailClient() {
   });
 
   const [titleValue, setTitleValue] = useState(ticket?.title ?? "");
+  const [linkDecisionOpen, setLinkDecisionOpen] = useState(false);
   const activity = useTicketActivity(ticketId, {
     initialEvents: seed?.events,
     initialEventsUpdatedAt: seedUpdatedAt,
@@ -502,6 +505,12 @@ export function TicketDetailClient() {
                       Copy ID
                     </Menu.Item>
                   )}
+                  <Menu.Item
+                    leftSection={<IconGavel size={14} />}
+                    onClick={() => setLinkDecisionOpen(true)}
+                  >
+                    Link decision
+                  </Menu.Item>
                   <Menu.Divider />
                   <Menu.Item
                     color="red"
@@ -563,6 +572,17 @@ export function TicketDetailClient() {
               funTicketIds={ticket.product.funTicketIds}
             />
           </CollapsibleSection>
+
+          {/* Decisions linked "implemented by" this ticket. Hidden until one
+              is linked; "Link decision" in the ticket menu opens the picker. */}
+          <TicketDecisionsSection
+            ticketId={ticketId}
+            decisions={ticket.decisions ?? []}
+            workspaceId={workspaceId}
+            workspaceSlug={workspace?.slug}
+            linkOpen={linkDecisionOpen}
+            onLinkOpenChange={setLinkDecisionOpen}
+          />
 
         </Stack>
       </div>
