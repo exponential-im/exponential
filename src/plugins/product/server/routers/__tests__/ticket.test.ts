@@ -808,6 +808,7 @@ describe("ticket router — getByRef (mocked)", () => {
     stubMembership(dbMock, true);
     dbMock.ticket.findFirst.mockResolvedValue(ticketRow as never);
     dbMock.workspaceActivityEvent.findMany.mockResolvedValue([]);
+    dbMock.decision.findMany.mockResolvedValue([] as never);
   });
 
   const ref = { workspaceSlug: "clear-ws", productSlug: "clear", identifier: "47" };
@@ -869,6 +870,85 @@ describe("ticket router — getByRef (mocked)", () => {
     const caller = createMockCaller({ userId: callerId, db: dbMock });
     await expect(caller.product.ticket.getByRef(ref)).resolves.toBeNull();
     expect(dbMock.workspaceActivityEvent.findMany).not.toHaveBeenCalled();
+    expect(dbMock.decision.findMany).not.toHaveBeenCalled();
+  });
+
+  it("carries the linked decisions, like getById, so it can seed that cache", async () => {
+    dbMock.decision.findMany.mockResolvedValue([
+      { id: "dec-3", number: 3, statement: "Ship it", status: "ACCEPTED", decidedAt: null, links: [{ id: "link-3" }] },
+    ] as never);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const result = await caller.product.ticket.getByRef(ref);
+
+    expect(result?.ticket.decisions).toEqual([
+      { id: "dec-3", number: 3, statement: "Ship it", status: "ACCEPTED", decidedAt: null, label: "D-0003", linkId: "link-3" },
+    ]);
+    const where = dbMock.decision.findMany.mock.calls[0]![0]!.where as { AND: Array<Record<string, unknown>> };
+    expect(where.AND[1]).toEqual({ links: { some: { ticketId: "ticket-47" } } });
+  });
+});
+
+/**
+ * The Decisions section on the ticket page, and `tickets get` in the SDK, CLI
+ * and MCP, read linked decisions off getById. They go through the Decision
+ * Log's resolver: drafts never surface, and a non-member reads nothing.
+ */
+describe("ticket router — getById linked decisions (mocked)", () => {
+  let dbMock: DeepMockProxy<PrismaClient>;
+  const ticketRow = {
+    id: "ticket-1630",
+    number: 1630,
+    status: "IN_PROGRESS",
+    product: { id: productId, slug: "clear", workspaceId, name: "Clear", funTicketIds: false },
+    depsOut: [],
+    depsIn: [],
+  };
+
+  beforeEach(() => {
+    dbMock = getDbMock();
+    mockReset(dbMock);
+    stubMembership(dbMock, true);
+    dbMock.ticket.findUnique.mockResolvedValue(ticketRow as never);
+    dbMock.decision.findMany.mockResolvedValue([
+      { id: "dec-259", number: 259, statement: "Use the shared store", status: "ACCEPTED", decidedAt: new Date("2026-11-20T00:00:00.000Z"), links: [{ id: "link-259" }] },
+      { id: "dec-280", number: 280, statement: "Which region first?", status: "OPEN", decidedAt: null, links: [{ id: "link-280" }] },
+    ] as never);
+  });
+
+  it("returns the decisions next to actions and dependsOn, labelled and with their link id", async () => {
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    const ticket = await caller.product.ticket.getById({ id: "ticket-1630" });
+
+    expect(ticket.decisions.map((d) => [d.label, d.status, d.linkId])).toEqual([
+      ["D-0259", "ACCEPTED", "link-259"],
+      ["D-0280", "OPEN", "link-280"],
+    ]);
+    expect(ticket.decisions[0]).not.toHaveProperty("links");
+  });
+
+  it("filters through the Decision Log's resolver, so drafts never reach the ticket", async () => {
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await caller.product.ticket.getById({ id: "ticket-1630" });
+
+    const args = dbMock.decision.findMany.mock.calls[0]![0]!;
+    const where = args.where as { AND: Array<Record<string, unknown>> };
+    const accessWhere = where.AND[0] as { workspaceId: string; reviewState: string; OR: unknown[] };
+    expect(accessWhere.workspaceId).toBe(workspaceId);
+    expect(accessWhere.reviewState).toBe("CONFIRMED");
+    expect(accessWhere.OR).toHaveLength(3);
+    expect(where.AND[1]).toEqual({ links: { some: { ticketId: "ticket-1630" } } });
+    // Only this ticket's link row comes back, for removing it.
+    expect(args.select).toMatchObject({ links: { where: { ticketId: "ticket-1630" } } });
+    expect(args.orderBy).toEqual([{ number: "asc" }]);
+  });
+
+  it("denies a non-member before reading any decision", async () => {
+    stubMembership(dbMock, false);
+
+    const caller = createMockCaller({ userId: callerId, db: dbMock });
+    await expect(caller.product.ticket.getById({ id: "ticket-1630" })).rejects.toThrow();
+    expect(dbMock.decision.findMany).not.toHaveBeenCalled();
   });
 });
 

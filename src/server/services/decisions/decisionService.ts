@@ -1556,6 +1556,39 @@ export async function listForFeature(
 }
 
 /**
+ * Decisions linked "implemented by" one ticket, for the ticket page's
+ * Decisions section and `product.ticket.getById` (so `tickets get` carries
+ * them next to `actions` and `dependsOn`). Same resolver clause as the
+ * Decision Log, so drafts and decisions the caller may not see never surface
+ * on the ticket. `linkId` is the DecisionLink row, for removing the link.
+ */
+export async function listForTicket(
+  db: PrismaClient,
+  accessWhere: Prisma.DecisionWhereInput,
+  ticketId: string,
+) {
+  const rows = await db.decision.findMany({
+    where: { AND: [accessWhere, { links: { some: { ticketId } } }] },
+    select: {
+      id: true,
+      number: true,
+      statement: true,
+      status: true,
+      decidedAt: true,
+      links: { where: { ticketId }, select: { id: true } },
+    },
+    orderBy: [{ number: "asc" }],
+  });
+  return rows.map(({ links, ...row }) => ({
+    ...row,
+    label: formatDecisionLabel(row.number),
+    linkId: links[0]?.id ?? null,
+  }));
+}
+
+export type TicketDecision = Awaited<ReturnType<typeof listForTicket>>[number];
+
+/**
  * Decisions formalised as one ADR ("Decided in" on the ADR page). Goes
  * through the caller's resolver clause like every other bulk read.
  */
