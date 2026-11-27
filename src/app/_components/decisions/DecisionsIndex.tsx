@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useMemo, useState, type ReactNode } from "react";
+import { decisionRowText } from "~/lib/decision-groups";
 import { Menu, Skeleton } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import {
@@ -320,7 +321,10 @@ function DecisionLogRow({
     >
       <span className="dec-label">{decision.label}</span>
       <span className="dec-main">
-        <span className="dec-title">{decision.statement}</span>
+        <span className="dec-title">{decisionRowText(decision)}</span>
+        {decision.title?.trim() ? (
+          <span className="dec-statement">{decision.statement}</span>
+        ) : null}
         {meta.length > 0 ? (
           <span className="dec-meta">
             {meta.map((el, i) => (
@@ -820,7 +824,7 @@ export function DecisionsIndex({
     for (const decision of decisions ?? []) {
       previews.set(`decision-${decision.id}`, {
         label: decision.label,
-        title: decision.statement,
+        title: decisionRowText(decision),
         badge: decisionStatusBadge(decision.status),
       });
     }

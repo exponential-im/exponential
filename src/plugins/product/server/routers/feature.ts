@@ -340,6 +340,12 @@ export const featureRouter = createTRPCRouter({
               },
             },
           },
+          // Lean scope rows, so a picker can link a decision to a scope
+          // without a getById per feature (ticket 1004).
+          scopes: {
+            orderBy: { displayOrder: "asc" },
+            select: { id: true, version: true, description: true },
+          },
           _count: {
             select: { scopes: true, requirements: true, tickets: true },
           },

@@ -38,6 +38,7 @@ import { canEditDecision, getDecisionAccess } from "~/server/services/access/res
 import { buildActionEditWhere } from "~/server/services/access/resolvers/actionResolver";
 import type { Principal } from "~/server/services/access/principal";
 import { isCompareAndSetMiss } from "~/server/services/revisions/revisionConflict";
+import { decisionGroupLinksSelect } from "~/server/services/decisions/decisionGroupLinks";
 
 export interface DecisionDeciderInput {
   userId?: string | null;
@@ -45,9 +46,17 @@ export interface DecisionDeciderInput {
   email?: string | null;
 }
 
+/** Blank or whitespace-only titles are stored as null, so readers fall back to the statement. */
+export function normaliseDecisionTitle(title: string | null | undefined): string | null {
+  const trimmed = title?.trim();
+  return trimmed ? trimmed : null;
+}
+
 export interface CreateDecisionInput {
   workspaceId: string;
   createdById: string;
+  /** The outcome in six words or fewer. Optional; readers fall back to `statement`. */
+  title?: string | null;
   statement: string;
   body?: string | null;
   status?: DecisionStatus;
@@ -119,12 +128,12 @@ export const decisionDetailInclude = {
   project: { select: { id: true, name: true, slug: true } },
   goal: { select: { id: true, title: true } },
   keyResult: { select: { id: true, title: true } },
-  supersededBy: { select: { id: true, number: true, statement: true, status: true } },
+  supersededBy: { select: { id: true, number: true, title: true, statement: true, status: true } },
   supersedes: {
     // A resolution draft points at its target through `supersededById`
     // until confirm; it is not a superseded decision and must not list here.
     where: { reviewState: "CONFIRMED" },
-    select: { id: true, number: true, statement: true, status: true },
+    select: { id: true, number: true, title: true, statement: true, status: true },
     orderBy: { number: "asc" },
   },
   adrDocument: {
@@ -143,6 +152,15 @@ export const decisionDetailInclude = {
         },
       },
       feature: { select: { id: true, name: true, status: true } },
+      scope: {
+        select: {
+          id: true,
+          version: true,
+          description: true,
+          status: true,
+          feature: { select: { id: true, name: true } },
+        },
+      },
       // Everything the shared Actions block renders for a row.
       action: {
         select: {
@@ -348,6 +366,7 @@ export async function createDecision(db: PrismaClient, input: CreateDecisionInpu
       data: {
         workspaceId: input.workspaceId,
         number: counter.decisionCounter,
+        title: normaliseDecisionTitle(input.title),
         statement: input.statement.trim(),
         body: input.body?.trim() ? input.body : null,
         status: input.status ?? "PROPOSED",
@@ -402,7 +421,7 @@ export async function createDecision(db: PrismaClient, input: CreateDecisionInpu
     entityId: decision.id,
     action: "created",
     metadata: {
-      title: `${formatDecisionLabel(decision.number)} ${decision.statement}`,
+      title: activityTitle(decision),
       label: formatDecisionLabel(decision.number),
       status: decision.status,
       source: decision.source,
@@ -419,11 +438,13 @@ export async function createDecision(db: PrismaClient, input: CreateDecisionInpu
   return decision;
 }
 
+
 /** The list row shape: enough for the Decision Log and the meeting summary tab. */
 export const decisionListSelect = {
   id: true,
   workspaceId: true,
   number: true,
+  title: true,
   statement: true,
   status: true,
   source: true,
@@ -472,7 +493,7 @@ export interface ListDecisionsFilter {
   projectId?: string;
   /** Decisions logged as outputs of one ceremony occurrence (ADR-0059). */
   occurrenceId?: string;
-  /** Free-text search over statement and body. */
+  /** Free-text search over title, statement and body. */
   search?: string;
   /** One decision by its workspace sequence number — resolves a `D-0003` label. */
   number?: number;
@@ -517,6 +538,7 @@ export async function listForWorkspace(
         search
           ? {
               OR: [
+                { title: { contains: search, mode: "insensitive" } },
                 { statement: { contains: search, mode: "insensitive" } },
                 { body: { contains: search, mode: "insensitive" } },
               ],
@@ -561,7 +583,7 @@ export async function listForMeeting(
       // A draft that resolves an open decision points at it through
       // `supersededById` until confirm applies the status change (V2), so
       // the review surfaces name the target.
-      supersededBy: { select: { id: true, number: true, statement: true, status: true } },
+      supersededBy: { select: { id: true, number: true, title: true, statement: true, status: true } },
     },
     orderBy: [{ number: "asc" }],
   });
@@ -590,6 +612,8 @@ export interface CreateDraftDecisionInput {
   number?: number;
   createdById: string;
   transcriptionSessionId: string;
+  /** The outcome in six words or fewer; null when extraction wrote none. */
+  title?: string | null;
   statement: string;
   body?: string | null;
   status?: DecisionStatus;
@@ -676,6 +700,7 @@ export async function createDraftDecisionInTx(
       data: {
         workspaceId: input.workspaceId,
         number,
+        title: normaliseDecisionTitle(input.title),
         statement: input.statement.trim(),
         body: input.body?.trim() ? input.body : null,
         status: input.status ?? "ACCEPTED",
@@ -698,7 +723,7 @@ export async function createDraftDecisionInTx(
             }
           : undefined,
       },
-      select: { id: true, number: true, statement: true, supersededById: true },
+      select: { id: true, number: true, title: true, statement: true, supersededById: true },
     });
   }
 }
@@ -708,6 +733,7 @@ const transitionSelect = {
   id: true,
   workspaceId: true,
   number: true,
+  title: true,
   statement: true,
   status: true,
   reviewState: true,
@@ -717,8 +743,8 @@ const transitionSelect = {
   transcriptionSessionId: true,
 } satisfies Prisma.DecisionSelect;
 
-function activityTitle(decision: { number: number; statement: string }): string {
-  return `${formatDecisionLabel(decision.number)} ${decision.statement}`;
+function activityTitle(decision: { number: number; title?: string | null; statement: string }): string {
+  return `${formatDecisionLabel(decision.number)} ${decision.title ?? decision.statement}`;
 }
 
 /**
@@ -814,6 +840,8 @@ async function claimDeciderWrite(
 }
 
 export interface UpdateDecisionPatch {
+  /** Null clears it, so the decision reads by its statement again. */
+  title?: string | null;
   statement?: string;
   body?: string | null;
   decidedAt?: Date | null;
@@ -832,7 +860,7 @@ export interface UpdateDecisionPatch {
  * Scope and links (owner, product, project, objective, key result, ADR) are
  * filing, not the decision itself, and stay open to agents (ADR-0016).
  */
-const COMMITMENT_FIELDS = ["statement", "body", "decidedAt"] as const satisfies ReadonlyArray<
+const COMMITMENT_FIELDS = ["title", "statement", "body", "decidedAt"] as const satisfies ReadonlyArray<
   keyof UpdateDecisionPatch
 >;
 
@@ -889,6 +917,7 @@ export async function updateDecision(
         ...(guardsCommitment ? { reviewState: { not: "CONFIRMED" as const } } : {}),
       },
     data: {
+      ...(patch.title !== undefined ? { title: normaliseDecisionTitle(patch.title) } : {}),
       ...(patch.statement !== undefined ? { statement: patch.statement.trim() } : {}),
       ...(patch.body !== undefined ? { body: patch.body?.trim() ? patch.body : null } : {}),
       ...(patch.decidedAt !== undefined ? { decidedAt: patch.decidedAt } : {}),
@@ -1451,11 +1480,12 @@ export interface LinkEntityInput {
   userId: string;
   ticketId?: string | null;
   featureId?: string | null;
+  scopeId?: string | null;
   actionId?: string | null;
 }
 
 /**
- * "Implemented by": link a ticket, feature or action to a decision
+ * "Implemented by": link a ticket, feature, scope or action to a decision
  * (DecisionLink mirrors AdrTicketLink). Idempotent — an existing link is
  * returned, and a race past the findFirst is settled by the DB unique.
  */
@@ -1464,6 +1494,7 @@ export async function linkEntity(db: PrismaClient, input: LinkEntityInput) {
     decisionId: input.decisionId,
     ticketId: input.ticketId ?? null,
     featureId: input.featureId ?? null,
+    scopeId: input.scopeId ?? null,
     actionId: input.actionId ?? null,
   };
   const existing = await db.decisionLink.findFirst({ where });
@@ -1529,8 +1560,8 @@ export async function unlinkEntity(db: PrismaClient, input: { linkId: string; wo
 }
 
 /**
- * Decisions linked "implemented by" one feature, for the feature page's
- * Decisions section. Goes through the caller's resolver clause like every
+ * Decisions linked "implemented by" one feature or one of its scopes, for
+ * the feature page's Decisions section. Goes through the caller's resolver clause like every
  * other bulk read, so drafts and decisions the caller may not see never
  * surface on the feature.
  */
@@ -1540,12 +1571,20 @@ export async function listForFeature(
   featureId: string,
 ) {
   const rows = await db.decision.findMany({
-    where: { AND: [accessWhere, { links: { some: { featureId } } }] },
-    select: decisionListSelect,
+    where: {
+      AND: [
+        accessWhere,
+        // Linked to the feature itself, or to one of its scopes.
+        { links: { some: { OR: [{ featureId }, { scope: { featureId } }] } } },
+      ],
+    },
+    select: { ...decisionListSelect, links: decisionGroupLinksSelect },
     orderBy: [{ number: "asc" }],
   });
   return rows.map((row) => ({
     ...row,
+    // The scope of this feature the decision is linked to, for the row's tag.
+    scope: row.links.find((l) => l.scope?.feature.id === featureId)?.scope ?? null,
     tags: row.tags.map((t) => t.tag),
     label: formatDecisionLabel(row.number),
     evidenceCount: Array.isArray(row.evidence) ? row.evidence.length : 0,

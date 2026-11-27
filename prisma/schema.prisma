@@ -5730,6 +5730,8 @@ model FeatureScope {
   tickets      Ticket[]         @relation("TicketScope")
   pages        FeaturePage[]
   comments     FeatureComment[]
+  /// Decisions "implemented by" this scope.
+  decisionLinks DecisionLink[]
 
   @@index([featureId])
 }
@@ -6684,6 +6686,9 @@ model Decision {
   /// From `Workspace.decisionCounter`; rendered as `D-` + zero-padded number,
   /// never stored as a label.
   number                 Int
+  /// The outcome in six words or fewer ("Text place beats Dataminr location").
+  /// Null on rows logged before titles; readers fall back to `statement`.
+  title                  String?
   statement              String
   /// Markdown (ADR-0017) with ADR headings (context, alternatives, consequences).
   body                   String?             @db.Text
@@ -6775,28 +6780,32 @@ model DecisionDecider {
   @@index([userId])
 }
 
-/// "Implemented by" links to tickets, features and actions (mirrors
-/// `AdrTicketLink`). Exactly one of the three target columns is set per row.
+/// "Implemented by" links to tickets, features, scopes and actions (mirrors
+/// `AdrTicketLink`). Exactly one of the four target columns is set per row.
 model DecisionLink {
   id          String   @id @default(cuid())
   decisionId  String
   ticketId    String?
   featureId   String?
+  scopeId     String?
   actionId    String?
   createdById String
   createdAt   DateTime @default(now())
 
-  decision  Decision @relation(fields: [decisionId], references: [id], onDelete: Cascade)
-  ticket    Ticket?  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
-  feature   Feature? @relation(fields: [featureId], references: [id], onDelete: Cascade)
-  action    Action?  @relation(fields: [actionId], references: [id], onDelete: Cascade)
-  createdBy User     @relation("DecisionLinkCreatedBy", fields: [createdById], references: [id])
+  decision  Decision      @relation(fields: [decisionId], references: [id], onDelete: Cascade)
+  ticket    Ticket?       @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  feature   Feature?      @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  scope     FeatureScope? @relation(fields: [scopeId], references: [id], onDelete: Cascade)
+  action    Action?       @relation(fields: [actionId], references: [id], onDelete: Cascade)
+  createdBy User          @relation("DecisionLinkCreatedBy", fields: [createdById], references: [id])
 
   @@unique([decisionId, ticketId])
   @@unique([decisionId, featureId])
+  @@unique([decisionId, scopeId])
   @@unique([decisionId, actionId])
   @@index([ticketId])
   @@index([featureId])
+  @@index([scopeId])
   @@index([actionId])
 }
 

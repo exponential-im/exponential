@@ -51,6 +51,8 @@ export interface MeetingDecision {
   id: string;
   /** `D-0042` — rendered from the workspace sequence, never stored. */
   label: string;
+  /** The outcome in six words or fewer; null on rows logged before titles. */
+  title: string | null;
   statement: string;
   status: MeetingDecisionStatus;
   decidedAt: Date | string | null;
@@ -79,6 +81,7 @@ export interface MeetingDraftDecision extends MeetingDecision {
 export interface MeetingDecisionInput {
   id: string;
   label: string;
+  title?: string | null;
   statement: string;
   status: MeetingDecisionStatus;
   decidedAt: Date | string | null;
@@ -203,6 +206,7 @@ export function meetingDraftsFromRows(rows: MeetingDecisionInput[]): MeetingDraf
     .map((d) => ({
       id: d.id,
       label: d.label,
+      title: d.title ?? null,
       statement: d.statement,
       status: d.status,
       decidedAt: d.decidedAt,
@@ -272,6 +276,7 @@ export function buildMeetingViewModel(
   const toDecision = (d: MeetingDecisionInput): MeetingDecision => ({
     id: d.id,
     label: d.label,
+    title: d.title ?? null,
     statement: d.statement,
     status: d.status,
     decidedAt: d.decidedAt,

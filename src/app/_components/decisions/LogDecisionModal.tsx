@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { DecisionTitleInput } from "~/app/_components/decisions/DecisionTitleInput";
 import {
   ActionIcon,
   Button,
@@ -75,6 +76,7 @@ export function LogDecisionModal({
   onCreated,
 }: LogDecisionModalProps) {
   const utils = api.useUtils();
+  const [title, setTitle] = useState("");
   const [statement, setStatement] = useState("");
   const [body, setBody] = useState("");
   const [status, setStatus] = useState<CreatableStatus>("ACCEPTED");
@@ -90,6 +92,7 @@ export function LogDecisionModal({
   // meeting happened and everyone who was in the room.
   useEffect(() => {
     if (!opened) return;
+    setTitle("");
     setStatement("");
     setBody("");
     setStatus("ACCEPTED");
@@ -154,6 +157,7 @@ export function LogDecisionModal({
       : undefined;
     create.mutate({
       workspaceId,
+      title: title.trim() ? title.trim() : null,
       statement: statement.trim(),
       body: body.trim() ? body : null,
       status,
@@ -176,12 +180,13 @@ export function LogDecisionModal({
       closeOnClickOutside={false}
     >
       <Stack gap="md">
+        <DecisionTitleInput value={title} onChange={setTitle} onSubmitShortcut={submit} autoFocus />
         <TextInput
           label="Decision"
+          description="One sentence: what changes for the product or its users."
           placeholder="One line: what was decided"
           value={statement}
           onChange={(e) => setStatement(e.currentTarget.value)}
-          data-autofocus
           required
           maxLength={500}
           onKeyDown={(e) => {

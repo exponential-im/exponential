@@ -582,6 +582,8 @@ export const decisionRouter = createTRPCRouter({
     .input(
       z.object({
         workspaceId: z.string(),
+        /** The outcome in six words or fewer. Optional; lists fall back to the statement. */
+        title: z.string().trim().max(120).nullable().optional(),
         statement: z.string().trim().min(1).max(500),
         body: z.string().max(20_000).nullable().optional(),
         status: decisionStatusSchema.optional(),
@@ -699,6 +701,8 @@ export const decisionRouter = createTRPCRouter({
       z.object({
         workspaceId: z.string(),
         decisionId: z.string(),
+        /** The outcome in six words or fewer. Null clears it. */
+        title: z.string().trim().max(120).nullable().optional(),
         statement: z.string().trim().min(1).max(500).optional(),
         body: z.string().max(20_000).nullable().optional(),
         decidedAt: z.coerce.date().nullable().optional(),
@@ -800,6 +804,30 @@ export const decisionRouter = createTRPCRouter({
         decisionId: subject.id,
         userId: ctx.session.user.id,
         featureId: feature.id,
+      });
+    }),
+
+  /**
+   * "Implemented by": link a scope of a feature from this workspace's
+   * products. The Pillar page groups decisions by this link (ticket 1004).
+   */
+  linkScope: protectedProcedure
+    .input(z.object({ workspaceId: z.string(), decisionId: z.string(), scopeId: z.string() }))
+    .use(requireWorkspaceMembership("edit"))
+    .mutation(async ({ ctx, input }) => {
+      const subject = await loadDecisionSubject(ctx.db, input.workspaceId, input.decisionId);
+      await ensureDecisionAccess(ctx.db, ctx.session.user.id, subject, "edit");
+      const scope = await ctx.db.featureScope.findFirst({
+        where: { id: input.scopeId, feature: { product: { workspaceId: input.workspaceId } } },
+        select: { id: true },
+      });
+      if (!scope) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Scope not found" });
+      }
+      return linkEntity(ctx.db, {
+        decisionId: subject.id,
+        userId: ctx.session.user.id,
+        scopeId: scope.id,
       });
     }),
 

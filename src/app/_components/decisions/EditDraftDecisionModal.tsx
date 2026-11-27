@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Button, Group, Modal, Stack, Text, TextInput } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { MarkdownInput } from "~/app/_components/shared/MarkdownInput";
+import { DecisionTitleInput } from "~/app/_components/decisions/DecisionTitleInput";
 import { api } from "~/trpc/react";
 import type { MeetingDraftDecision } from "~/lib/meeting-view-model";
 
@@ -16,7 +17,7 @@ interface EditDraftDecisionModalProps {
 }
 
 /**
- * Edit an extracted draft before confirming it: the statement and the
+ * Edit an extracted draft before confirming it: the title, the statement and the
  * Markdown body (ADR-0017). Evidence and deciders stay as extracted — the
  * quote is the point of the draft. Saves through `decision.update`, the
  * same seam the detail page uses.
@@ -28,11 +29,13 @@ export function EditDraftDecisionModal({
   onClose,
   onSaved,
 }: EditDraftDecisionModalProps) {
+  const [title, setTitle] = useState("");
   const [statement, setStatement] = useState("");
   const [body, setBody] = useState("");
 
   useEffect(() => {
     if (draft) {
+      setTitle(draft.title ?? "");
       setStatement(draft.statement);
       setBody(draft.body ?? "");
     }
@@ -57,13 +60,14 @@ export function EditDraftDecisionModal({
             Draft {draft.label}. The transcript quotes stay attached; confirm afterwards to log it.
           </Text>
         )}
+        <DecisionTitleInput value={title} onChange={setTitle} autoFocus />
         <TextInput
           label="Decision"
+          description="One sentence: what changes for the product or its users."
           value={statement}
           onChange={(event) => setStatement(event.currentTarget.value)}
           maxLength={500}
           required
-          data-autofocus
         />
         <div>
           <Text size="sm" fw={500} mb={4}>
@@ -87,6 +91,7 @@ export function EditDraftDecisionModal({
               updateMutation.mutate({
                 workspaceId,
                 decisionId: draft.id,
+                title: title.trim() ? title.trim() : null,
                 statement: trimmed,
                 body: body.trim() ? body : null,
               });

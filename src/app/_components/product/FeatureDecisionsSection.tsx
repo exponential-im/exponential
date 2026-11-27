@@ -5,10 +5,12 @@ import { Badge, Text } from "@mantine/core";
 import { api } from "~/trpc/react";
 import { CollapsibleSection } from "~/app/_components/product/CollapsibleSection";
 import { decisionStatusBadge } from "~/app/_components/decisions/DetailPreview";
+import { decisionRowText } from "~/lib/decision-groups";
 
 /**
  * The Decisions block for a feature - decisions linked "implemented by" it
- * (ADR-0060). Grouped by status rather than by a link type: an OPEN decision
+ * or one of its scopes (ADR-0060); a scope-linked row carries the scope's
+ * version. Grouped by status rather than by a link type: an OPEN decision
  * linked to a feature reads as a question raised on it, everything else as a
  * decision the feature carries out.
  *
@@ -66,8 +68,11 @@ export function FeatureDecisionsSection({
 interface DecisionRow {
   id: string;
   label: string;
+  title: string | null;
   statement: string;
   status: string;
+  /** The feature's scope this decision is linked to, if any (ticket 1004). */
+  scope: { version: string } | null;
 }
 
 function DecisionGroup({
@@ -98,9 +103,21 @@ function DecisionGroup({
               <Text size="xs" className="text-text-muted font-mono w-14 shrink-0">
                 {decision.label}
               </Text>
-              <Text size="sm" className="text-text-primary flex-1 min-w-0" lineClamp={1}>
-                {decision.statement}
-              </Text>
+              <div className="flex-1 min-w-0">
+                <Text size="sm" className="text-text-primary" lineClamp={1}>
+                  {decisionRowText(decision)}
+                </Text>
+                {decision.title?.trim() ? (
+                  <Text size="xs" className="text-text-muted" lineClamp={1}>
+                    {decision.statement}
+                  </Text>
+                ) : null}
+              </div>
+              {decision.scope ? (
+                <Badge size="xs" variant="outline" color="gray" className="shrink-0">
+                  {decision.scope.version}
+                </Badge>
+              ) : null}
               <Badge size="xs" variant="light" color={badge.color} className="shrink-0">
                 {badge.label}
               </Badge>
