@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { Badge, Text } from "@mantine/core";
+import { ActionIcon, Badge, Text, Tooltip } from "@mantine/core";
+import { IconX } from "@tabler/icons-react";
 import { api } from "~/trpc/react";
 import { CollapsibleSection } from "~/app/_components/product/CollapsibleSection";
 import { decisionStatusBadge } from "~/app/_components/decisions/DetailPreview";
@@ -65,24 +66,42 @@ export function FeatureDecisionsSection({
   );
 }
 
-interface DecisionRow {
+export interface DecisionRow {
   id: string;
   label: string;
-  title: string | null;
+  /** The outcome in six words or fewer; the row text when set (ticket 1004). */
+  title?: string | null;
   statement: string;
   status: string;
+  decidedAt?: Date | string | null;
   /** The feature's scope this decision is linked to, if any (ticket 1004). */
-  scope: { version: string } | null;
+  scope?: { version: string } | null;
 }
 
-function DecisionGroup({
+function formatDecidedAt(value: Date | string | null | undefined) {
+  if (!value) return null;
+  return new Date(value).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+/**
+ * One titled group of decision rows - shared by the feature and ticket
+ * pages. `onRemove` adds a hover control that removes the row's link (the
+ * decision itself is untouched).
+ */
+export function DecisionGroup<T extends DecisionRow>({
   title,
   decisions,
   workspaceSlug,
+  onRemove,
 }: {
   title: string;
-  decisions: DecisionRow[];
+  decisions: T[];
   workspaceSlug: string | undefined;
+  onRemove?: (decision: T) => void;
 }) {
   return (
     <div>
@@ -94,11 +113,12 @@ function DecisionGroup({
       <div className="border border-border-primary rounded-lg overflow-hidden">
         {decisions.map((decision, i) => {
           const badge = decisionStatusBadge(decision.status);
+          const decided = formatDecidedAt(decision.decidedAt);
           return (
             <Link
               key={decision.id}
               href={`/w/${workspaceSlug}/decisions/d/${decision.id}`}
-              className={`flex items-center gap-3 px-3 py-2.5 no-underline transition-colors hover:bg-surface-hover ${i < decisions.length - 1 ? "border-b border-border-primary" : ""}`}
+              className={`group flex items-center gap-3 px-3 py-2.5 no-underline transition-colors hover:bg-surface-hover ${i < decisions.length - 1 ? "border-b border-border-primary" : ""}`}
             >
               <Text size="xs" className="text-text-muted font-mono w-14 shrink-0">
                 {decision.label}
@@ -118,9 +138,32 @@ function DecisionGroup({
                   {decision.scope.version}
                 </Badge>
               ) : null}
+              {decided && (
+                <Text size="xs" className="text-text-muted shrink-0">
+                  {decided}
+                </Text>
+              )}
               <Badge size="xs" variant="light" color={badge.color} className="shrink-0">
                 {badge.label}
               </Badge>
+              {onRemove && (
+                <Tooltip label="Remove link" withinPortal>
+                  <ActionIcon
+                    size="sm"
+                    variant="subtle"
+                    color="gray"
+                    aria-label={`Remove link to ${decision.label}`}
+                    className="shrink-0 opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onRemove(decision);
+                    }}
+                  >
+                    <IconX size={14} />
+                  </ActionIcon>
+                </Tooltip>
+              )}
             </Link>
           );
         })}
