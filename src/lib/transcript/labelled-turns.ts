@@ -25,9 +25,10 @@ const META_HEADER_KEYS: ReadonlySet<string> = new Set([
   "duration",
 ]);
 
-/** `Name: ` at the start of a line. Labels start with a letter, may contain a
- *  few inner words, and stop at the first colon (the class excludes `:`). */
-const SPEAKER_RE = /^([A-Za-z][A-Za-z0-9 .'’-]{0,40}):\s*/;
+/** `Name: ` at the start of a line. Labels start with a letter in any script
+ *  (`José García`, `李明`), may contain a few inner words, and stop at the
+ *  first colon (the class excludes `:`). */
+const SPEAKER_RE = /^(\p{L}[\p{L}\p{M}\p{N} .'’-]{0,40}):\s*/u;
 
 /** `[m:ss]` or `[h:mm:ss]` at the start of a line, the shape Granola writes
  *  (`[12:07] Microphone: text`). Minutes run past 59 in the two-part form. */

@@ -65,4 +65,17 @@ describe("turnsToEditableText", () => {
       );
     }
   });
+
+  it("keeps accented and non-Latin speaker names through the round trip", () => {
+    const sentences = [
+      { text: "Welcome everyone.", speaker_name: "José García", start_time: 0 },
+      { text: "Thanks.", speaker_name: "李明", start_time: 4 },
+    ];
+    const turns = parseTranscript(input({ sentencesJson: sentences }));
+    const reparsed = parseTranscript(input({ transcription: turnsToEditableText(turns) }));
+    expect(reparsed.map((t) => [t.speaker, t.text])).toEqual([
+      ["José García", "Welcome everyone."],
+      ["李明", "Thanks."],
+    ]);
+  });
 });
