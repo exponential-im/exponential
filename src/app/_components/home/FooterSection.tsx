@@ -23,6 +23,7 @@ const footerLinks = {
   ],
   company: [
     { label: "Learn", href: "/learn" },
+    { label: "Compare", href: "/compare" },
     { label: "Blog", href: "/blog" },
     { label: "Docs", href: "/docs" },
   ],
